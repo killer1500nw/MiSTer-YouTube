@@ -1,0 +1,14 @@
+The unmodified cacert.pem file was retrieved over verified HTTPS from:
+https://curl.se/ca/cacert.pem
+
+It is Mozilla's CA certificate store converted to PEM by the curl project.
+Source and conversion information: https://curl.se/docs/caextract.html
+Original Mozilla source: https://hg.mozilla.org/projects/nss/raw-file/tip/lib/ckfw/builtins/certdata.txt
+
+The certificate bundle is licensed under the Mozilla Public License 2.0.
+Licence text: https://www.mozilla.org/MPL/2.0/
+The converted source file is supplied in this package as cacert.pem.
+
+This application supplies the bundle to yt-dlp via SSL_CERT_FILE with
+no-certifi compatibility mode, and to FFmpeg via ca_file with TLS verification
+enabled. It does not add certificates to the operating system trust store.

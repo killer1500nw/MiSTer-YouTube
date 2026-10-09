@@ -1,0 +1,8 @@
+* -text
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.bat text eol=crlf
+*.rbf binary
+*.so binary
+*.zip binary

@@ -1,0 +1,29 @@
+Host validation, 8 October 2026
+==============================
+........
+----------------------------------------------------------------------
+Ran 8 tests in 2.717s
+
+OK
+PASS: 10 frames; 320x240 active; 424x262 total; /3 CE; HS32 VS3; black blanking; continuous sync during reset.
+tests/tb_crt240.sv:35: $finish called at 166632000000 (1ps)
+PASS: all 76800 pixels; little endian; double buffering; blanking-only swaps; short/out-of-order/oversized rejection; reset.
+tests/tb_frames.sv:70: $finish called at 115203050000 (1ps)
+PASS: 12 complete A/V records, 8-slot wrap, all PCM samples, atomic commits, late-data silence/restart, EOF, session stop, overrun rejection, disable under backpressure.
+tests/tb_stream.sv:178: $finish called at 270007250000 (1ps)
+PASS: 12 complete A/V records, 8-slot wrap, all PCM samples, atomic commits, late-data silence/restart, EOF, session stop, overrun rejection, disable under backpressure.
+tests/tb_stream.sv:178: $finish called at 270006650000 (1ps)
+PASS: 12 complete A/V records, 8-slot wrap, all PCM samples, atomic commits, late-data silence/restart, EOF, session stop, overrun rejection, disable under backpressure.
+tests/tb_stream.sv:178: $finish called at 487530500000 (1ps)
+PASS: actual emu scanout, full 320x240 RGB565 image, RGB/CE/DE/HS/VS alignment, black blanking.
+tests/tb_scanout.sv:65: $finish called at 48574800000 (1ps)
+PASS: actual emu native 320x240 stream, every displayed pixel, RGB/CE/DE/HS/VS alignment.
+tests/tb_scanout.sv:65: $finish called at 65238000000 (1ps)
+
+Additional checks:
+PASS: distributed ARM helper version 130 emulated under Unicorn; eight slots, all 40000 writes per record, surrounding canaries and invalid arguments.
+PASS: two DMB SY barriers, no vector memory accesses, dynamic dependencies or relocations.
+PASS: Python 3.9 grammar and shell syntax.
+PASS: original CRT timing, full-frame memory, sys framework, PLL and constraints retained.
+
+Not yet verified: Quartus fit/timing or 30fps MiSTer hardware playback.

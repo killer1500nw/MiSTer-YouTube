@@ -1,0 +1,6 @@
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/crt240.sv
+set_global_assignment -name SYSTEMVERILOG_FILE YouTubeCRT.sv
+set_global_assignment -name SDC_FILE YouTubeCRT.sdc
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/frame_store.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/movie_audio.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ddr_stream.sv

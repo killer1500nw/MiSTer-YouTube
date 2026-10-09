@@ -1,0 +1,27 @@
+# Quartus generated files
+**/db/
+**/incremental_db/
+**/output_files/
+**/simulation/
+*.qws
+*.rpt
+*.summary
+*.log
+build-result*.zip
+timing-check.txt
+# Python and editor files
+__pycache__/
+*.py[cod]
+.venv/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+# Local credentials and private playback reports
+.env
+.env.*
+cookies*.txt
+YouTube-url-*.txt
+YouTube-light-*.txt
+# Release packages are uploaded separately
+/release-assets/
