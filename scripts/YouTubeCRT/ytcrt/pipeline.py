@@ -402,7 +402,7 @@ def resolve(rt, profile, video_id, cancel, log, note=None, quality='Auto', cal=N
         log('Resolving %s: using the stream details saved %d min ago' % (video_id, age))
     else:
         log('Resolving %s (%s)' % (video_id, profile.key))
-        raw = capture(resolve_command(rt, profile, url), env, cancel, timeout=900, on_line=on_line)     # the security check can take minutes
+        raw = capture(resolve_command(rt, profile, url), env, cancel, timeout=300, on_line=on_line)     # past this, fail so the user can try again
     out = raw.decode('utf-8', 'replace')
     info = formats = None
     for line in out.splitlines():
