@@ -36,3 +36,5 @@ release/_pc_debug/
 # Simulator screenshots and on-device logs
 sim_out/
 YouTube-crt-log*.txt
+tools/mister_host.txt
+mister-log.txt
