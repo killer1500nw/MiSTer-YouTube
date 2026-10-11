@@ -38,6 +38,7 @@ class Runtime:
         self.ffdir = ffs[-1]
         self.ffmpeg = self.ffdir / 'ffmpeg'
         self.ca = Path(here) / 'cacert.pem'
+        self.resolve_cache = base / 'ytcrt' / 'cache' / 'resolve'      # recent resolves: YouTube's stream URLs last hours
 
     def missing(self):
         return [str(p) for p in (self.resolver, self.qjs, self.ffmpeg, self.ca) if not p.is_file()]
@@ -307,6 +308,51 @@ def step_down(media, profile, cal=None, mult=1.0, log=lambda m: None):
     return None if same or smaller.cost >= cur else smaller
 
 
+RESOLVE_TTL = 3 * 3600      # stream URLs are valid for about six hours; a 403 triggers a fresh resolve anyway
+RESOLVE_KEEP = 40
+
+
+def _resolve_file(rt, video_id):
+    d = getattr(rt, 'resolve_cache', None)
+    if d is None or not re.fullmatch(r'[A-Za-z0-9_-]{11}', str(video_id)):
+        return None
+    return Path(d) / (video_id + '.out')
+
+
+def forget(rt, video_id):
+    """Drop the saved resolve of a video (its stream URLs were refused)."""
+    path = _resolve_file(rt, video_id)
+    try:
+        if path:
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _cache_load(path):
+    try:
+        if path and time.time() - path.stat().st_mtime < RESOLVE_TTL:
+            return path.read_bytes(), int((time.time() - path.stat().st_mtime) / 60)
+    except OSError:
+        pass
+    return None, 0
+
+
+def _cache_store(path, out):
+    if not path:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix('.tmp')
+        tmp.write_bytes(out)
+        os.replace(str(tmp), str(path))
+        files = sorted(path.parent.glob('*.out'), key=lambda f: f.stat().st_mtime)
+        for old in files[:-RESOLVE_KEEP]:
+            old.unlink()
+    except OSError:
+        pass
+
+
 def resolve(rt, profile, video_id, cancel, log, note=None, quality='Auto', cal=None, mult=1.0):
     env = os.environ.copy()
     env.update(SSL_CERT_FILE=str(rt.ca), REQUESTS_CA_BUNDLE=str(rt.ca), CURL_CA_BUNDLE=str(rt.ca))
@@ -320,8 +366,14 @@ def resolve(rt, profile, video_id, cancel, log, note=None, quality='Auto', cal=N
         log('yt-dlp: ' + text[:160])
         if note:
             note(text)
-    log('Resolving %s (%s)' % (video_id, profile.key))
-    out = capture(resolve_command(rt, profile, url), env, cancel, on_line=on_line).decode('utf-8', 'replace')
+    cpath = _resolve_file(rt, video_id)
+    raw, age = _cache_load(cpath)
+    if raw is not None:
+        log('Resolving %s: using the stream details saved %d min ago' % (video_id, age))
+    else:
+        log('Resolving %s (%s)' % (video_id, profile.key))
+        raw = capture(resolve_command(rt, profile, url), env, cancel, on_line=on_line)
+    out = raw.decode('utf-8', 'replace')
     info = formats = None
     for line in out.splitlines():
         line = line.strip()
@@ -330,7 +382,9 @@ def resolve(rt, profile, video_id, cancel, log, note=None, quality='Auto', cal=N
         elif line.startswith('[') and formats is None:
             formats = json.loads(line)
     if info is None or formats is None:
+        forget(rt, video_id)
         raise ValueError('YouTube gave no playable stream (the video may be live, private or restricted).')
+    _cache_store(cpath, raw)
     return media_from(info, formats, profile, quality, cal, mult, log)
 
 

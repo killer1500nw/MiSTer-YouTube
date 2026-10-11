@@ -389,7 +389,8 @@ class App:
         res, err = self.run_job(
             'Loading',
             lambda: [ui.clip(v.get('title', ''), 60),
-                     'Contacting YouTube... %ds' % (time.monotonic() - started), ui.clip(last[0], 60)],
+                     'Contacting YouTube... %ds' % (time.monotonic() - started), ui.clip(last[0], 60)]
+                    + (['This video needs a security check.', 'It can take a few minutes on a MiSTer.'] if 'Solving JS' in last[0] else []),
             lambda check: pipeline.resolve(self.rt, prof, v['id'], check, self.log,
                                            note=lambda t: last.__setitem__(0, t), quality=quality, cal=cal, mult=mult))
         if err:
@@ -446,6 +447,7 @@ class App:
             if outcome == 'refresh':                      # YouTube kept refusing these URLs: ask for fresh ones once
                 refresh_left -= 1
                 self.toast('Refreshing the stream...')
+                pipeline.forget(self.rt, v['id'])             # the saved URLs are what YouTube refused
                 fresh = self._resolve(v, prof, q)
                 if fresh is None:
                     return

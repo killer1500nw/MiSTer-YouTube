@@ -1305,5 +1305,28 @@ class BackgroundHold(unittest.TestCase):
         self.assertFalse(a.feeds.hold.is_set())                   # released even when playback blows up
 
 
+class ResolveCache(unittest.TestCase):
+    def test_a_recent_resolve_is_reused_and_forgotten_on_demand(self):
+        d = Path(tempfile.mkdtemp())
+        rt = type('R', (), {'resolve_cache': d, 'ca': Path('ca'), 'resolver': Path('y'), 'qjs': Path('q'), 'ffdir': Path('.')})()
+        raw = (Path(__file__).parent / 'fixtures' / 'landscape.json').read_bytes()      # the two JSON lines yt-dlp prints
+        calls = []
+        saved = pipeline.capture
+        pipeline.capture = lambda cmd, env, cancel, timeout=300, on_line=None: (calls.append(1), raw)[1]
+        try:
+            vid = 'abcdefghijk'
+            pipeline.resolve(rt, profiles.PROFILE, vid, lambda: None, lambda m: None)
+            pipeline.resolve(rt, profiles.PROFILE, vid, lambda: None, lambda m: None)
+            self.assertEqual(len(calls), 1)                      # the second play did not ask YouTube again
+            pipeline.forget(rt, vid)                             # URLs refused: next time is a fresh resolve
+            pipeline.resolve(rt, profiles.PROFILE, vid, lambda: None, lambda m: None)
+            self.assertEqual(len(calls), 2)
+            os.utime(str(d / (vid + '.out')), (time.time() - 4 * 3600,) * 2)    # too old
+            pipeline.resolve(rt, profiles.PROFILE, vid, lambda: None, lambda m: None)
+            self.assertEqual(len(calls), 3)
+        finally:
+            pipeline.capture = saved
+
+
 if __name__ == '__main__':
     unittest.main()
