@@ -89,6 +89,7 @@ class Feeds:
         self.titles = self._load('titles.json', {})         # video id -> {'title', 'channel'} (+ 'err')
         self.fallback = None   # callable(channel_id) -> [video dicts]: used when RSS keeps failing
         self.fallback_lock = threading.Lock()   # one heavy yt-dlp at a time
+        self.hold = threading.Event()           # set while a video is starting or playing: background jobs wait their turn
         disk = self._load('feeds.json', {})
         for cid, e in disk.items():
             e['ok'] = True
@@ -111,6 +112,11 @@ class Feeds:
             os.replace(tmp, os.path.join(self.cache_dir, name))
         except OSError:
             pass
+
+    def wait_turn(self):
+        """Background work stands aside while a video is starting or playing: that is the core's job."""
+        while self.hold.is_set():
+            time.sleep(0.5)
 
     def _get(self, url, timeout=15, headers=None):
         req = urllib.request.Request(url, headers=dict({'User-Agent': UA}, **(headers or {})))
@@ -187,6 +193,7 @@ class Feeds:
                 cur['name'] = name_override
             self.status[ref] = 'ok, %d videos' % len(cur['videos'])
             return
+        self.wait_turn()
         entry, err = None, None
         for attempt in range(RSS_TRIES):
             try:
@@ -202,6 +209,7 @@ class Feeds:
                     continue
                 break
         if entry is None and self.fallback:
+            self.wait_turn()
             self.log('channel %s: RSS failed (%s); asking yt-dlp instead' % (ref, self._why(err)))
             try:
                 with self.fallback_lock:
@@ -304,6 +312,7 @@ class Feeds:
 
         def run():
             try:
+                self.wait_turn()
                 with self.lock:
                     e = self._entry(kind, ident)
                     have = len(e['videos']) if e else 0
@@ -359,6 +368,7 @@ class Feeds:
                 if not self.playlist_fetch:
                     self.status[pid] = 'yt-dlp is not installed'
                     continue
+                self.wait_turn()
                 try:
                     with self.fallback_lock:
                         title, vids = self.playlist_fetch(pid)
@@ -376,6 +386,7 @@ class Feeds:
             for name, vid in videos:
                 if vid in self.titles and not force and not self.titles[vid].get('err'):
                     continue
+                self.wait_turn()
                 try:
                     self.titles[vid] = self._oembed(vid)
                 except Exception as exc:
@@ -434,6 +445,7 @@ class Feeds:
         return None
 
     def _fetch_thumb(self, vid):
+        self.wait_turn()
         path = os.path.join(self.cache_dir, 'thumbs', vid + '.rgb565')
         data = None
         try:

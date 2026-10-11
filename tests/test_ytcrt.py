@@ -1273,5 +1273,37 @@ class AudioDropout(unittest.TestCase):
         self.assertIn('audio decoder failed', str(cm.exception))
 
 
+class BackgroundHold(unittest.TestCase):
+    """While a video is starting or playing, nothing in the background may compete for the ARM."""
+
+    def test_background_work_waits_until_the_video_is_over(self):
+        import threading
+        f = feeds.Feeds(tempfile.mkdtemp())
+        f.log = lambda m: None
+        started = []
+        f.playlist_fetch = lambda pid: (started.append(pid), ('T', [vid(1)]))[1]
+        f.hold.set()                                              # a video is starting
+        t = f.refresh_lists([(None, 'PL' + 'a' * 32)], [])
+        time.sleep(1.2)
+        self.assertEqual(started, [])                             # nothing began
+        f.hold.clear()                                            # playback over
+        t.join(10)
+        self.assertEqual(len(started), 1)                         # and now it runs
+
+    def test_playing_holds_and_always_releases(self):
+        a = type('A', (), {})()
+        a.feeds = feeds.Feeds(tempfile.mkdtemp())
+        seen = []
+
+        def inner(v, start):
+            seen.append(a.feeds.hold.is_set())
+            raise RuntimeError('boom')
+        a._play = inner
+        with self.assertRaises(RuntimeError):
+            __import__('ytcrt.app', fromlist=['App']).App.play(a, {'id': 'x'}, 0)
+        self.assertEqual(seen, [True])
+        self.assertFalse(a.feeds.hold.is_set())                   # released even when playback blows up
+
+
 if __name__ == '__main__':
     unittest.main()

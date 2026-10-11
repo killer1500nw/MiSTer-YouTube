@@ -400,6 +400,14 @@ class App:
         return res
 
     def play(self, v, start_ms):
+        """Play a video. Background refreshing is paused from here until playback is over."""
+        self.feeds.hold.set()
+        try:
+            self._play(v, start_ms)
+        finally:
+            self.feeds.hold.clear()
+
+    def _play(self, v, start_ms):
         if self.missing_tools():
             return
         prof, speed = self.profile(), self.store.settings['decode_speed']
