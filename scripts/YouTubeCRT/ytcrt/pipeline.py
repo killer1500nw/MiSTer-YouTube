@@ -130,7 +130,7 @@ def resolve_command(rt, profile, url):
     return [rt.resolver, '--ignore-config', '--no-playlist', '--no-progress',
             '--no-cache-dir', '--skip-download', '--print', PRINT_INFO, '--print', PRINT_FORMATS,
             '--extractor-args', 'youtube:skip=translated_subs',
-            '--socket-timeout', '20', '--retries', '1', '--fragment-retries', '1',
+            '--force-ipv4', '--socket-timeout', '20', '--retries', '1', '--fragment-retries', '1',
             '--js-runtimes', 'quickjs:' + str(rt.qjs), '--compat-options', 'no-certifi',
             '--match-filters', '!is_live & !is_upcoming', '--ffmpeg-location', str(rt.ffdir), '--', url]
 
@@ -145,7 +145,7 @@ def channel_uploads(rt, channel_id, cancel=lambda: None, log=lambda m: None, lim
     env = os.environ.copy()
     env.update(SSL_CERT_FILE=str(rt.ca), REQUESTS_CA_BUNDLE=str(rt.ca), CURL_CA_BUNDLE=str(rt.ca))
     cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist', '--playlist-end', str(limit),
-           '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
+           '--force-ipv4', '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
            '--print', PRINT_UPLOAD, '--', 'https://www.youtube.com/playlist?list=UU' + channel_id[2:]]
     out = capture(cmd, env, cancel, timeout=120).decode('utf-8', 'replace')
     now, videos = int(time.time()), []
@@ -180,7 +180,7 @@ def playlist_entries(rt, playlist_id, cancel=lambda: None, log=lambda m: None, l
     env.update(SSL_CERT_FILE=str(rt.ca), REQUESTS_CA_BUNDLE=str(rt.ca), CURL_CA_BUNDLE=str(rt.ca))
     cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist',
            '--playlist-start', str(start), '--playlist-end', str(start + limit - 1),
-           '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
+           '--force-ipv4', '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
            '--print', PRINT_PLAYLIST, '--', 'https://www.youtube.com/playlist?list=' + playlist_id]
     out = capture(cmd, env, cancel, timeout=180).decode('utf-8', 'replace')
     title, videos = '', Page()
