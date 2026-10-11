@@ -127,9 +127,9 @@ LIVE_MESSAGE = 'This is a live or past livestream; those cannot be played here y
 
 
 def resolve_command(rt, profile, url):
-    return [rt.resolver, '--ignore-config', '--no-playlist', '--no-progress',
+    return [rt.resolver, '--ignore-config', '--no-playlist', '--no-progress', '--verbose',     # -v: step lines on stderr, for the log
             '--no-cache-dir', '--skip-download', '--print', PRINT_INFO, '--print', PRINT_FORMATS,
-            '--extractor-args', 'youtube:skip=translated_subs',
+            '--extractor-args', 'youtube:skip=translated_subs,hls',          # the HLS manifest is never used; skipping saves a request
             '--force-ipv4', '--socket-timeout', '20', '--retries', '1', '--fragment-retries', '1',
             '--js-runtimes', 'quickjs:' + str(rt.qjs), '--compat-options', 'no-certifi',
             '--match-filters', '!is_live & !is_upcoming', '--ffmpeg-location', str(rt.ffdir), '--', url]
@@ -306,6 +306,10 @@ def resolve(rt, profile, video_id, cancel, log, note=None, quality='Auto', cal=N
     url = 'https://www.youtube.com/watch?v=' + video_id
 
     def on_line(text):
+        if text.startswith('[debug]') and not re.search(r'player|js|challenge|solv|nsig|po token', text, re.I):
+            return                                  # keep the log to the steps that show where the time goes
+        if text.startswith(('[debug] Command-line', '[debug] Encodings', '[debug] Python', '[debug] Optional')):
+            return
         log('yt-dlp: ' + text[:160])
         if note:
             note(text)
