@@ -25,3 +25,14 @@ YouTube-url-*.txt
 YouTube-light-*.txt
 # Release packages are uploaded separately
 /release-assets/
+
+__pycache__/
+_sim/
+release/_download/
+release/SD_COPY/
+release/*.zip
+release/_pc_debug/
+
+# Simulator screenshots and on-device logs
+sim_out/
+YouTube-crt-log*.txt

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Double-buffered stereo PCM. One 1600-sample segment per two native refreshes.
-// 424 pixels * 262 lines * 3 clocks/pixel * 2 refreshes = 666,528 clocks.
+// 424 pixels * 262 lines * 3 clocks/pixel * 2 refreshes = 666,528 clocks (240p).
+// 480i: 424 * 525 lines * 3 = 667,800 clocks per two fields; the caller selects.
 // Effective source sample rate ~48009.986 Hz; framework handles physical output.
-module movie_audio #(
- parameter integer SEGMENT_CLOCKS=666528
-)(
+module movie_audio (
  input wire clk, reset, commit,
+ input wire [20:0] seg_clocks,
  input wire wr,
  input wire [13:0] addr,
  input wire [7:0] data,
@@ -20,7 +20,7 @@ module movie_audio #(
  reg [20:0] phase=0;
  reg [1:0] fetch=0;
  wire [21:0] next_phase={1'b0,phase}+22'd1600;
- wire sample_tick=next_phase>=SEGMENT_CLOCKS;
+ wire sample_tick=next_phase>=seg_clocks;
  wire [31:0] sample_word=front ? q1 : q0;
  // No reset on the RAM ports: keep this as embedded memory, not registers.
  always @(posedge clk) begin
@@ -43,7 +43,7 @@ module movie_audio #(
   end
   if(active) begin
    if(sample_tick) begin
-    phase<=next_phase-SEGMENT_CLOCKS;
+    phase<=next_phase-seg_clocks;
     if(sample_index==1599) begin
      active<=0;fetch<=0;
      if(!commit) begin left<=0;right<=0;end

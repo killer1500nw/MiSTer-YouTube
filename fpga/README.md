@@ -4,6 +4,12 @@ This experimental build doubles the video rate from 15fps to 30fps while
 keeping the sharp 320×240 picture. Native 240p CRT timing and your component,
 analogue and HDMI output settings remain unchanged. No MiSTer.ini changes.
 
+## How this code was written
+
+The RTL in this repository was written by an LLM working under human direction. The human contribution was research, compiling, running each build on real hardware, finding what broke, and narrowing it down to a root cause.
+
+This is stated up front because it is a fair thing for anyone evaluating the code to know. It is not an endorsement of the approach — draw your own conclusions.
+
 ## First: compile
 
 1. Extract this ZIP into a **new folder** on your Windows PC.

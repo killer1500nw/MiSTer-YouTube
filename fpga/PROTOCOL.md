@@ -42,3 +42,17 @@ mutes after the current audio segment, so resumed audio matches its picture.
 Identity and run command deliberately differ from v0.12 to prevent starting
 a stream with the wrong payload/audio format. Startup retains the tested
 clear-controls and Off/On sequence. No larger DDR reservation is required.
+
+## v0.14-auto additions (FPGA-owned, written every poll)
+
+Identity is now `0x34445459`. A stop command (run word 0 or session 0) also clears a latched error.
+
+| Offset | Meaning |
+| --- | --- |
+| 40 | `joystick_0` from hps_io: bits 0-3 right/left/down/up, then A, B, X, Y, L, R, Select, Start from bit 4 |
+| 44 | `joystick_1` (same layout) |
+| 48 | keyboard events 0 and 1: `ps2_key[10:0]` each in a 16-bit slot, newest in bits 15:0 |
+| 52 | keyboard event 2 in bits 15:0; bits 31:16 = event sequence counter (increments per event) |
+
+`ps2_key` = `{toggle, pressed, extended, scancode[7:0]}` (PS/2 set 2 make codes). The reader keeps the last
+sequence number and processes the `n` newest events (up to 3) in order.

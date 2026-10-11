@@ -24,7 +24,7 @@ wire commit=core.movie_commit;
 wire commit=slot && fw && ready && !error;
 `endif
 // Model payload contents procedurally: avoids a huge simulator-only RAM mux.
-reg [63:0] mem[0:4];
+reg [63:0] mem[0:7];
 integer slot_record[0:7];
 function [63:0] read_memory(input [28:0] address);
  integer offset;
@@ -50,8 +50,7 @@ wire [63:0] dout=reply;
 emu core(.CLK_50M(clk),.RESET(reset),.DDRAM_BUSY(busy),.DDRAM_DOUT_READY(valid),.DDRAM_DOUT(dout),
  .DDRAM_ADDR(addr),.DDRAM_BURSTCNT(burst),.DDRAM_BE(be),.DDRAM_RD(rd),.DDRAM_WE(wr),.DDRAM_DIN(din),
  .AUDIO_L(al),.AUDIO_R(ar));
-wire [127:0] sim_status={122'd0,enable,5'd0};
-initial force core.status=sim_status;
+initial force core.stream_on=enable;   // streaming is a constant in the core; the test switches it on and off
 assign dl=core.movie_dl;assign vwr=core.movie_wr;assign awr=core.movie_audio_wr;
 assign ready=core.movie_audio_ready;assign clr=core.movie_clear;
 assign error=core.movie_error;assign done=core.movie_done;
@@ -60,9 +59,9 @@ assign fw=core.store_wait;assign fvalid=core.frame_valid;assign ferror=core.fram
 wire [4:0] current_state=core.stream.state;
 `else
 ddr_stream #(.POLL_CLOCKS(8)) dut(clk,reset,enable,busy,valid,dout,addr,burst,be,rd,wr,din,
- dl,vwr,awr,ready,va,aa,data,commit,clr,error,done);
+ dl,vwr,awr,ready,va,aa,data,commit,clr,error,done,64'hA5A50001000000F0,64'h0003123401020304);
 frame_store frames(clk,reset|clr,dl,16'd1,vwr,va,data,fw,slot&&ready&&!error,17'd76799,pixel,fvalid,ferror);
-movie_audio #(.SEGMENT_CLOCKS(PERIOD)) sound(clk,reset|clr,commit,awr,aa,data,al,ar);
+movie_audio sound(.clk(clk),.reset(reset|clr),.commit(commit),.seg_clocks(21'(PERIOD)),.wr(awr),.addr(aa),.data(data),.left(al),.right(ar));
 wire [4:0] current_state=dut.state;
 `endif
 reg held=0;
@@ -81,7 +80,7 @@ always @(posedge clk) begin
  if((rd||wr) && !busy && !reset) begin
   if(burst!=1 || be!=255 || (rd&&wr)) $fatal(1,"DDR command format");
   if(wr) begin
-   if(addr<BASE+2 || addr>BASE+4) $fatal(1,"FPGA wrote CPU-owned or payload RAM");
+   if(addr<BASE+2 || addr>BASE+6) $fatal(1,"FPGA wrote CPU-owned or payload RAM");
    mem[addr-BASE]<=din;
   end
   if(rd) begin
@@ -150,7 +149,7 @@ always @(posedge clk) begin
  end
 end
 initial begin
- for(i=0;i<5;i=i+1) mem[i]=0;
+ for(i=0;i<8;i=i+1) mem[i]=0;
  for(i=0;i<8;i=i+1) slot_record[i]=0;
  repeat(6) @(negedge clk);reset=0;
  repeat(20) @(negedge clk);
@@ -169,12 +168,21 @@ initial begin
  // New session resets counters and catches an invalid producer overrun.
  mem[1]=9;mem[0]={32'h23456789,32'h33515459};
  wait(error);wait(mem[3][32]);
+ // A stop command alone must recover a latched error (no Off/On toggle needed).
+ mem[0]=0;wait(!mem[3][32]);repeat(10) @(negedge clk);
+ if(error) $fatal(1,"Stop command did not clear the error latch");
+ mem[0]={32'h3456789a,32'h33515459};mem[1]=0;
+ repeat(PERIOD) @(negedge clk);
+ if(error) $fatal(1,"Clean restart after error recovery raised an error");
  // Disable during a held bus command: finish the bus handshake, then stop.
  wait(rd||wr);@(negedge clk);force_busy=1;
  repeat(4) @(negedge clk);enable=0;
  repeat(4) @(negedge clk);force_busy=0;
  wait(current_state==0);repeat(20) @(negedge clk);
  if(rd||wr||dl||awr||vwr) $fatal(1,"DDR activity after disable");
+`ifndef REAL_EMU
+ if(mem[5]!==64'hA5A50001000000F0 || mem[6]!==64'h0003123401020304) $fatal(1,"Input words not published: %h %h",mem[5],mem[6]);
+`endif
  $display("PASS: 12 complete A/V records, 8-slot wrap, all PCM samples, atomic commits, late-data silence/restart, EOF, session stop, overrun rejection, disable under backpressure.");$finish;
 end
 initial begin #(PERIOD*30*50);$fatal(1,"stream watchdog state %d seen %d",current_state,seen);end

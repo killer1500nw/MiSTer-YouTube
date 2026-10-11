@@ -30,6 +30,9 @@ end
 integer a;
 reg [15:0] wordvalue;
 initial begin
+`ifndef STREAM_FRAME
+ force dut.movie_mode=1'b0;   // streaming is on by default; this case tests the loaded-frame path
+`endif
  repeat(4) @(negedge clk);reset=0;
  `ifdef STREAM_FRAME
  force dut.movie_mode=1'b1;
