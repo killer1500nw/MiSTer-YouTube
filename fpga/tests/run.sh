@@ -6,6 +6,8 @@ trap 'rm -rf "$work"' EXIT
 python3 tests/test_player.py
 iverilog -g2012 -s tb_crt240 -o "$work/timing.vvp" rtl/crt240.sv tests/tb_crt240.sv
 vvp "$work/timing.vvp"
+iverilog -g2012 -s tb_interlace -o "$work/interlace.vvp" rtl/crt240.sv tests/tb_interlace.sv
+vvp "$work/interlace.vvp"
 iverilog -g2012 -s tb_frames -o "$work/frames.vvp" rtl/frame_store.sv tests/tb_frames.sv
 vvp "$work/frames.vvp"
 for latency in DELAYED ZERO_LATENCY; do

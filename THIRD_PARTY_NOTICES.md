@@ -12,3 +12,9 @@ This certificate notice also accompanies the historical FPGA test scripts.
 The native ARM helper is supplied with its C source and build instructions.
 External yt-dlp, QuickJS, FFmpeg and Quartus are not included; their respective
 upstream licences apply. No ownership of those projects is claimed.
+
+## YouTube CRT GUI
+
+* `scripts/YouTubeCRT/ytcrt/font8x8.py`: 8x8 bitmap font, public domain (Daniel Hepper, font8x8_basic).
+* Feature set and browsing model inspired by the YouTube module of anthonycaccese/240-MP
+  (https://github.com/anthonycaccese/240-MP). No code from that project is included.

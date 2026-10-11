@@ -28,3 +28,8 @@ Upstream projects:
 The CA bundle and libyt_sender.so are supplied beside url_player.py. The helper
 is specific to ABI 130 and this FPGA mailbox layout. No pip packages are needed
 for normal playback. URL availability depends on the resolver and YouTube.
+
+## YouTube CRT (GUI player)
+
+`release/MiSTer-YouTube-SD.zip` already contains these tools at these exact paths. The GUI player finds the
+newest `resolver-*-qjs-*` and `ffmpeg-*-armhf-static` folders, so newer builds can simply be dropped in.

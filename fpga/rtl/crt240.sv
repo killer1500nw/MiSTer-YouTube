@@ -1,11 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // 20 MHz clock / 3 = 6.666667 MHz pixel enable.
 // 424 pixels/line, 262 lines/frame: 15.72327 kHz / 60.01248 Hz.
+// With `interlace` set the same line rate gives 480i: 525 lines per frame
+// (field 0 = 262 lines, field 1 = 263), 59.94 Hz fields. Field 1's vertical
+// sync starts half a line (212 pixels) into line 244, which is what makes the
+// two fields interleave. Both fields show the same 240 active lines.
+// The mode is latched at the end of a frame, so it never changes mid-picture.
 // Sync runs continuously, including during user reset.
 module crt240 (
     input wire clk,
     input wire reset,
     input wire [1:0] pattern,
+    input wire interlace,
+    output wire il_active,   // 1 while the running frame is 480i
+    output wire field,       // 480i field number (always 0 when progressive)
     output wire ce_pix,
     output wire hs, vs, de,
     output reg [7:0] r, g, b,
@@ -16,13 +24,18 @@ module crt240 (
     reg [8:0] y = 0;
     reg [8:0] marker = 0;
     reg frame_phase = 0;
+    reg il = 0, fld = 0;
+    wire [8:0] last_line = (il && fld) ? 9'd262 : 9'd261;
+    assign il_active = il;
+    assign field = fld;
     reg [1:0] mode = 0;
 
     assign pixel_x = x;
     assign pixel_y = y;
     assign ce_pix = (divider == 2);
     assign hs = (x >= 336 && x < 368);
-    assign vs = (y >= 244 && y < 247);
+    assign vs = (!il || !fld) ? (y >= 244 && y < 247) :
+                ((y == 244 && x >= 212) || y == 245 || y == 246 || (y == 247 && x < 212));
     assign de = (x < 320 && y < 240);
 
     always @(posedge clk) begin
@@ -30,8 +43,10 @@ module crt240 (
         if (ce_pix) begin
             if (x == 423) begin
                 x <= 0;
-                if (y == 261) begin
+                if (y == last_line) begin
                     y <= 0;
+                    il <= interlace;
+                    fld <= (interlace && il) ? ~fld : 1'b0;
                     mode <= pattern; // change pattern only at a frame boundary
                     frame_phase <= ~frame_phase;
                     if (frame_phase)

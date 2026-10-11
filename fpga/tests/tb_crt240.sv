@@ -4,7 +4,8 @@ reg clk=0, reset=1;
 reg [1:0] pattern=0;
 wire ce,hs,vs,de;
 wire [7:0] r,g,b;
-crt240 dut(clk,reset,pattern,ce,hs,vs,de,r,g,b,,);
+crt240 dut(.clk(clk),.reset(reset),.pattern(pattern),.interlace(1'b0),.il_active(),.field(),
+    .ce_pix(ce),.hs(hs),.vs(vs),.de(de),.r(r),.g(g),.b(b),.pixel_x(),.pixel_y());
 always #25 clk=~clk; // 20 MHz
 integer frame,px,py,active,hsp,vsp,cycle,spacing=0;
 initial begin
