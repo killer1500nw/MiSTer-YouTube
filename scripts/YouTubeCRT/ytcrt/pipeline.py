@@ -10,6 +10,7 @@ import os
 import queue
 import re
 import select
+import shutil
 import signal
 import subprocess
 import threading
@@ -77,6 +78,12 @@ def stop_process(proc):
 def safe_text(text):
     text = re.sub(r'https?://[^\s]+', '[URL]', text)
     return ''.join(c for c in text if c in '\n\t' or ord(c) >= 32)[:4096]
+
+
+def niced(command):
+    """Run a background job at low priority so it never slows the video the user is waiting for."""
+    nice = shutil.which('nice')
+    return [nice, '-n', '15'] + list(command) if nice else list(command)
 
 
 def capture(command, env, cancel, timeout=300, on_line=None):
@@ -147,7 +154,7 @@ def channel_uploads(rt, channel_id, cancel=lambda: None, log=lambda m: None, lim
     cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist', '--playlist-end', str(limit),
            '--force-ipv4', '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
            '--print', PRINT_UPLOAD, '--', 'https://www.youtube.com/playlist?list=UU' + channel_id[2:]]
-    out = capture(cmd, env, cancel, timeout=120).decode('utf-8', 'replace')
+    out = capture(niced(cmd), env, cancel, timeout=120).decode('utf-8', 'replace')
     now, videos = int(time.time()), []
     for line in out.splitlines():
         line = line.strip()
@@ -182,7 +189,7 @@ def playlist_entries(rt, playlist_id, cancel=lambda: None, log=lambda m: None, l
            '--playlist-start', str(start), '--playlist-end', str(start + limit - 1),
            '--force-ipv4', '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
            '--print', PRINT_PLAYLIST, '--', 'https://www.youtube.com/playlist?list=' + playlist_id]
-    out = capture(cmd, env, cancel, timeout=180).decode('utf-8', 'replace')
+    out = capture(niced(cmd), env, cancel, timeout=180).decode('utf-8', 'replace')
     title, videos = '', Page()
     for line in out.splitlines():
         line = line.strip()
