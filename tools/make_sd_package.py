@@ -31,7 +31,7 @@ def main():
         shutil.copyfile(core, ROOT / 'scripts' / 'YouTubeCRT' / CORE)
     scripts = OUT / 'Scripts' / 'YouTubeCRT'
     shutil.copytree(ROOT / 'scripts' / 'YouTubeCRT', scripts,
-                    ignore=shutil.ignore_patterns('__pycache__', '*.rbf', '*.pyc'))
+                    ignore=shutil.ignore_patterns('__pycache__', '*.rbf', '*.pyc', '*.txt.tmp', 'YouTube-*log*.txt'))
     import re
     ver = re.search(r"__version__ = '([^']*)'", (ROOT / 'scripts' / 'YouTubeCRT' / 'ytcrt' / '__init__.py').read_text()).group(1)
     (scripts / 'VERSION.txt').write_text(ver + '\n')
