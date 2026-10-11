@@ -231,7 +231,7 @@ def _area(f):
 def choose_streams(info, formats, profile, quality='Auto', cal=None, mult=1.0, max_cost=None):
     """Pick the video and audio stream for a video.
 
-    quality '240p' / '360p' / '480p': the largest stream that fits that size on both sides (highest bitrate first),
+    quality '240p' / '360p' / '480p': the largest stream whose shorter side is at most that (highest bitrate first),
     whatever it costs. 'Auto': the largest stream the ARM is predicted to decode in real time
     (profiles.predicted_cost <= LIMIT, or `max_cost`); the lightest one if none qualifies.
     -> (video source, audio source or None, label such as '360p', predicted cost, why it is not the biggest)
@@ -248,8 +248,8 @@ def choose_streams(info, formats, profile, quality='Auto', cal=None, mult=1.0, m
         raise ValueError('No supported video stream was found.')
     # H.264 is what the cost model describes and what the ARM decodes best; use anything else only if there is nothing else.
     pool = [f for f in vids if (f.get('vcodec') or '').startswith('avc1')] or vids
-    box = profiles.QUALITY_BOX.get(quality, 854)
-    fit = [f for f in pool if f['height'] <= box and f['width'] <= box] or [min(pool, key=_area)]
+    box = profiles.QUALITY_BOX.get(quality, 480)
+    fit = [f for f in pool if min(f['width'], f['height']) <= box] or [min(pool, key=_area)]    # '360p' means 360 lines: 480x360 for 4:3, 640x360 for 16:9
     fit = [f for f in fit if min(f['width'], f['height']) >= 240] or fit          # never drop below 240p if 240p exists
     fit = [f for f in fit if f.get('acodec') in (None, 'none')] or fit            # video-only first (audio is separate)
     rank = sorted(fit, key=lambda f: (-_area(f), 0 if (f.get('fps') or 30) <= profile.fps else 1, -(f.get('tbr') or 0)))

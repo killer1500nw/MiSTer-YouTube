@@ -1328,5 +1328,19 @@ class ResolveCache(unittest.TestCase):
             pipeline.capture = saved
 
 
+class FourByThree(unittest.TestCase):
+    def test_360p_means_360_lines_for_4_by_3_video_too(self):
+        info = {'id': 'x', 'title': 't', 'duration': 60}
+        def f(i, w, h, tbr):
+            return {'format_id': i, 'protocol': 'https', 'vcodec': 'avc1.4d401e', 'acodec': 'none', 'width': w, 'height': h,
+                    'fps': 30, 'tbr': tbr, 'url': 'https://example.invalid/v?itag=' + i}
+        audio = {'format_id': '140', 'protocol': 'https', 'vcodec': 'none', 'acodec': 'mp4a.40.2', 'tbr': 130,
+                 'url': 'https://example.invalid/a?itag=140'}
+        fmts = [f('133', 320, 240, 150), f('134', 480, 360, 378), f('135', 640, 480, 683), audio]
+        for q, want in (('240p', '133'), ('360p', '134'), ('480p', '135')):
+            v = pipeline.choose_streams(info, fmts, profiles.PROFILE, q)[0]
+            self.assertIn('itag=' + want, v['url'], q)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -27,7 +27,7 @@ DEFAULT = PROFILE.key
 # 240p is only ~210-240 kbps). What limits us is how much H.264 the 800 MHz ARM can decode in real time, and that
 # depends on the stream: how many pixels, how many kbps and how many frames per second. The player estimates that
 # cost for every stream a video offers and picks the best picture that fits.
-QUALITY_BOX = {'240p': 426, '360p': 640, '480p': 854, 'Auto': 854}      # largest side allowed, in pixels
+QUALITY_BOX = {'240p': 240, '360p': 360, '480p': 480, 'Auto': 480}      # shorter side allowed, in pixels (4:3 and 16:9 alike)
 # Calibration, from one real measurement on a Cyclone V MiSTer (Speed test): a 640x360, 30 fps, 591 kbps stream ran
 # at 0.87x real time with the cheapest decoder setting. `cost` is ARM seconds per video second (1/0.87).
 # The Speed test replaces this with a measurement of your own MiSTer.
