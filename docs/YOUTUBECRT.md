@@ -97,7 +97,7 @@ channel's uploads playlist is its channel ID with `UC` swapped for `UU`. A name 
 | Playlist | **Playlists**: open one to see its videos in playlist order (up to 200) |
 | Single video | **My Videos**: a plain list you can play from; titles are looked up automatically unless you give a name |
 
-**In the GUI:** Home → **Add to Lists**, then type or paste a channel, playlist or video link/ID. The player files it in
+**In the GUI:** Home → **Add Channel via @handle** (the `@` is already typed; add the handle, for example `@jawed`; the quickest way on a gamepad), or Home → **Add to Lists**, then type or paste a channel, playlist or video link/ID. The player files it in
 the right place for you. (A `watch?v=...&list=PL...` link is filed as the playlist. To add just that video, use its plain `watch?v=` link.) Press **X** (Tab) on Channels, Playlists or My Videos to refresh after editing the file.
 
 A playlist or channel that does not load is listed with a `!`; open it to see why (for example *not found (check the

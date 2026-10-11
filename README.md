@@ -15,7 +15,7 @@ This is stated up front because it is a fair thing for anyone evaluating the cod
 
 - **Subscriptions**: the newest videos of all your channels together; **Channels**: one channel at a time.
 - **Playlists**, **My Videos** (single videos you list), **Watch Later**, **History** with **resume**.
-- **Play URL / ID** and **Add to Lists**: type a link on an on-screen keyboard or a real keyboard.
+- **Play URL / ID**, **Add Channel via @handle** and **Add to Lists**: type a link or a handle on an on-screen keyboard or a real keyboard.
 - **Load more videos…** at the end of every channel and playlist, so you can scroll well past the first 15.
 - **Picture quality that adapts to your MiSTer**: Auto picks a 360p or 240p stream per video from an estimate of how
   much the ARM can decode in time (calm 90s TV and old movies get the sharper picture), and steps down by itself if
@@ -83,7 +83,7 @@ How to use it:
 
 - **Edit the file** on a PC (SD card path `YouTubeNative/ytcrt/subscriptions.txt`) or over SSH, then in the GUI press
   **X** (Tab) on Channels, Playlists or My Videos to refresh.
-- **Or skip the file:** Home → **Add to Lists**, then type or paste a channel, playlist or video link/ID. The player writes
+- **Or skip the file:** Home → **Add Channel via @handle** (just type the handle, for example `@jawed`; quickest on a gamepad), or Home → **Add to Lists**, then type or paste a channel, playlist or video link/ID. The player writes
   the line for you and puts it in the right place. (A `watch?v=…&list=PL…` link is filed as the playlist; for just that video, use its plain `watch?v=` link.)
 - **Import your real subscriptions** from a Google Takeout `subscriptions.csv` with `python tools/import_subscriptions.py`.
 - A channel or playlist that cannot load is shown with a `!`; open it to see why (for example *not found (check the

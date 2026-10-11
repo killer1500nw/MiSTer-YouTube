@@ -1,6 +1,7 @@
 """The on-screen app: menus and playback share one streaming session, so the
 GUI is simply more 320x240 frames pushed through the same DDR mailbox."""
 import threading
+import re
 import time
 
 from . import feeds as feedsmod, pipeline, profiles, ui, urls
@@ -234,6 +235,8 @@ class App:
                                    refresh=lambda a: a.refresh_lists(True)))
         elif name == 'Play URL / ID':
             self.push(ui.TextInput('Play URL or ID', 'YouTube video link or 11-character ID', self._play_typed))
+        elif name == 'Add Channel via @handle':
+            self.push(ui.TextInput('Add Channel', 'YouTube handle, e.g. @youtuberuser', self._add_handle, initial='@'))
         elif name == 'Add to Lists':
             self.push(ui.TextInput('Add to Lists', 'Channel, playlist or video link / ID', self._add_typed))
         elif name == 'Settings':
@@ -251,6 +254,21 @@ class App:
         self.pop()
         self.log('Typed video id ' + vid)
         self.start_video({'id': vid, 'title': '', 'channel': '', 'typed': True})
+        return None
+
+    def _add_handle(self, app, text):
+        """TextInput callback for Add Channel: a bare @handle (the @ is optional). Returns an error message, or None."""
+        handle = text.strip()
+        if handle and not handle.startswith('@') and '/' not in handle and ':' not in handle:
+            handle = '@' + handle
+        if not re.fullmatch(r'@[A-Za-z0-9._-]{3,30}', handle):
+            return 'Type a handle such as @youtuberuser'
+        added = self.store.add_entry('channel', handle)
+        self.pop()
+        self.log('Typed channel %s (%s)' % (handle, 'added' if added else 'already listed'))
+        self.toast('%s added' % handle if added else 'Already in your list')
+        if added:
+            self.refresh_feeds(force=True)
         return None
 
     def _add_typed(self, app, text):

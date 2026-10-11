@@ -723,6 +723,28 @@ class Typing(unittest.TestCase):
         self.assertEqual([r for _, r in st.subscriptions()], ['@RetroRGB'])
         self.assertIsInstance(a.screen, ui.Home)
 
+    def test_add_channel_by_handle(self):
+        a, st = self.make_app()
+        a.open_home_entry('Add Channel via @handle')
+        s = a.screen
+        self.assertEqual(s.text, '@')                                 # starts with the @ already typed
+        for ch in 'retrorgb':
+            s.handle(a, 'ch:' + ch)
+        s.handle(a, 'submit')
+        self.assertEqual([r for _, r in st.subscriptions()], ['@retrorgb'])
+        self.assertIsInstance(a.screen, ui.Home)
+        a.open_home_entry('Add Channel via @handle')
+        a.screen.handle(a, 'bksp')                                    # forgot the @: it is added for you
+        for ch in 'newchannel':
+            a.screen.handle(a, 'ch:' + ch)
+        a.screen.handle(a, 'submit')
+        self.assertEqual([r for _, r in st.subscriptions()], ['@retrorgb', '@newchannel'])
+        a.open_home_entry('Add Channel via @handle')
+        a.screen.handle(a, 'ch:a')
+        a.screen.handle(a, 'submit')                                  # "@a" is too short to be a handle
+        self.assertIn('@youtuberuser', a.screen.error)
+        self.assertEqual(len(st.subscriptions()), 2)
+
     def test_screen_draws(self):
         a, st = self.make_app()
         a.open_home_entry('Play URL / ID')

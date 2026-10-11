@@ -159,9 +159,9 @@ class TextInput(Screen):
     KW, KH, X0, Y0 = 28, 20, 20, 76
     MAX = 200
 
-    def __init__(self, title, prompt, on_submit):
+    def __init__(self, title, prompt, on_submit, initial=''):
         self.title, self.prompt, self.on_submit = title, prompt, on_submit
-        self.text, self.error = '', ''
+        self.text, self.error = initial, ''
         self.row, self.col = 1, 0
         self.shift = False
         self.hints = 'A:Key X:Del Y:Shift Start:OK B:Cancel'
@@ -553,7 +553,7 @@ class Home(ListScreen):
     visible = 7
 
     ENTRIES = ('Subscriptions', 'Channels', 'Playlists', 'My Videos', 'Watch Later', 'History', 'Play URL / ID',
-               'Add to Lists', 'Settings')
+               'Add Channel via @handle', 'Add to Lists', 'Settings')
 
     def items(self, app):
         return self.ENTRIES
