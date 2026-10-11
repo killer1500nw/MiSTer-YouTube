@@ -475,6 +475,7 @@ class App:
         def open_pipe(at_ms):
             state['start'], state['base'] = at_ms, link.sent
             state['opened_at'] = time.monotonic()
+            state['first_logged'] = False
             state['starved'], state['win_start'] = 0.0, time.monotonic()
             try:
                 return pipeline.open_pipeline(self.rt, prof, media, at_ms / 1000.0, speed, lambda: None,
@@ -604,6 +605,9 @@ class App:
                     return 'eof', dur_ms
                 state['last'] = rec
                 state['retries'] = 0
+                if state.get('opened_at') and not state.get('first_logged'):
+                    state['first_logged'] = True
+                    self.log('First picture %.1f s after starting the decoders' % (time.monotonic() - state['opened_at']))
                 if state['seeking']:                         # first picture from the new position
                     state.update(seeking=False, note='', osd_until=now + 1.5)
                 if now < state['osd_until'] or state['more'] is not None:

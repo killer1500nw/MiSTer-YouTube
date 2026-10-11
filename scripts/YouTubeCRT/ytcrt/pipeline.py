@@ -430,6 +430,7 @@ def decoder_command(rt, profile, source, kind, start_s=0, speed='Normal', limit_
         args += ['-headers', ''.join(k + ': ' + v + '\r\n' for k, v in source['headers'].items())]
     if kind == 'video':
         args += profiles.decode_speed_args(speed)
+    args += ['-probesize', '200000', '-analyzeduration', '500000']      # the mp4 index says all we need: start sooner
     if start_s > 0:
         args += ['-ss', '%.3f' % start_s]
     args += ['-i', source['url']]
