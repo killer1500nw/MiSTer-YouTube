@@ -1,3 +1,5 @@
+import signal
+import os
 import sys
 import tempfile
 import time
@@ -1157,7 +1159,7 @@ class Paging(unittest.TestCase):
         lst.activate(a, rows[-1])
         self.assertEqual(asked, [1])                                               # A on it asks for the next page
         f.loading.add(('channel', self.UC))
-        self.assertEqual(lst.label(a, rows[-1]), 'Loading more...')
+        self.assertTrue(lst.label(a, rows[-1]).startswith('Loading more'))   # the dots animate
         lst.activate(a, rows[-1])
         self.assertEqual(asked, [1])                                               # but not while one is in flight
         f.loading.clear()
@@ -1194,6 +1196,81 @@ class Paging(unittest.TestCase):
         cmd = seen[0]
         self.assertEqual(cmd[cmd.index('--playlist-start') + 1], '51')
         self.assertEqual(cmd[cmd.index('--playlist-end') + 1], '100')
+
+
+class AudioDropout(unittest.TestCase):
+    """A long video's audio connection can end quietly part-way: reopen it there instead of playing silence."""
+    VB, AB = 16, 192000 // 30            # tiny "frames" are enough to exercise the pairing
+
+    def setUp(self):
+        self.real_select = pipeline.select.select
+        if sys.platform == 'win32':          # select() on pipes is Linux-only: poll the pipes instead
+            pipeline.select.select = self.win_select
+            if not hasattr(os, 'killpg'):
+                os.killpg = lambda pid, sig: os.kill(pid, signal.SIGTERM)
+                self.addCleanup(lambda: delattr(os, 'killpg'))
+
+    @staticmethod
+    def win_select(r, w, x, t=None):
+        import ctypes, msvcrt
+        end = time.time() + (t or 0)
+        while True:
+            ready = []
+            for fd in r:
+                avail = ctypes.c_ulong(0)
+                ok = ctypes.windll.kernel32.PeekNamedPipe(msvcrt.get_osfhandle(fd), None, 0, None, ctypes.byref(avail), None)
+                if not ok or avail.value:                       # data waiting, or the pipe is closed (a read then returns EOF)
+                    ready.append(fd)
+            if ready or time.time() >= end:
+                return ready, [], []
+            time.sleep(.005)
+
+    def tearDown(self):
+        pipeline.select.select = self.real_select
+
+    @staticmethod
+    def feeder(nbytes, byte, exit_code=0):
+        return [sys.executable, '-c',
+                'import sys;sys.stdout.buffer.write(bytes([%d])*%d);sys.stdout.flush();sys.exit(%d)' % (byte, nbytes, exit_code)]
+
+    def run_all(self, audio_cmds, frames=40, duration=100):
+        video = self.feeder(self.VB * frames, 7)
+        it = iter(audio_cmds[1:])
+        starts = []
+
+        def again(at):
+            starts.append(round(at, 2))
+            return next(it)
+        d = pipeline.Decoders({'video': video, 'audio': audio_cmds[0]}, self.VB, self.AB, again, 0.0, duration)
+        saw = []
+        try:
+            while True:
+                rec = d.next_record(lambda: None)
+                if rec is None:
+                    break
+                saw.append(rec[self.VB:])
+        finally:
+            d.close()
+        return saw, starts
+
+    def test_audio_that_stops_early_is_reopened_where_it_stopped(self):
+        half = self.AB * 10                                 # the first connection delivers 10 frames of sound, then ends
+        saw, starts = self.run_all([self.feeder(half, 1), self.feeder(self.AB * 30, 2)])
+        self.assertEqual(len(saw), 40)
+        self.assertTrue(all(set(a) == {1} for a in saw[:10]))
+        self.assertTrue(all(set(a) == {2} for a in saw[10:]))                 # sound continues: not silence
+        self.assertEqual(len(starts), 1)
+        self.assertAlmostEqual(starts[0], 10 * self.AB / 192000.0, places=2)   # reopened at the 10-frame mark
+
+    def test_audio_that_ends_with_the_video_is_not_restarted(self):
+        saw, starts = self.run_all([self.feeder(self.AB * 40, 1)], duration=40 * self.AB / 192000.0)
+        self.assertEqual(starts, [])
+        self.assertEqual(len(saw), 40)
+
+    def test_a_failing_audio_stream_still_reports_its_error(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.run_all([self.feeder(0, 0, 1)])
+        self.assertIn('audio decoder failed', str(cm.exception))
 
 
 if __name__ == '__main__':

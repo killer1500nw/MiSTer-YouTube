@@ -329,6 +329,8 @@ def decoder_command(rt, profile, source, kind, start_s=0, speed='Normal', limit_
             '-protocol_whitelist', 'http,https,tcp,tls,crypto']
     if source['url'].startswith('https://'):
         args += ['-tls_verify', '1', '-ca_file', str(rt.ca)]
+    if source['url'].startswith(('http://', 'https://')):          # a long video's connection may be dropped midway
+        args += ['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1', '-reconnect_delay_max', '5']
     if source['headers']:
         args += ['-headers', ''.join(k + ': ' + v + '\r\n' for k, v in source['headers'].items())]
     if kind == 'video':
@@ -349,11 +351,19 @@ def decoder_command(rt, profile, source, kind, start_s=0, speed='Normal', limit_
     return args + ['-blocksize', '32768', 'pipe:1']
 
 
+hook_log = lambda msg: None      # the app points this at its log
+
+
 class Decoders:
     """Drain both streams independently; userspace holds at most one A/V pair."""
 
-    def __init__(self, commands, video_bytes, audio_bytes):
+    AUDIO_RESTARTS = 30
+
+    def __init__(self, commands, video_bytes, audio_bytes, restart_audio=None, start_s=0.0, duration=0):
         self.limits = {'video': video_bytes, 'audio': audio_bytes}
+        self.restart_audio = restart_audio        # callable(start_s) -> ffmpeg command: reopen audio where it stopped
+        self.start_s, self.duration, self.out_records, self.restarts = start_s, duration, 0, 0
+        self.audio_got = 0                        # audio bytes received since the audio ffmpeg was (re)started
         self.procs = {}
         self.data = {'video': bytearray(), 'audio': bytearray()}
         self.eof = {'video': False, 'audio': 'audio' not in commands}
@@ -387,6 +397,7 @@ class Decoders:
                 record = bytes(self.data['video']) + bytes(self.data['audio']).ljust(ab, b'\x00')
                 self.data['video'].clear()
                 self.data['audio'].clear()
+                self.out_records += 1
                 return record
             if time.monotonic() - started > 45:
                 raise RuntimeError('No complete video/audio record within 45 seconds. Network or decoder stalled.')
@@ -411,12 +422,42 @@ class Decoders:
                         self.procs[kind].stderr.close()
                 elif chunk:
                     buf.extend(chunk)
+                    if kind == 'audio':
+                        self.audio_got += len(chunk)
                 else:
-                    self.eof[kind] = True
                     code = self.procs[kind].wait(timeout=2)
+                    if kind == 'audio' and self._audio_ended_early():
+                        self._reopen_audio(code)
+                        break
+                    self.eof[kind] = True
                     if code:
                         message = safe_text(self.errors[kind].decode(errors='replace'))
                         raise RuntimeError('%s decoder failed (%d): %s' % (kind, code, message))
+
+
+    def _audio_position(self):
+        """Seconds of the video at which the audio we hold ends."""
+        ab = self.limits['audio']
+        return self.start_s + (self.out_records * ab + len(self.data['audio'])) / 192000.0   # 48 kHz stereo s16
+
+    def _audio_ended_early(self):
+        """The audio stopped but the video goes on: the connection was dropped, not the end of the file."""
+        if not self.restart_audio or self.eof['video'] or not self.audio_got:      # no data at all: a real error (e.g. 403)
+            return False
+        return not self.duration or self._audio_position() < self.duration - 4
+
+    def _reopen_audio(self, code):
+        if self.restarts >= self.AUDIO_RESTARTS:
+            raise RuntimeError('The audio stream kept ending early.')
+        self.restarts += 1
+        pos = self._audio_position()
+        hook_log('audio stream ended early (exit %s) at %.0f s; reopening it there (%d)' % (code, pos, self.restarts))
+        stop_process(self.procs['audio'])
+        self.procs['audio'] = subprocess.Popen(self.restart_audio(pos), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                               stderr=subprocess.PIPE, start_new_session=True, bufsize=0)
+        self.errors['audio'] = bytearray()
+        self.eof['audio'] = False
+        self.audio_got = 0
 
 
 class RecordPipeline:
@@ -502,9 +543,12 @@ class RecordPipeline:
 
 def open_pipeline(rt, profile, media, start_s, speed, cancel, crop='Off'):
     commands = {'video': decoder_command(rt, profile, media.video, 'video', start_s, speed, crop=crop)}
+    again = None
     if media.audio:
         commands['audio'] = decoder_command(rt, profile, media.audio, 'audio', start_s)
-    return RecordPipeline(Decoders(commands, profile.video_bytes, profile.audio_bytes), cancel)
+        again = lambda at: decoder_command(rt, profile, media.audio, 'audio', at)
+    return RecordPipeline(Decoders(commands, profile.video_bytes, profile.audio_bytes, again, start_s, media.duration),
+                          cancel)
 
 
 def benchmark(rt, profile, media, speed, seconds=10, cancel=lambda: None):

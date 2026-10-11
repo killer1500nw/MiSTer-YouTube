@@ -64,6 +64,7 @@ class App:
         self.stack.append(self.home)
         self.feeds.ffmpeg = str(rt.ffmpeg) if rt.ffmpeg.is_file() else None
         self.feeds.log = self.log
+        pipeline.hook_log = self.log
         if self.feeds.playlist_fetch is None and getattr(rt, 'resolver', None) is not None and rt.resolver.is_file():
             self.feeds.playlist_fetch = lambda pid: pipeline.playlist_entries(
                 rt, pid, lambda: None, self.log, limit=feedsmod.PAGE)
