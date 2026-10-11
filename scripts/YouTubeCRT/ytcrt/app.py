@@ -403,10 +403,12 @@ class App:
     def play(self, v, start_ms):
         """Play a video. Background refreshing is paused from here until playback is over."""
         self.feeds.hold.set()
+        pipeline.pause_background()                       # freeze any lookup already running
         try:
             self._play(v, start_ms)
         finally:
             self.feeds.hold.clear()
+            pipeline.resume_background()
 
     def _play(self, v, start_ms):
         if self.missing_tools():

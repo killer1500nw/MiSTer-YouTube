@@ -1188,7 +1188,7 @@ class Paging(unittest.TestCase):
         rt = type('R', (), {'resolver': Path('yt-dlp'), 'qjs': Path('qjs'), 'ca': Path('ca'), 'ffdir': Path('.')})()
         seen = []
         saved = pipeline.capture
-        pipeline.capture = lambda cmd, env, cancel, timeout=300, on_line=None: (seen.append([str(c) for c in cmd]), b'')[1]
+        pipeline.capture = lambda cmd, env, cancel, timeout=300, on_line=None, background=False: (seen.append([str(c) for c in cmd]), b'')[1]
         try:
             pipeline.playlist_entries(rt, 'PL' + 'q' * 32, limit=50, start=51)
         finally:
@@ -1312,7 +1312,7 @@ class ResolveCache(unittest.TestCase):
         raw = (Path(__file__).parent / 'fixtures' / 'landscape.json').read_bytes()      # the two JSON lines yt-dlp prints
         calls = []
         saved = pipeline.capture
-        pipeline.capture = lambda cmd, env, cancel, timeout=300, on_line=None: (calls.append(1), raw)[1]
+        pipeline.capture = lambda cmd, env, cancel, timeout=300, on_line=None, background=False: (calls.append(1), raw)[1]
         try:
             vid = 'abcdefghijk'
             pipeline.resolve(rt, profiles.PROFILE, vid, lambda: None, lambda m: None)

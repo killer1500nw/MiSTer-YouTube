@@ -81,16 +81,43 @@ def safe_text(text):
     return ''.join(c for c in text if c in '\n\t' or ord(c) >= 32)[:4096]
 
 
+BACKGROUND = set()                 # running background yt-dlp processes (see capture(background=True))
+PAUSED = threading.Event()         # set while a video starts or plays: background processes are frozen
+
+
+def pause_background():
+    """Freeze every background yt-dlp job so the ARM is entirely the video's. They carry on afterwards."""
+    PAUSED.set()
+    for proc in list(BACKGROUND):
+        try:
+            os.killpg(proc.pid, signal.SIGSTOP)
+        except (ProcessLookupError, PermissionError, AttributeError, OSError):
+            pass
+
+
+def resume_background():
+    PAUSED.clear()
+    for proc in list(BACKGROUND):
+        try:
+            os.killpg(proc.pid, signal.SIGCONT)
+        except (ProcessLookupError, PermissionError, AttributeError, OSError):
+            pass
+
+
 def niced(command):
     """Run a background job at low priority so it never slows the video the user is waiting for."""
     nice = shutil.which('nice')
     return [nice, '-n', '15'] + list(command) if nice else list(command)
 
 
-def capture(command, env, cancel, timeout=300, on_line=None):
+def capture(command, env, cancel, timeout=300, on_line=None, background=False):
     proc = subprocess.Popen([str(x) for x in command], stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             start_new_session=True, env=env)
+    if background:
+        BACKGROUND.add(proc)
+        if PAUSED.is_set():
+            pause_background()
     chunks = {proc.stdout.fileno(): bytearray(), proc.stderr.fileno(): bytearray()}
     active = list(chunks)
     deadline = time.monotonic() + timeout
@@ -98,6 +125,8 @@ def capture(command, env, cancel, timeout=300, on_line=None):
     try:
         while active:
             cancel()
+            if background and PAUSED.is_set():
+                deadline += 0.25                      # frozen time does not count against the job
             if time.monotonic() > deadline:
                 raise RuntimeError('YouTube URL resolution timed out.')
             ready, _, _ = select.select(active, [], [], 0.2)
@@ -123,6 +152,7 @@ def capture(command, env, cancel, timeout=300, on_line=None):
             raise RuntimeError('YouTube resolver failed (%d): %s' % (code, err.splitlines()[-1] if err else '?'))
         return bytes(chunks[proc.stdout.fileno()])
     finally:
+        BACKGROUND.discard(proc)
         stop_process(proc)
 
 
@@ -155,7 +185,7 @@ def channel_uploads(rt, channel_id, cancel=lambda: None, log=lambda m: None, lim
     cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist', '--playlist-end', str(limit),
            '--force-ipv4', '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
            '--print', PRINT_UPLOAD, '--', 'https://www.youtube.com/playlist?list=UU' + channel_id[2:]]
-    out = capture(niced(cmd), env, cancel, timeout=120).decode('utf-8', 'replace')
+    out = capture(niced(cmd), env, cancel, timeout=120, background=True).decode('utf-8', 'replace')
     now, videos = int(time.time()), []
     for line in out.splitlines():
         line = line.strip()
@@ -190,7 +220,7 @@ def playlist_entries(rt, playlist_id, cancel=lambda: None, log=lambda m: None, l
            '--playlist-start', str(start), '--playlist-end', str(start + limit - 1),
            '--force-ipv4', '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
            '--print', PRINT_PLAYLIST, '--', 'https://www.youtube.com/playlist?list=' + playlist_id]
-    out = capture(niced(cmd), env, cancel, timeout=180).decode('utf-8', 'replace')
+    out = capture(niced(cmd), env, cancel, timeout=180, background=True).decode('utf-8', 'replace')
     title, videos = '', Page()
     for line in out.splitlines():
         line = line.strip()
@@ -372,7 +402,7 @@ def resolve(rt, profile, video_id, cancel, log, note=None, quality='Auto', cal=N
         log('Resolving %s: using the stream details saved %d min ago' % (video_id, age))
     else:
         log('Resolving %s (%s)' % (video_id, profile.key))
-        raw = capture(resolve_command(rt, profile, url), env, cancel, on_line=on_line)
+        raw = capture(resolve_command(rt, profile, url), env, cancel, timeout=900, on_line=on_line)     # the security check can take minutes
     out = raw.decode('utf-8', 'replace')
     info = formats = None
     for line in out.splitlines():
