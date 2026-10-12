@@ -3,7 +3,7 @@
 #
 #   1. Put this single file in /media/fat/Scripts/ (or run it over SSH).
 #   2. Run it from the MiSTer menu: Scripts > Install_YouTube_CRT.
-#   3. Load the YouTubeCRT_v0.15-yuv core from _Other. The menu appears.
+#   3. Load the YouTubeCRT_v0.16-fb core from _Other. The menu appears.
 #
 # It downloads the latest release from GitHub (about 1 MB), installs the core and the player,
 # downloads the video tools (yt-dlp, QuickJS, ffmpeg) and makes the player start at boot.

@@ -10,8 +10,8 @@ LOG=/media/fat/YouTubeNative/YouTube-crt-log.txt
 RT=/media/fat/YouTubeNative
 VER="$(grep -o "__version__ = '[^']*'" "$BASE/ytcrt/__init__.py" 2>/dev/null | cut -d"'" -f2)"
 echo "YouTube CRT installer - files are version ${VER:-unknown}"
-# The current core (v0.15-yuv) and the older v0.14-auto one, which the same player still drives.
-for CORE in YouTubeCRT_v0.15-yuv.rbf YouTubeCRT_v0.14-auto.rbf; do
+# The current core (v0.16-fb) and the older v0.15-yuv and v0.14-auto ones, which the same player still drives.
+for CORE in YouTubeCRT_v0.16-fb.rbf YouTubeCRT_v0.15-yuv.rbf YouTubeCRT_v0.14-auto.rbf; do
   if [ -f "$BASE/$CORE" ]; then
     mkdir -p /media/fat/_Other
     cp -f "$BASE/$CORE" /media/fat/_Other/"$CORE"
@@ -57,5 +57,5 @@ sync
 echo "--- player log ($LOG) ---"
 tail -n 8 "$LOG" 2>/dev/null || echo "(no log yet)"
 echo "-------------------------"
-echo "Expected: 'Waiting for the YouTubeCRT core to be loaded...'. Now load YouTubeCRT_v0.15-yuv from _Other."
+echo "Expected: 'Waiting for the YouTubeCRT core to be loaded...'. Now load YouTubeCRT_v0.16-fb from _Other."
 if [ -t 0 ]; then read -r -p "Press Enter to return to MiSTer." _ || true; fi

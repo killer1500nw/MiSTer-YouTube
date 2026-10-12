@@ -11,6 +11,7 @@ always #12.5 clk = ~clk;                           // 40 MHz
 reg interlace = 1;
 reg [1:0] flk = 0, sft = 0;
 integer slot = 0;
+integer pic_base = 0;                              // +PIC=1: the header's word 6 names the slot (the picture planes are found by address)
 wire ce, hs, vs, de, il, fld, nfield, nil;
 wire [9:0] px; wire [8:0] py, ny;
 crt240 vid (.clk(clk), .reset(reset), .pattern(2'd0), .interlace(interlace), .il_active(il), .field(fld),
@@ -26,8 +27,8 @@ wire [23:0] rgb;
 wire grant = want;
 yuv_scaler #(.BASE(BASE)) dut (
     .clk(clk), .reset(reset), .ce_pix(ce), .px(px), .ny(ny), .nfield(nfield), .nil(nil), .flicker(flk), .blur(sft), .prog(~il),
-    .cfg_load(cfg_load), .cfg_slot(slot[2:0]), .cfg_flags(mem[0][34:32]),
-    .cfg_w1(mem[1]), .cfg_w2(mem[2]), .cfg_w3(mem[3]), .cfg_w4(mem[4]), .cfg_w5(mem[5]),
+    .cfg_load(cfg_load), .cfg_slot(pic_base ? 3'd0 : slot[2:0]), .cfg_flags(mem[0][34:32]),
+    .cfg_w1(mem[1]), .cfg_w2(mem[2]), .cfg_w3(mem[3]), .cfg_w4(mem[4]), .cfg_w5(mem[5]), .cfg_w6(mem[6]),
     .have_frame(have_frame), .want(want), .grant(grant), .busy(busy), .valid(valid), .dout(dout),
     .addr(addr), .burst(burst), .rd(rd), .rgb(rgb));
 
@@ -99,6 +100,7 @@ initial begin
     for (i = 0; i < 480; i = i + 1) got[i] = 0;
     if ($value$plusargs("IL=%d", il_arg)) interlace = il_arg[0];
     if ($value$plusargs("SLOT=%d", slot_arg)) slot = slot_arg;
+    if ($value$plusargs("PIC=%d", slot_arg)) pic_base = slot_arg;
     if ($value$plusargs("FLK=%d", il_arg)) flk = il_arg[1:0];
     if ($value$plusargs("SOFT=%d", il_arg)) sft = il_arg[1:0];
     $readmemh("slot.hex", mem);

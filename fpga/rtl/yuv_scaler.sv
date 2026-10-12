@@ -24,6 +24,7 @@ module yuv_scaler #(
     input  wire [2:0]  cfg_slot,
     input  wire [2:0]  cfg_flags,
     input  wire [63:0] cfg_w1, cfg_w2, cfg_w3, cfg_w4, cfg_w5,
+    input  wire [63:0] cfg_w6,             // bit 63: the picture planes start at the physical byte address in bits 31:0 (else in this record's slot)
     output reg         have_frame = 0,
     // shared DDR master (single outstanding burst read)
     output reg         want = 0,
@@ -62,7 +63,7 @@ module yuv_scaler #(
             hstep <= cfg_w3[31:0]; vstep <= cfg_w3[63:32];
             sx0 <= cfg_w4[31:0];   sy0 <= cfg_w4[63:32];
             flags <= cfg_flags;
-            slot_beats <= BASE + 29'd512 + {10'd0, cfg_slot, 16'd0};
+            slot_beats <= cfg_w6[63] ? cfg_w6[31:3] : (BASE + 29'd512 + {10'd0, cfg_slot, 16'd0});
             ov_en <= cfg_w5[0];
             ov_beats <= BASE + 29'h80200 + {13'd0, cfg_w5[2:1], 14'd0};     // overlay buffers: 3 x 128 KiB after the slots
             have_frame <= 1;

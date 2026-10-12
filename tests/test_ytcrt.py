@@ -2403,5 +2403,120 @@ class ProbeScripts(unittest.TestCase):
             subprocess.run = saved
 
 
+class FramebufferPictures(unittest.TestCase):
+    """The v0.16 core reads pictures from the Linux framebuffer: fast to write, found by the address in header word 6."""
+
+    def make(self, alias=True):
+        import mmap
+        import tempfile
+        from ytcrt import transport, yuv
+        tmp = tempfile.TemporaryFile()
+        tmp.truncate(yuv.FB_MIN_LENGTH)
+        fb_map = mmap.mmap(tmp.fileno(), yuv.FB_MIN_LENGTH)
+        # the uncached window the writes are checked through: the same memory as the framebuffer (or, for the failure test, not)
+        view_map = (mmap.mmap(tmp.fileno(), 8 * yuv.FB_SLOT_STRIDE, offset=yuv.FB_SLOTS_OFFSET) if alias
+                    else mmap.mmap(-1, 8 * yuv.FB_SLOT_STRIDE))
+        fb = transport.Framebuffer(0x22001000, yuv.FB_MIN_LENGTH, fb_map, view_map)
+        return tmp, fb
+
+    def link(self, fb, logs):
+        from ytcrt import core_link, transport, yuv
+        link = core_link.Link.__new__(core_link.Link)
+        link.kind, link.sent, link.consumed = 'yuv', 0, 0
+        link.copy_total = link.copy_max = 0.0
+        link.copy_count = 0
+        link.full_total, link.full_count, link.repeats = 0.0, 0, 0
+        link._last_frame, link._last_at, link._last_size, link._last_in_fb = None, -1, None, False
+        link.last_progress = 0
+        link.ov_ref = [-1] * yuv.OVERLAYS
+        link.log = logs.append
+        link.plain = bytearray(yuv.MAP_BYTES)
+        link.box = transport.Mailbox(link.plain)
+        link.box.write = lambda off, value: None
+        link.box.fb = fb
+        link.box.use_method('fb')
+        return link
+
+    def test_planes_land_in_the_framebuffer_slot_and_are_checked(self):
+        from ytcrt import yuv
+        tmp, fb = self.make()
+        y, u, v = bytes(range(256)) * 90, bytes(range(200)) * 30, bytes(range(100)) * 60
+        fb.write_planes(2, [(yuv.Y_OFF, y), (yuv.U_OFF, u), (yuv.V_OFF, v)])
+        slot = yuv.FB_SLOTS_OFFSET + 2 * yuv.FB_SLOT_STRIDE
+        self.assertEqual(bytes(fb.fb_map[slot + yuv.Y_OFF:slot + yuv.Y_OFF + len(y)]), y)
+        self.assertEqual(bytes(fb.fb_map[slot + yuv.V_OFF:slot + yuv.V_OFF + len(v)]), v)
+        self.assertEqual(fb.pic_base(2), 0x22001000 + slot)
+        with self.assertRaises(ValueError):
+            fb.write_planes(0, [(yuv.FB_SLOT_STRIDE - 10, bytes(100))])        # a piece that would run into the next slot
+        fb.close()
+        tmp.close()
+
+    def test_a_write_that_cannot_be_confirmed_is_refused(self):
+        from ytcrt import yuv
+        tmp, fb = self.make(alias=False)
+        with self.assertRaises(RuntimeError):
+            fb.write_planes(1, [(yuv.Y_OFF, bytes(range(256)) * 20)])
+        fb.close()
+        tmp.close()
+
+    def test_pictures_go_to_the_framebuffer_and_the_header_names_the_address(self):
+        from ytcrt import yuv
+        tmp, fb = self.make()
+        logs = []
+        link = self.link(fb, logs)
+        w, h = 128, 96
+        frame = bytearray((i * 7) & 255 for i in range(w * h * 3 // 2))
+        audio = bytes(6400)
+        link.push_picture(frame, audio, w, h)
+        link.push_picture(frame, audio, w, h)                       # identical: a repeat naming the previous record's planes
+        link.push_picture(bytearray(frame), audio, w, h)            # equal contents but the previous record was a repeat: in full
+        heads = [yuv.parse_header(link.plain[yuv.slot_offset(n):yuv.slot_offset(n) + 64]) for n in range(3)]
+        self.assertEqual([x['pic_base'] for x in heads], [fb.pic_base(0), fb.pic_base(0), fb.pic_base(2)])
+        self.assertEqual(link.repeats, 1)
+        slot0 = yuv.FB_SLOTS_OFFSET
+        self.assertEqual(bytes(fb.fb_map[slot0 + yuv.Y_OFF:slot0 + yuv.Y_OFF + w * h]), bytes(frame[:w * h]))
+        # the uncached slot got only the audio and the header: no planes
+        self.assertEqual(bytes(link.plain[yuv.slot_offset(0) + yuv.Y_OFF:yuv.slot_offset(0) + yuv.Y_OFF + 64]), bytes(64))
+        self.assertEqual(logs, [])
+        link.box.close()
+        tmp.close()
+
+    def test_a_failed_framebuffer_write_falls_back_to_the_normal_copy_for_good(self):
+        from ytcrt import yuv
+        tmp, fb = self.make(alias=False)                            # every check fails
+        logs = []
+        link = self.link(fb, logs)
+        w, h = 128, 96
+        frame = bytearray((i * 5) & 255 for i in range(w * h * 3 // 2))
+        link.push_picture(frame, bytes(6400), w, h)
+        self.assertEqual(link.box.method, 'memmove')
+        self.assertTrue(any('Framebuffer copy failed' in m for m in logs))
+        head = yuv.parse_header(link.plain[yuv.slot_offset(0):yuv.slot_offset(0) + 64])
+        self.assertIsNone(head['pic_base'])                          # this record carries its planes in its own slot
+        base = yuv.slot_offset(0) + yuv.Y_OFF
+        self.assertEqual(bytes(link.plain[base:base + w * h]), bytes(frame[:w * h]))
+        link.box.close()
+        tmp.close()
+
+    def test_the_method_is_refused_without_a_framebuffer(self):
+        from ytcrt import transport, yuv
+        box = transport.Mailbox(bytearray(yuv.MAP_BYTES))
+        box.use_method('fb')
+        self.assertEqual(box.method, 'memmove')
+        self.assertFalse(box.fb_active)
+        box.close()
+
+    def test_the_speed_test_compares_the_framebuffer_with_the_other_copies(self):
+        from ytcrt import yuv
+        tmp, fb = self.make()
+        link = self.link(fb, [])
+        link.copy_bytes, link.copy_report = 0, {}
+        avg, worst = link.measure_copy(2)
+        self.assertIn('fb', link.copy_report)
+        self.assertIn('memmove', link.copy_report)
+        link.box.close()
+        tmp.close()
+
+
 if __name__ == '__main__':
     unittest.main()

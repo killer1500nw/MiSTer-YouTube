@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// v0.15 stream controller. Eight 512KiB slots at physical 0x30001000 (see docs/FPGA-YUV-v0.15.md).
+// v0.16 stream controller (v0.15 plus header word 6, see docs/FPGA-YUV-v0.15.md). Eight 512KiB slots at physical 0x30001000.
 // Per record it reads the 64-byte header (picture geometry for the scaler) and copies only the 6400 bytes of PCM
 // into the audio banks; the YUV picture stays in DDR and is fetched row by row by yuv_scaler while it is displayed.
 // Single outstanding Avalon read, one 64-bit beat. Producer publication follows payload readback.
@@ -21,7 +21,7 @@ module ddr_stream #(
  input wire commit,
  output reg clear_frame=0,error=0,done=0,
  // header of the record that is waiting to be committed (stable until the commit)
- output reg [63:0] hdr0=0,hdr1=0,hdr2=0,hdr3=0,hdr4=0,hdr5=0,
+ output reg [63:0] hdr0=0,hdr1=0,hdr2=0,hdr3=0,hdr4=0,hdr5=0,hdr6=0,
  output wire [2:0] hdr_slot,
  output wire record_ready,
  // Controller/keyboard state, published every poll at BASE+5 / BASE+6 (see PROTOCOL.md).
@@ -30,6 +30,7 @@ module ddr_stream #(
  localparam [28:0] BASE=29'h06000000;
  localparam [28:0] AUDIO_BEATS=29'h0000E800;      // 0x74000 bytes / 8
  localparam [31:0] MAGIC=32'h35565559;            // "YUV5"
+ localparam [31:0] IDENT=32'h36445459;            // v0.16 identity (v0.15: 35445459, v0.14: 34445459)
  localparam OFF=0,IDLE=1,HEART=2,ACK=3,STATS=4,RHEAD=5,WHEAD=6,
   CHEAD=7,RPROD=8,WPROD=9,CPROD=10,BEGIN_FRAME=11,
   RDATA=12,WDATA=13,EMIT=14,END_FRAME=15,WAIT_COMMIT=16,WIN0=17,WIN1=18,
@@ -57,7 +58,7 @@ module ddr_stream #(
              state==WIN1 ? BASE+29'd6 : state==RPROD ? BASE+29'd1 :
              state==HRD ? slot_beats+{26'd0,hi} :
              state==RDATA ? slot_beats+AUDIO_BEATS+{14'd0,byte_count[17:3]} : BASE;
- assign din=state==HEART ? {heart,32'h35445459} :
+ assign din=state==HEART ? {heart,IDENT} :
             state==ACK ? {session,acked} : state==WIN0 ? in0_r :
             state==WIN1 ? in1_r : stats_data;
  assign audio_wr=enable && !stopping && state==EMIT;
@@ -122,7 +123,7 @@ module ddr_stream #(
      state<=IDLE;
     end
    end
-   // Header words 0..5 of the slot: geometry and flags for the scaler.
+   // Header words 0..6 of the slot: geometry, flags and the picture's base address for the scaler.
    HRD: if(!busy) begin
     if(valid) begin
      case(hi)
@@ -131,9 +132,10 @@ module ddr_stream #(
       2: hdr2<=dout;
       3: hdr3<=dout;
       4: hdr4<=dout;
-      default: hdr5<=dout;
+      5: hdr5<=dout;
+      default: hdr6<=dout;
      endcase
-     if(hi==3'd5) state<=HCHK;
+     if(hi==3'd6) state<=HCHK;
      else begin hi<=hi+1'b1; state<=HRD; end
     end else state<=HWAIT;
    end
@@ -144,9 +146,10 @@ module ddr_stream #(
      2: hdr2<=dout;
      3: hdr3<=dout;
      4: hdr4<=dout;
-     default: hdr5<=dout;
+     5: hdr5<=dout;
+     default: hdr6<=dout;
     endcase
-    if(hi==3'd5) state<=HCHK;
+    if(hi==3'd6) state<=HCHK;
     else begin hi<=hi+1'b1; state<=HRD; end
    end
    HCHK: begin

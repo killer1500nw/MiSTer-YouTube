@@ -49,6 +49,9 @@ CASES = {
     'soft1p':    (640, 360, 'Fill', False, 0, 'noise', 2, 0, 1),
     'soft2p':    (640, 360, 'Off', False, yuv.FLAG_DITHER, 'noise', None, 0, 2),
     'soft3p':    (480, 360, 'Off', False, yuv.FLAG_FULL_RANGE, 'bars', 0, 0, 3),
+    # the picture planes found by the physical address in header word 6 (10th item): a slot other than the record's own
+    'pic360':    (640, 360, 'Off', True, 0, 'noise', 1, 0, 0, True),
+    'pic240p':   (480, 360, 'Fill', False, yuv.FLAG_601, 'noise', None, 0, 0, True),
 }
 
 
@@ -108,8 +111,9 @@ def run_case(name, work):
     ov_index = CASES[name][6] if len(CASES[name]) > 6 else None
     flicker = CASES[name][7] if len(CASES[name]) > 7 else 0
     soft = CASES[name][8] if len(CASES[name]) > 8 else 0
+    by_address = bool(CASES[name][9]) if len(CASES[name]) > 9 else False
     y, u, v = make_picture(kind, w, h)
-    header = yuv.header_for(w, h, crop, interlaced, flags, ov_index)
+    header = yuv.header_for(w, h, crop, interlaced, flags, ov_index, None, (0x30000000 + 0x1000 + 3 * 0x80000) if by_address else None)
     hdr = yuv.parse_header(header)
     img = slot_image(header, y, u, v)
     words = struct.unpack('<%dQ' % (len(img) // 8), img)
@@ -127,7 +131,7 @@ def run_case(name, work):
     r = subprocess.run(cmd, cwd=work, capture_output=True, text=True, env=env)
     if r.returncode or 'Error' in r.stdout:
         return 'FAIL compile: ' + (r.stdout + r.stderr)[-1500:]
-    r = subprocess.run(['vsim', '-c', '-work', 'w', '+IL=%d' % interlaced, '+FLK=%d' % flicker, '+SOFT=%d' % soft, '-do', 'run -all; quit -f', 'tb_yuv_scaler'],
+    r = subprocess.run(['vsim', '-c', '-work', 'w', '+IL=%d' % interlaced, '+FLK=%d' % flicker, '+SOFT=%d' % soft, '+SLOT=%d' % (3 if by_address else 0), '+PIC=%d' % int(by_address), '-do', 'run -all; quit -f', 'tb_yuv_scaler'],
                        cwd=work, capture_output=True, text=True, env=env, timeout=1800)
     if 'DONE' not in r.stdout:
         return 'FAIL sim: ' + r.stdout[-1500:]

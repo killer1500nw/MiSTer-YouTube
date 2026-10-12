@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""YouTube CRT daemon: the GUI that lives inside the YouTubeCRT core (v0.15-yuv, or the older v0.14-auto).
+"""YouTube CRT daemon: the GUI that lives inside the YouTubeCRT core (v0.16-fb, or the older v0.15-yuv / v0.14-auto).
 
 Started once at boot (see Install_YouTube_CRT.sh). It idles, reading one
 memory word a few times a second, until you load the YouTubeCRT core from the

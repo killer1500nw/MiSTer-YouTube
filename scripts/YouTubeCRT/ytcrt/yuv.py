@@ -29,14 +29,29 @@ def overlay_offset(index):
 FLAG_601, FLAG_FULL_RANGE, FLAG_DITHER = 1, 2, 4
 
 
+# v0.16 core: the picture planes can live in the Linux framebuffer (physical start from FBIOGET_FSCREENINFO, 1920x1080x4 bytes). Slot n of
+# the pictures sits at fb_start + FB_SLOTS_OFFSET + n * FB_SLOT_STRIDE: far from the top of the buffer, where console text would be drawn.
+FB_SLOT_STRIDE = 0x74000          # the planes of one picture span Y_OFF .. V_OFF + 80 KB = 0x74000 bytes (the core's fixed plane offsets)
+FB_SLOTS_OFFSET = 0x3F0000
+FB_MIN_LENGTH = FB_SLOTS_OFFSET + 8 * FB_SLOT_STRIDE
+
+
+def fb_pic_base(fb_start, number):
+    """Physical address of the picture-plane base for record `number` when the planes are written to the framebuffer."""
+    return fb_start + FB_SLOTS_OFFSET + (number % 8) * FB_SLOT_STRIDE
+
+
 def slot_offset(number):
     return SLOT_BASE + (number % SLOTS) * SLOT_BYTES
 
 
-def pack_header(src_w, src_h, ystride, cstride, dx0, dw, dy0, dh, hstep, vstep, sx0, sy0, flags=0, overlay=None, ref_slot=None):
+def pack_header(src_w, src_h, ystride, cstride, dx0, dw, dy0, dh, hstep, vstep, sx0, sy0, flags=0, overlay=None, ref_slot=None,
+                pic_base=None):
     """64-byte slot header. hstep/vstep/sx0/sy0 are unsigned 16.16 fixed point. `overlay` = None or the index (0..2)
     of the overlay buffer to draw over this picture. `ref_slot` = None, or the slot whose Y/U/V planes this record shows again
-    (header word 5 bit 4 + slot in bits 7:5): the record then carries only a header and its audio."""
+    (header word 5 bit 4 + slot in bits 7:5): the record then carries only a header and its audio.
+    `pic_base` (v0.16 core) = None, or the physical byte address of the picture planes' base (word 6, bit 63 set): the planes are then
+    read from there (the Linux framebuffer, which the CPU can fill ten times faster) instead of from this record's slot."""
     for name, v, hi in (('src_w', src_w, MAX_W), ('src_h', src_h, MAX_H)):
         if not 2 <= v <= hi or v % 2:
             raise ValueError('%s %d is outside 2..%d or odd' % (name, v, hi))
@@ -49,7 +64,8 @@ def pack_header(src_w, src_h, ystride, cstride, dx0, dw, dy0, dh, hstep, vstep, 
              dx0 | (dw << 16) | (dy0 << 32) | (dh << 48),
              hstep | (vstep << 32),
              sx0 | (sy0 << 32),
-             (0 if overlay is None else (1 | ((overlay % OVERLAYS) << 1))) | (0 if ref_slot is None else (16 | ((ref_slot % 8) << 5))), 0, 0]
+             (0 if overlay is None else (1 | ((overlay % OVERLAYS) << 1))) | (0 if ref_slot is None else (16 | ((ref_slot % 8) << 5))),
+             0 if pic_base is None else ((1 << 63) | (pic_base & 0xFFFFFFF8)), 0]
     return struct.pack('<8Q', *words)
 
 
@@ -63,7 +79,8 @@ def parse_header(data):
             'hstep': w[3] & 0xFFFFFFFF, 'vstep': (w[3] >> 32) & 0xFFFFFFFF,
             'sx0': w[4] & 0xFFFFFFFF, 'sy0': (w[4] >> 32) & 0xFFFFFFFF,
             'ov_en': bool(w[5] & 1), 'ov_idx': (w[5] >> 1) & 3,
-            'ref': (w[5] >> 5) & 7 if w[5] & 16 else None}
+            'ref': (w[5] >> 5) & 7 if w[5] & 16 else None,
+            'pic_base': (w[6] & 0xFFFFFFFF) if w[6] >> 63 else None}
 
 
 def aligned_size(width, height):
@@ -112,11 +129,11 @@ def layout(src_w, src_h, crop='Off', interlaced=True):
             'sx0': int(round(sx0 * 65536)), 'sy0': int(round(sy0 * 65536)), 'prescale': prescale}
 
 
-def header_for(src_w, src_h, crop='Off', interlaced=True, flags=0, overlay=None, ref_slot=None):
+def header_for(src_w, src_h, crop='Off', interlaced=True, flags=0, overlay=None, ref_slot=None, pic_base=None):
     """Header for a frame of src_w x src_h samples (already aligned with aligned_size)."""
     g = layout(src_w, src_h, crop, interlaced)
     return pack_header(src_w, src_h, src_w, src_w // 2, g['dx0'], g['dw'], g['dy0'], g['dh'],
-                       g['hstep'], g['vstep'], g['sx0'], g['sy0'], flags, overlay, ref_slot)
+                       g['hstep'], g['vstep'], g['sx0'], g['sy0'], flags, overlay, ref_slot, pic_base)
 
 
 def pieces(header, y, u, v, audio, number):

@@ -14,8 +14,9 @@ from . import yuv
 
 IDENT_RGB = 0x34445459   # v0.14-auto core; v0.13 used 0x33445459
 IDENT_YUV = 0x35445459   # v0.15-yuv core
+IDENT_FB = 0x36445459    # v0.16-fb core: the same plus header word 6 (the picture planes can be read from the Linux framebuffer)
 IDENT = IDENT_RGB        # kept for older callers
-IDENTS = (IDENT_YUV, IDENT_RGB)
+IDENTS = (IDENT_FB, IDENT_YUV, IDENT_RGB)
 RUN = 0x33515459
 MAP_BYTES = yuv.MAP_BYTES        # one mapping serves both cores (the RGB core simply never touches the upper part)
 RGB_MAP_BYTES = 0x201000
@@ -53,7 +54,7 @@ def address_of(buf):
     return ctypes.cast(ctypes.c_char_p(buf), ctypes.c_void_p).value
 
 
-COPY_METHODS = ('memmove', 'parallel', 'cached')
+COPY_METHODS = ('fb', 'memmove', 'parallel', 'cached')
 PARALLEL_MIN = 65536               # a piece at least this big is split between the two CPU cores
 ARM_NR_CACHEFLUSH = 0x0F0002       # ARM Linux: cacheflush(start, end, 0) writes the data cache back to memory
 
@@ -64,8 +65,90 @@ def cacheflush(start, end):
         libc = ctypes.CDLL(None, use_errno=True)
         libc.syscall.argtypes = [ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
         return libc.syscall(ARM_NR_CACHEFLUSH, start, end, 0) == 0
-    except (OSError, AttributeError):
+    except Exception:                                   # no such system call (not an ARM Linux): the caller carries on without it
         return False
+
+
+class Framebuffer:
+    """The Linux framebuffer (/dev/fb0, the MiSTer_fb driver) as the place pictures are written for the v0.16 core.
+
+    The kernel maps it for fast merged writes (a 345 KB picture in about 1 ms against 8 to 28 ms for the uncached region at 0x30000000)
+    and the FPGA reads the same DDR. Slot n sits at yuv.fb_pic_base(start, n). After the writes a cacheflush call acts as the memory
+    barrier, and a few bytes of each piece are read back through an uncached /dev/mem window before the record is published."""
+
+    def __init__(self, start, length, fb_map, view_map):
+        self.start, self.length = start, length
+        self.fb_map, self.view_map = fb_map, view_map
+        self.base = ctypes.addressof(ctypes.c_char.from_buffer(fb_map))
+        self.view = ctypes.addressof(ctypes.c_char.from_buffer(view_map))
+
+    @classmethod
+    def open(cls, fb_path='/dev/fb0', mem_path='/dev/mem'):
+        """-> Framebuffer, or None when there is no usable one (not a MiSTer, too small, no permission...)."""
+        import fcntl
+        import mmap
+        import struct
+        fd = fdm = None
+        try:
+            fd = os.open(fb_path, os.O_RDWR)
+            info = bytearray(160)
+            fcntl.ioctl(fd, 0x4602, info)                         # FBIOGET_FSCREENINFO
+            start, length = struct.unpack('<II', bytes(info[16:24]))
+            if length < yuv.FB_MIN_LENGTH or start % 4096:
+                return None
+            fb_map = mmap.mmap(fd, length, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+            fdm = os.open(mem_path, os.O_RDWR | os.O_SYNC)
+            view_map = mmap.mmap(fdm, 8 * yuv.FB_SLOT_STRIDE, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE,
+                                 offset=start + yuv.FB_SLOTS_OFFSET)
+            fb = cls(start, length, fb_map, view_map)
+            fb.fds = (fd, fdm)
+            return fb
+        except (OSError, ValueError, ImportError, struct.error):
+            for f in (fd, fdm):
+                if f is not None:
+                    try:
+                        os.close(f)
+                    except OSError:
+                        pass
+            return None
+
+    def pic_base(self, number):
+        return yuv.fb_pic_base(self.start, number)
+
+    def write_planes(self, number, pieces):
+        """pieces = [(offset inside the picture slot, buffer)]: copy them into slot `number` and check that they arrived."""
+        slot_off = yuv.FB_SLOTS_OFFSET + (number % 8) * yuv.FB_SLOT_STRIDE
+        done = []
+        for off, src in pieces:
+            n = len(src)
+            if n <= 0:
+                continue
+            if off < 0 or off + n > yuv.FB_SLOT_STRIDE:
+                raise ValueError('picture piece outside its framebuffer slot')
+            addr = address_of(src)
+            ctypes.memmove(self.base + slot_off + off, addr, n)
+            done.append((off, n, addr))
+        last = done[-1] if done else None
+        if last:                                                    # the barrier: the merged writes are drained before the header goes out
+            cacheflush(self.base + slot_off + last[0] + last[1] - 64, self.base + slot_off + last[0] + last[1])
+        view_off = (number % 8) * yuv.FB_SLOT_STRIDE
+        for off, n, addr in done:
+            for p in {0, max(0, n // 2 - 8), max(0, n - 16)}:
+                k = min(16, n - p)
+                if ctypes.string_at(self.view + view_off + off + p, k) != ctypes.string_at(addr + p, k):
+                    raise RuntimeError('Framebuffer write verification failed.')
+
+    def close(self):
+        for m in (self.fb_map, self.view_map):
+            try:
+                m.close()
+            except (OSError, ValueError, BufferError):
+                pass
+        for f in getattr(self, 'fds', ()):
+            try:
+                os.close(f)
+            except OSError:
+                pass
 
 
 class Mailbox:
@@ -79,7 +162,7 @@ class Mailbox:
         self.cached = cached
         self.cached_base = ctypes.addressof(ctypes.c_char.from_buffer(cached)) if cached is not None else None
         self.method = 'memmove'
-
+        self.fb = None                  # a Framebuffer, when the v0.16 core and /dev/fb0 allow pictures to go there
         self.jobs = self.done = self.worker = None
 
     def use_method(self, method):
@@ -87,8 +170,14 @@ class Mailbox:
         or 'cached'); ignores what it cannot do."""
         if method == 'cached' and self.cached_base is not None:
             self.method = 'cached'
+        elif method == 'fb' and self.fb is not None:
+            self.method = 'fb'
         elif method in ('memmove', 'parallel'):
             self.method = method
+
+    @property
+    def fb_active(self):
+        return self.method == 'fb' and self.fb is not None
 
     # Stores to this memory are uncached and wait for the memory system one at a time, so one CPU core copies at only 15 to 50 MB/s
     # while the other core sits idle (the CPU log showed 45% idle during playback). A second thread copies the other half; ctypes
@@ -163,6 +252,9 @@ class Mailbox:
     def close(self):
         if self.jobs is not None:
             self.jobs.put(None)
+        if self.fb is not None:
+            self.fb.close()
+            self.fb = None
         del self.words
 
     def read(self, offset):
@@ -218,8 +310,9 @@ class Mailbox:
         return all(ctypes.string_at(self.base + offset + p, min(16, n - p)) == ctypes.string_at(addr + p, min(16, n - p))
                    for p in spots)
 
-    def picture(self, number, header, frame, ysize, audio):
-        """v0.15 core: header, Y/U/V planes (`frame` = Y then U then V, ysize bytes of Y) and PCM into slot `number`."""
+    def picture(self, number, header, frame, ysize, audio, in_fb=False):
+        """v0.15/v0.16 core: header, Y/U/V planes (`frame` = Y then U then V, ysize bytes of Y) and PCM into slot `number`.
+        With `in_fb` the planes go to the framebuffer (the header must carry that address, see yuv.header_for pic_base)."""
         if len(audio) != yuv.AUDIO_BYTES or number < 0:
             raise ValueError('Incorrect audio length or index.')
         base = yuv.slot_offset(number)
@@ -227,8 +320,12 @@ class Mailbox:
         if len(frame) != ysize + 2 * csize:
             raise ValueError('Incorrect picture size.')
         view = memoryview(frame)
-        self.copy_pieces([(base + yuv.Y_OFF, view[:ysize]), (base + yuv.U_OFF, view[ysize:ysize + csize]),
-                          (base + yuv.V_OFF, view[ysize + csize:])])
+        if in_fb:
+            self.fb.write_planes(number, [(yuv.Y_OFF, view[:ysize]), (yuv.U_OFF, view[ysize:ysize + csize]),
+                                          (yuv.V_OFF, view[ysize + csize:])])
+        else:
+            self.copy_pieces([(base + yuv.Y_OFF, view[:ysize]), (base + yuv.U_OFF, view[ysize:ysize + csize]),
+                              (base + yuv.V_OFF, view[ysize + csize:])])
         self.copy_in(base + yuv.AUDIO_OFF, ctypes.create_string_buffer(bytes(audio), yuv.AUDIO_BYTES))
         self.copy_in(base, ctypes.create_string_buffer(bytes(header), yuv.HEADER_BYTES))     # the header last
 

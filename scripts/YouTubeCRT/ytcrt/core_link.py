@@ -55,6 +55,7 @@ class Link:
         self.copy_bytes = 0
         self.copy_report = {}
         self._last_frame, self._last_at, self._last_size, self.repeats = None, -1, None, 0
+        self._last_in_fb = False
         self.full_total, self.full_count = 0.0, 0         # copy time of the records that carried a whole picture
 
     # lifecycle --------------------------------------------------------
@@ -72,6 +73,7 @@ class Link:
         except (OSError, ValueError):
             self.cached_memory = None
         self.box = t.Mailbox(self.memory, self.fd, self.cached_memory)
+        self.fb_candidate = t.Framebuffer.open()                  # used only if the core turns out to be v0.16 (see _adopt)
 
     def _wait(self, test, timeout, message):
         end = time.monotonic() + timeout
@@ -83,7 +85,14 @@ class Link:
         raise RuntimeError(message)
 
     def _adopt(self, ident):
+        """Remember which core this is; the v0.16 core can read pictures from the framebuffer."""
+        fb = getattr(self, 'fb_candidate', None)
+        if self.box is not None and ident == t.IDENT_FB and fb is not None and self.box.fb is None:
+            self.box.fb = fb
+            self.fb_candidate = None
         self.ident = ident
+        if self.box is not None and KINDS.get(ident) == 'yuv' and getattr(self, 'preferred_method', None):
+            self.box.use_method(self.preferred_method)
         self.kind = KINDS[ident]
         self.slots = YUV_SLOTS if self.kind == 'yuv' else SLOTS
 
@@ -265,18 +274,32 @@ class Link:
         # An identical picture (a repeat frame from a 24/25 fps video, a paused video, a still scene) is not copied again: the
         # record names the slot that already holds it. Only the record right after a full one may do this, so the slot is
         # never rewritten while the repeat is on screen (8 slots, at most 6 queued).
+        use_fb = self.box.fb_active                                # v0.16 core: the planes go to the framebuffer (fast), see Framebuffer
         again = (self._last_frame is not None and self._last_at == self.sent - 1 and self._last_size == (w, h)
-                 and (frame is self._last_frame or frame == self._last_frame))
-        header = yuv.header_for(w, h, crop, self.interlaced, flags, overlay, (self.sent - 1) % 8 if again else None)
+                 and self._last_in_fb == use_fb and (frame is self._last_frame or frame == self._last_frame))
         if overlay is not None:
             self.ov_ref[overlay] = self.sent
         if again:
+            if use_fb:                                             # name the picture by its address: the previous record's planes
+                header = yuv.header_for(w, h, crop, self.interlaced, flags, overlay, None, self.box.fb.pic_base(self.sent - 1))
+            else:
+                header = yuv.header_for(w, h, crop, self.interlaced, flags, overlay, (self.sent - 1) % 8)
             self.box.picture_again(self.sent, header, audio)
             self.repeats += 1
             self._last_at = -1                                     # the next record must carry its own picture
         else:
-            self.box.picture(self.sent, header, frame, w * h, audio)
-            self._last_frame, self._last_at, self._last_size = frame, self.sent, (w, h)
+            try:
+                header = yuv.header_for(w, h, crop, self.interlaced, flags, overlay, None, self.box.fb.pic_base(self.sent) if use_fb else None)
+                self.box.picture(self.sent, header, frame, w * h, audio, in_fb=use_fb)
+            except (RuntimeError, ValueError, OSError) as exc:
+                if not use_fb:
+                    raise
+                self.log('Framebuffer copy failed (%s): back to the normal copy' % exc)
+                self.box.method = 'memmove'                        # never again in this session
+                use_fb = False
+                header = yuv.header_for(w, h, crop, self.interlaced, flags, overlay)
+                self.box.picture(self.sent, header, frame, w * h, audio)
+            self._last_frame, self._last_at, self._last_size, self._last_in_fb = frame, self.sent, (w, h), use_fb
         self._published(started, not again)
 
     def upload_overlay(self, index, y, u, v):
@@ -373,7 +396,8 @@ print('fb0 %s start=0x%x len=%d avg_ms=%.2f worst_ms=%.2f' % (ident, start, leng
         return lines[-1] if (lines and not out.returncode) else ('failed (%d) %s' % (out.returncode, out.stderr.strip()[-80:]))
 
     def use_copy_method(self, method):
-        if self.kind == 'yuv':
+        self.preferred_method = method                      # applied again when the core is (re)detected: the framebuffer needs the v0.16 core
+        if self.kind == 'yuv' and self.box is not None:
             self.box.use_method(method)
 
     YUV_TEST_BYTES = 640 * 360 * 3 // 2        # a typical picture: 640x360 YUV 4:2:0
@@ -404,11 +428,15 @@ print('fb0 %s start=0x%x len=%d avg_ms=%.2f worst_ms=%.2f' % (ident, start, leng
         self.copy_bytes = self.YUV_TEST_BYTES
         self.copy_report = {}
         keep = self.box.method
+        rel_planes = [(yuv.Y_OFF, view[:ysize]), (yuv.U_OFF, view[ysize:ysize + ysize // 4]), (yuv.V_OFF, view[ysize + ysize // 4:])]
         for method in t.COPY_METHODS:
             self.box.use_method(method)
             if self.box.method == method:
                 try:
-                    result = time_it(lambda: self.box.copy_pieces(planes))
+                    if method == 'fb':
+                        result = time_it(lambda: self.box.fb.write_planes(self.sent, rel_planes))
+                    else:
+                        result = time_it(lambda: self.box.copy_pieces(planes))
                     if self.box.method == method:          # (a cached copy that failed its check switches itself off)
                         self.copy_report[method] = result
                 except (OSError, RuntimeError, ValueError):

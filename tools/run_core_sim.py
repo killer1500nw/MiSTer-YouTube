@@ -40,7 +40,8 @@ def audio_for(index):
     return bytes(out)
 
 
-REPEATS = {3: 2, 5: 4}          # record -> the earlier record whose picture it shows again (header and audio only, other overlay)
+REPEATS = {3: 2, 5: 4}
+BY_ADDRESS = {5}                  # ...and record 5 names the picture by its physical address (header word 6) instead of by slot          # record -> the earlier record whose picture it shows again (header and audio only, other overlay)
 
 
 def make_record(index, interlaced, again=None):
@@ -49,7 +50,9 @@ def make_record(index, interlaced, again=None):
         w, h, crop, flags, _ = GEOMETRIES[again % len(GEOMETRIES)]
         ov = (GEOMETRIES[again % len(GEOMETRIES)][4] or 0) + 1 if (GEOMETRIES[again % len(GEOMETRIES)][4] or 0) < 2 else 0
         y, u, v = run_yuv_sim.make_picture('noise', w, h, seed=100 + again)
-        header = yuv.header_for(w, h, crop, interlaced, flags, ov, again % 8)
+        by_addr = index in BY_ADDRESS
+        header = yuv.header_for(w, h, crop, interlaced, flags, ov, None if by_addr else again % 8,
+                                (0x30000000 + 0x1000 + (again % 8) * 0x80000) if by_addr else None)
         img = bytearray(yuv.SLOT_BYTES)
         img[0:64] = header
         img[yuv.AUDIO_OFF:yuv.AUDIO_OFF + yuv.AUDIO_BYTES] = audio_for(index)
@@ -109,7 +112,7 @@ def run(mode, nrec, nlate, work):
         problems.append('ack %s != %d (one behind the commit count)' % (stat['ack'], total - 1))
     if int(stat['played']) != total:
         problems.append('played %s != %d' % (stat['played'], total))
-    if int(stat['session']) != 77 or stat['ident'] != '35445459' or int(stat['error']) != 0:
+    if int(stat['session']) != 77 or stat['ident'] != '36445459' or int(stat['error']) != 0:
         problems.append('session/identity/error: %s' % stat)
     # video: every record's 480 (or 240) lines must be right
     expected = {}
