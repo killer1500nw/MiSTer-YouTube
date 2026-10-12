@@ -12,6 +12,7 @@ from .store import RESUME_MIN_MS
 TEST_CLIP = 'M7kB0lis3xg'
 CPU_LOG_SECONDS = 30.0         # how often playback logs the CPU split between the player and the decoders
 QUALITY_SETTLE = 1.2        # seconds after the last Quality press in the More panel before the picture restarts
+COPY_BUSY_PARALLEL = 2.2      # the two-core copy slows down less under load than the single-core one, but still does
 COPY_BUSY_CACHED = 1.5        # the same for the cached copy, which does not stall the CPU on every store
 COPY_BUSY = 3.2            # copying while ffmpeg decodes took about 23 ms against 7 ms on an idle MiSTer (corrected by _learn_copy)
 # The core starts consuming only once 4 records are queued (PROTOCOL.md prefill),
@@ -634,7 +635,7 @@ class App:
         if self.link.copy_bytes and copy_avg > 0:
             # Copying while ffmpeg is decoding is slower than on an idle MiSTer; start with twice the idle time and let
             # the real figures from playback correct it (see _learn_copy).
-            busy = COPY_BUSY if getattr(self.link.box, 'method', 'memmove') == 'memmove' else COPY_BUSY_CACHED
+            busy = {'memmove': COPY_BUSY, 'parallel': COPY_BUSY_PARALLEL}.get(getattr(self.link.box, 'method', 'memmove'), COPY_BUSY_CACHED)
             cal.update({'copy_ms': round(copy_avg * busy, 2), 'copy_bytes': self.link.copy_bytes,
                         'copy_fixed': self.link.kind != 'yuv'})
         self.store.set('cal', cal)

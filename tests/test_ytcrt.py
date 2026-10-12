@@ -2056,9 +2056,51 @@ class CopyMethods(unittest.TestCase):
             link.measure_copy(2)
         finally:
             transport.cacheflush = saved
-        self.assertEqual(sorted(link.copy_report), ['memmove'])
-        self.assertEqual(link.box.method, 'memmove')
+        self.assertEqual(sorted(link.copy_report), ['memmove', 'parallel'])      # cached is left out: its flush is not available
+        self.assertIn(link.box.method, ('memmove', 'parallel'))
         link.box.close()
+
+    def test_parallel_copy_lands_every_piece_exactly(self):
+        import mmap
+        from ytcrt import transport, yuv
+        plain = mmap.mmap(-1, yuv.MAP_BYTES)
+        box = transport.Mailbox(plain)
+        box.use_method('parallel')
+        self.assertEqual(box.method, 'parallel')
+        base = yuv.slot_offset(3)
+        y = bytes((i * 7) & 255 for i in range(230400))
+        u = bytes((i * 3) & 255 for i in range(57600))
+        v = bytes((i * 5) & 255 for i in range(57600))
+        for _ in range(3):                                    # repeated, so the helper thread is reused
+            box.copy_pieces([(base + yuv.Y_OFF, y), (base + yuv.U_OFF, u), (base + yuv.V_OFF, v)])
+        self.assertEqual(bytes(plain[base + yuv.Y_OFF:base + yuv.Y_OFF + len(y)]), y)
+        self.assertEqual(bytes(plain[base + yuv.U_OFF:base + yuv.U_OFF + len(u)]), u)
+        self.assertEqual(bytes(plain[base + yuv.V_OFF:base + yuv.V_OFF + len(v)]), v)
+        box.close()
+
+    def test_picture_uses_the_parallel_copy_and_still_writes_header_last(self):
+        import mmap
+        from ytcrt import transport, yuv
+        plain = mmap.mmap(-1, yuv.MAP_BYTES)
+        box = transport.Mailbox(plain)
+        box.use_method('parallel')
+        w, h = 128, 96
+        frame = bytes(range(256)) * (w * h * 3 // 2 // 256)
+        header = yuv.header_for(w, h, 'Off', True)
+        box.picture(2, header, frame, w * h, bytes(6400))
+        base = yuv.slot_offset(2)
+        self.assertEqual(bytes(plain[base:base + 64]), header)
+        self.assertEqual(bytes(plain[base + yuv.Y_OFF:base + yuv.Y_OFF + w * h]), frame[:w * h])
+        box.close()
+
+    def test_the_split_is_balanced(self):
+        from ytcrt import transport
+        box = transport.Mailbox(bytearray(4096))
+        mine, theirs = box._split([(0, 0, 230400), (300000, 300000, 57600), (400000, 400000, 57600)])
+        a, b = sum(p[2] for p in mine), sum(p[2] for p in theirs)
+        self.assertEqual(a + b, 345600)
+        self.assertLess(abs(a - b), 60000)
+        box.close()
 
 
 class CopyInTheCostModel(unittest.TestCase):

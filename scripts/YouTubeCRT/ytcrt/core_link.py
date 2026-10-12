@@ -359,7 +359,11 @@ print('slice %.2f %.2f %d' % (1000 * sum(t) / n, 1000 * max(t), check()))
             self.copy_report = {'record': time_it(lambda: self.box.record(self.sent, bytes(data)))}
             return self.copy_report['record']
         data = bytearray(self.YUV_TEST_BYTES)
-        where = yuv.slot_offset(self.sent) + yuv.Y_OFF
+        where = yuv.slot_offset(self.sent)
+        ysize = 640 * 360
+        view = memoryview(data)                               # the planes of a 640x360 picture, as picture() copies them
+        planes = [(where + yuv.Y_OFF, view[:ysize]), (where + yuv.U_OFF, view[ysize:ysize + ysize // 4]),
+                  (where + yuv.V_OFF, view[ysize + ysize // 4:])]
         self.copy_bytes = self.YUV_TEST_BYTES
         self.copy_report = {}
         keep = self.box.method
@@ -367,7 +371,7 @@ print('slice %.2f %.2f %d' % (1000 * sum(t) / n, 1000 * max(t), check()))
             self.box.use_method(method)
             if self.box.method == method:
                 try:
-                    result = time_it(lambda: self.box.copy_in(where, data))
+                    result = time_it(lambda: self.box.copy_pieces(planes))
                     if self.box.method == method:          # (a cached copy that failed its check switches itself off)
                         self.copy_report[method] = result
                 except (OSError, RuntimeError, ValueError):

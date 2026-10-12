@@ -7,6 +7,8 @@ FPGA, identity 0x35445459, see docs/FPGA-YUV-v0.15.md). The mailbox words are th
 from pathlib import Path
 import ctypes
 import os
+import queue
+import threading
 from .memory_layout import check_layout, BASE
 from . import yuv
 
@@ -51,7 +53,8 @@ def address_of(buf):
     return ctypes.cast(ctypes.c_char_p(buf), ctypes.c_void_p).value
 
 
-COPY_METHODS = ('memmove', 'cached')
+COPY_METHODS = ('memmove', 'parallel', 'cached')
+PARALLEL_MIN = 65536               # a piece at least this big is split between the two CPU cores
 ARM_NR_CACHEFLUSH = 0x0F0002       # ARM Linux: cacheflush(start, end, 0) writes the data cache back to memory
 
 
@@ -77,14 +80,89 @@ class Mailbox:
         self.cached_base = ctypes.addressof(ctypes.c_char.from_buffer(cached)) if cached is not None else None
         self.method = 'memmove'
 
+        self.jobs = self.done = self.worker = None
+
     def use_method(self, method):
-        """Pick how bulk copies are made ('memmove' into the uncached mapping, or 'cached'); ignores what it cannot do."""
+        """Pick how bulk copies are made ('memmove' into the uncached mapping, 'parallel' = the same on both CPU cores at once,
+        or 'cached'); ignores what it cannot do."""
         if method == 'cached' and self.cached_base is not None:
             self.method = 'cached'
-        elif method == 'memmove':
-            self.method = 'memmove'
+        elif method in ('memmove', 'parallel'):
+            self.method = method
+
+    # Stores to this memory are uncached and wait for the memory system one at a time, so one CPU core copies at only 15 to 50 MB/s
+    # while the other core sits idle (the CPU log showed 45% idle during playback). A second thread copies the other half; ctypes
+    # releases the interpreter lock during memmove, so both really run at the same time.
+    def _worker_loop(self):
+        while True:
+            job = self.jobs.get()
+            if job is None:
+                return
+            try:
+                for dst, src, n in job:
+                    ctypes.memmove(dst, src, n)
+                self.done.put(None)
+            except Exception as exc:                     # reported to the thread that waits for it
+                self.done.put(exc)
+
+    def _split(self, pieces):
+        """[(destination address, source address, bytes)] cut into two lists of about equal size."""
+        flat = []
+        for dst, src, n in pieces:
+            if n >= PARALLEL_MIN:
+                half = (n // 2) & ~7
+                flat += [(dst, src, half), (dst + half, src + half, n - half)]
+            else:
+                flat.append((dst, src, n))
+        flat.sort(key=lambda p: -p[2])
+        mine, theirs, a, b = [], [], 0, 0
+        for p in flat:
+            if a <= b:
+                mine.append(p)
+                a += p[2]
+            else:
+                theirs.append(p)
+                b += p[2]
+        return mine, theirs
+
+    def copy_pieces(self, pieces):
+        """Copy several (offset, buffer) pieces into the mapping and verify the ends of each. With method 'parallel' the work is
+        shared between this thread and a helper thread."""
+        checked = []
+        for offset, src in pieces:
+            n = len(src)
+            if n <= 0:
+                continue
+            if offset < 0 or offset + n > len(self.words) * 4 or offset % 4:
+                raise ValueError('copy outside the mapping')
+            checked.append((offset, src, n, address_of(src)))
+        if self.method != 'parallel' or len(checked) == 0:
+            for offset, src, n, addr in checked:
+                self.copy_in(offset, src, n)
+            return
+        if self.worker is None:
+            self.jobs, self.done = queue.SimpleQueue(), queue.SimpleQueue()
+            self.worker = threading.Thread(target=self._worker_loop, name='copy-helper', daemon=True)
+            self.worker.start()
+        mine, theirs = self._split([(self.base + o, addr, n) for o, s, n, addr in checked])
+        self.jobs.put(theirs)
+        for dst, src, n in mine:
+            ctypes.memmove(dst, src, n)
+        try:
+            result = self.done.get(timeout=5)
+        except queue.Empty:
+            raise RuntimeError('The copy helper did not finish.')
+        if result is not None:
+            raise result
+        for offset, src, n, addr in checked:
+            k = min(n, 16)
+            if ctypes.string_at(self.base + offset, k) != ctypes.string_at(addr, k) or \
+                    ctypes.string_at(self.base + offset + n - k, k) != ctypes.string_at(addr + n - k, k) or not self._intact(offset, addr, n):
+                raise RuntimeError('Bulk copy verification failed.')
 
     def close(self):
+        if self.jobs is not None:
+            self.jobs.put(None)
         del self.words
 
     def read(self, offset):
@@ -149,9 +227,8 @@ class Mailbox:
         if len(frame) != ysize + 2 * csize:
             raise ValueError('Incorrect picture size.')
         view = memoryview(frame)
-        self.copy_in(base + yuv.Y_OFF, view[:ysize])
-        self.copy_in(base + yuv.U_OFF, view[ysize:ysize + csize])
-        self.copy_in(base + yuv.V_OFF, view[ysize + csize:])
+        self.copy_pieces([(base + yuv.Y_OFF, view[:ysize]), (base + yuv.U_OFF, view[ysize:ysize + csize]),
+                          (base + yuv.V_OFF, view[ysize + csize:])])
         self.copy_in(base + yuv.AUDIO_OFF, ctypes.create_string_buffer(bytes(audio), yuv.AUDIO_BYTES))
         self.copy_in(base, ctypes.create_string_buffer(bytes(header), yuv.HEADER_BYTES))     # the header last
 
