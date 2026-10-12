@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import profiles
+from . import profiles, yuv
 
 
 class PlaybackError(RuntimeError):
@@ -455,7 +455,7 @@ def resolve(rt, profile, video_id, cancel, log, note=None, quality='Auto', cal=N
 
 
 def decoder_command(rt, profile, source, kind, start_s=0, speed='Normal', limit_s=None, to_null=False, crop='Off',
-                    decode_only=False):
+                    decode_only=False, target=None):
     args = [str(rt.ffmpeg), '-hide_banner', '-loglevel', 'error', '-nostdin',
             '-threads', '2', '-filter_threads', '1', '-rw_timeout', '20000000',
             '-protocol_whitelist', 'http,https,tcp,tls,crypto']
@@ -474,7 +474,19 @@ def decoder_command(rt, profile, source, kind, start_s=0, speed='Normal', limit_
     args += ['-i', source['url']]
     if limit_s:
         args += ['-t', str(limit_s)]
-    if kind == 'video' and decode_only:
+    if kind == 'video' and target is not None:
+        # v0.15 core: planar YUV at the picture's own size (the FPGA scales and converts colour). The crop only trims the
+        # width to a multiple of 16 and the height to an even number; `target['prescale']` is set when the core could not
+        # step through the picture fast enough.
+        args[args.index('-loglevel') + 1] = 'info'                    # the stream line says which colour matrix it uses
+        args.insert(args.index('-nostdin') + 1, '-nostats')
+        vf = 'fps=%d:start_time=0' % profile.fps
+        if target.get('prescale'):
+            vf += ',scale=%d:%d:flags=fast_bilinear' % target['prescale']
+        else:
+            vf += r',crop=iw-mod(iw\,16):ih-mod(ih\,2)'
+        args += ['-map', '0:v:0', '-an', '-vf', vf, '-pix_fmt', 'yuv420p', '-threads', '1', '-f', 'rawvideo']
+    elif kind == 'video' and decode_only:
         # Speed test only: just the decoder, with no scaling or colour conversion (what an FPGA scaler would leave to the ARM).
         args += ['-map', '0:v:0', '-an', '-vf', 'null', '-pix_fmt', 'yuv420p', '-threads', '1', '-f', 'rawvideo']
     elif kind == 'video':
@@ -496,8 +508,9 @@ class Decoders:
 
     AUDIO_RESTARTS = 30
 
-    def __init__(self, commands, video_bytes, audio_bytes, restart_audio=None, start_s=0.0, duration=0):
+    def __init__(self, commands, video_bytes, audio_bytes, restart_audio=None, start_s=0.0, duration=0, split=False):
         self.limits = {'video': video_bytes, 'audio': audio_bytes}
+        self.split = split                        # hand out (video, audio) instead of one concatenated record
         self.restart_audio = restart_audio        # callable(start_s) -> ffmpeg command: reopen audio where it stopped
         self.start_s, self.duration, self.out_records, self.restarts = start_s, duration, 0, 0
         self.audio_got = 0                        # audio bytes received since the audio ffmpeg was (re)started
@@ -518,6 +531,19 @@ class Decoders:
         for proc in self.procs.values():
             stop_process(proc)
 
+    def colour_flags(self, height):
+        """Header flags (yuv.FLAG_*) for the video, from the stream line ffmpeg printed: matrix and range."""
+        text = bytes(self.errors.get('video', b'')).decode(errors='replace')
+        m = re.search(r'Video: [^\n]*?yuv\w*\(([^)]*)\)', text)
+        tags = m.group(1) if m else ''
+        if 'bt709' in tags:
+            bt601 = False
+        elif 'smpte170m' in tags or 'bt470bg' in tags:
+            bt601 = True
+        else:                                      # untagged: standard definition is 601, high definition 709
+            bt601 = height <= 576
+        return (yuv.FLAG_601 if bt601 else 0) | (yuv.FLAG_FULL_RANGE if re.search(r'\bpc\b|\bjpeg\b', tags) else 0)
+
     def next_record(self, health):
         limits = self.limits
         vb, ab = limits['video'], limits['audio']
@@ -531,8 +557,13 @@ class Decoders:
             if len(self.data['video']) == vb and (len(self.data['audio']) == ab or self.eof['audio']):
                 if len(self.data['audio']) % 4:
                     raise RuntimeError('Decoder ended with a partial stereo sample.')
-                record = bytes(self.data['video']) + bytes(self.data['audio']).ljust(ab, b'\x00')
-                self.data['video'].clear()
+                audio = bytes(self.data['audio']).ljust(ab, b'\x00')
+                if self.split:                        # the video buffer changes hands without a copy
+                    record = (self.data['video'], audio)
+                    self.data['video'] = bytearray()
+                else:
+                    record = bytes(self.data['video']) + audio
+                    self.data['video'].clear()
                 self.data['audio'].clear()
                 self.out_records += 1
                 return record
@@ -680,20 +711,39 @@ class RecordPipeline:
             raise RuntimeError('Pipe reader did not stop within five seconds.')
 
 
-def open_pipeline(rt, profile, media, start_s, speed, cancel, crop='Off'):
-    commands = {'video': decoder_command(rt, profile, media.video, 'video', start_s, speed, crop=crop)}
+def yuv_target(media, interlaced=True):
+    """Size of the YUV pictures for this video: its own size trimmed to a multiple of 16 x 2, or a pre-scaled size when it
+    is larger than the core's row buffers (640 x 480) or the core could not step through it fast enough.
+    -> {'w', 'h', 'prescale'}"""
+    w, h = yuv.aligned_size(int(media.video['width']), int(media.video['height']))
+    pre = None
+    if w > yuv.MAX_W or h > yuv.MAX_H:
+        k = min(yuv.MAX_W / float(w), yuv.MAX_H / float(h))
+        pre = yuv.aligned_size(int(w * k), int(h * k))
+        w, h = pre
+    steep = yuv.layout(w, h, 'Off', interlaced)['prescale']      # 'Off' has the smallest destination: the strictest case
+    if steep:
+        pre = steep
+        w, h = steep
+    return {'w': w, 'h': h, 'prescale': pre}
+
+
+def open_pipeline(rt, profile, media, start_s, speed, cancel, crop='Off', target=None):
+    """`target` (from yuv_target) selects the v0.15 core's YUV pictures instead of 320x240 RGB565."""
+    commands = {'video': decoder_command(rt, profile, media.video, 'video', start_s, speed, crop=crop, target=target)}
     again = None
     if media.audio:
         commands['audio'] = decoder_command(rt, profile, media.audio, 'audio', start_s)
         again = lambda at: decoder_command(rt, profile, media.audio, 'audio', at)
-    return RecordPipeline(Decoders(commands, profile.video_bytes, profile.audio_bytes, again, start_s, media.duration),
+    vbytes = target['w'] * target['h'] * 3 // 2 if target else profile.video_bytes
+    return RecordPipeline(Decoders(commands, vbytes, profile.audio_bytes, again, start_s, media.duration, split=bool(target)),
                           cancel)
 
 
-def _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only):
+def _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only, target=None):
     """Wall-clock seconds ffmpeg needs to decode `seconds` of the video into the void."""
     cmd = decoder_command(rt, profile, media.video, 'video', start_s=min(30, max(0, media.duration // 3)),
-                          speed=speed, limit_s=seconds, to_null=True, decode_only=decode_only)
+                          speed=speed, limit_s=seconds, to_null=True, decode_only=decode_only, target=target)
     started = time.monotonic()
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE, start_new_session=True)
@@ -711,15 +761,15 @@ def _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only):
     return wall
 
 
-def benchmark(rt, profile, media, speed, seconds=10, cancel=lambda: None, decode_only=False):
+def benchmark(rt, profile, media, speed, seconds=10, cancel=lambda: None, decode_only=False, target=None):
     """How many times faster than real time the ARM decodes this stream (>= 1.0x keeps up).
 
     ffmpeg needs a few seconds just to start and open the stream, which made short tests read about 25% too slow.
     Two runs of different lengths cancel that out: the rate is the extra video divided by the extra time.
     decode_only skips the scaling and colour conversion, to show how much of the time they take."""
     short = max(3.0, seconds * 0.4)
-    wall_short = _bench_wall(rt, profile, media, speed, short, cancel, decode_only)
-    wall_long = _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only)
+    wall_short = _bench_wall(rt, profile, media, speed, short, cancel, decode_only, target)
+    wall_long = _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only, target)
     extra = wall_long - wall_short
     if extra > 0.25:                                    # a sane difference: use the slope
         return min(10.0, (seconds - short) / extra)

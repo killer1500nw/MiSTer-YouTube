@@ -3,6 +3,7 @@ import re
 import struct
 from pathlib import Path
 BASE=0x30000000
+MAP_BYTES=0x461000      # mailbox + 8 slots + 3 overlay buffers of the v0.15 core (see yuv.MAP_BYTES)
 
 def check_layout():
     if platform.machine() != 'armv7l':
@@ -19,7 +20,7 @@ def check_layout():
         match = re.match(r'\s*([0-9a-f]+)-([0-9a-f]+)\s*:\s*(.*)', line)
         if match:
             low, high = int(match[1], 16), int(match[2], 16)
-            if low <= BASE+0x201000-1 and high >= BASE:
+            if low <= BASE+MAP_BYTES-1 and high >= BASE:
                 raise RuntimeError('Mailbox overlaps a reported memory resource: ' + match[3])
             if match[3] == 'System RAM':
                 ranges.append((low, high))

@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
-"""Native ARM copy helper and CPU-owned DDR mailbox access."""
+"""Native ARM copy helper and CPU-owned DDR mailbox access.
+
+Two cores speak this protocol: v0.14-auto (RGB565 records, identity 0x34445459) and v0.15-yuv (YUV pictures scaled by the
+FPGA, identity 0x35445459, see docs/FPGA-YUV-v0.15.md). The mailbox words are the same; the slot layout differs.
+"""
 from pathlib import Path
 import ctypes
 from .memory_layout import check_layout, BASE
+from . import yuv
 
-IDENT = 0x34445459   # v0.14-auto core; v0.13 used 0x33445459
+IDENT_RGB = 0x34445459   # v0.14-auto core; v0.13 used 0x33445459
+IDENT_YUV = 0x35445459   # v0.15-yuv core
+IDENT = IDENT_RGB        # kept for older callers
+IDENTS = (IDENT_YUV, IDENT_RGB)
 RUN = 0x33515459
-MAP_BYTES = 0x201000
+MAP_BYTES = yuv.MAP_BYTES        # one mapping serves both cores (the RGB core simply never touches the upper part)
+RGB_MAP_BYTES = 0x201000
 SLOTS = 8
 RECORD_BYTES = 160000
 FRAME_SECONDS = 666528 / 20000000
+YUV_FRAME_SECONDS = 1333056 / 40000000
 
 
 NATIVE = None
@@ -29,9 +39,19 @@ def load_native(path=None):
     return NATIVE
 
 
+def address_of(buf):
+    """Address of the first byte of a bytes / bytearray / memoryview (writable or not)."""
+    if isinstance(buf, (bytearray, memoryview)) and not (isinstance(buf, memoryview) and buf.readonly):
+        return ctypes.addressof(ctypes.c_char.from_buffer(buf))
+    if isinstance(buf, memoryview):
+        buf = buf.tobytes()
+    return ctypes.cast(ctypes.c_char_p(buf), ctypes.c_void_p).value
+
+
 class Mailbox:
     def __init__(self, memory):
-        self.words = (ctypes.c_uint32 * (MAP_BYTES // 4)).from_buffer(memory)
+        self.words = (ctypes.c_uint32 * (len(memory) // 4)).from_buffer(memory)
+        self.base = ctypes.addressof(self.words)
 
     def close(self):
         del self.words
@@ -52,6 +72,7 @@ class Mailbox:
         self.write(0, RUN if session else 0)
 
     def record(self, number, data):
+        """v0.14 core: one 160000-byte RGB565 + PCM record into slot `number`."""
         if len(data) != RECORD_BYTES or number < 0:
             raise ValueError('Incorrect record length or index.')
         source = ctypes.create_string_buffer(data, RECORD_BYTES)
@@ -60,13 +81,48 @@ class Mailbox:
         if result:
             raise RuntimeError('Native record copy failed (%d).' % result)
 
+    # v0.15 core: bulk copies (libc memmove into the mapping, checked by reading the ends back) ----------------------
+    def copy_in(self, offset, src, nbytes=None):
+        """Copy a buffer (bytes / bytearray / memoryview, 4-byte aligned) to `offset` of the mapping and verify its ends."""
+        n = len(src) if nbytes is None else nbytes
+        if n <= 0:
+            return
+        if offset < 0 or offset + n > len(self.words) * 4 or offset % 4:
+            raise ValueError('copy outside the mapping')
+        addr = address_of(src)
+        ctypes.memmove(self.base + offset, addr, n)
+        k = min(n, 16)
+        if ctypes.string_at(self.base + offset, k) != ctypes.string_at(addr, k) or \
+                ctypes.string_at(self.base + offset + n - k, k) != ctypes.string_at(addr + n - k, k):
+            raise RuntimeError('Bulk copy verification failed.')
+
+    def picture(self, number, header, frame, ysize, audio):
+        """v0.15 core: header, Y/U/V planes (`frame` = Y then U then V, ysize bytes of Y) and PCM into slot `number`."""
+        if len(audio) != yuv.AUDIO_BYTES or number < 0:
+            raise ValueError('Incorrect audio length or index.')
+        base = yuv.slot_offset(number)
+        csize = ysize // 4
+        if len(frame) != ysize + 2 * csize:
+            raise ValueError('Incorrect picture size.')
+        view = memoryview(frame)
+        self.copy_in(base + yuv.Y_OFF, view[:ysize])
+        self.copy_in(base + yuv.U_OFF, view[ysize:ysize + csize])
+        self.copy_in(base + yuv.V_OFF, view[ysize + csize:])
+        self.copy_in(base + yuv.AUDIO_OFF, ctypes.create_string_buffer(bytes(audio), yuv.AUDIO_BYTES))
+        self.copy_in(base, ctypes.create_string_buffer(bytes(header), yuv.HEADER_BYTES))     # the header last
+
+    def overlay(self, index, y, u, v):
+        base = yuv.overlay_offset(index)
+        self.copy_in(base + yuv.OV_Y_OFF, y)
+        self.copy_in(base + yuv.OV_U_OFF, u)
+        self.copy_in(base + yuv.OV_V_OFF, v)
+
     def status(self, session):
         actual = self.read(20)
         consumed = self.read(16)
-        error = self.read(28)
+        error = self.read(28) & 1          # bit 1 of that word is the interlace flag of the v0.15 core
         if actual != session:
             raise RuntimeError('Core session changed. The core was reloaded.')
         if error:
             raise RuntimeError('FPGA reported a transfer or buffer error (%d).' % error)
         return consumed
-

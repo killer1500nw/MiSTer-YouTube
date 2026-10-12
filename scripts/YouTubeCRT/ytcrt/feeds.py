@@ -24,6 +24,8 @@ RSS_DOWN_FOR = 30 * 60  # and do not try it again for this long (seconds)
 RSS_BACKOFF = 1.0       # seconds; waits 1 s, 2 s, 3 s between tries
 UA = 'Mozilla/5.0 (X11; Linux armv7l) YouTubeCRT/1.0'
 THUMB_W, THUMB_H = 80, 45
+THUMB_BYTES = {'rgb565': THUMB_W * THUMB_H * 2,
+               'yuv420p': THUMB_W * THUMB_H + 2 * ((THUMB_W + 1) // 2) * ((THUMB_H + 1) // 2)}      # Y, then U and V
 
 
 def parse_time(text):
@@ -81,6 +83,7 @@ class Feeds:
         self.thumbs = {}       # video id -> bytes | None (failed) ; absent = not requested
         self.thumb_pending = set()
         self.ffmpeg = None
+        self.thumb_format = 'rgb565'          # 'yuv420p' when the v0.15 core's YUV canvas draws them
         self.generation = 0    # bumped whenever data changes, UI polls it
         self.log = lambda msg: None   # set by the player so problems reach the log file
         self.status = {}       # subscription ref -> 'ok, 15 videos' or the reason it failed
@@ -448,7 +451,7 @@ class Feeds:
 
     # thumbnails -------------------------------------------------------
     def thumb(self, vid):
-        """-> raw RGB565LE bytes (THUMB_W x THUMB_H) or None; schedules a fetch."""
+        """-> raw picture bytes (THUMB_W x THUMB_H, in `thumb_format`) or None; schedules a fetch."""
         with self.lock:
             if vid in self.thumbs:
                 return self.thumbs[vid]
@@ -460,12 +463,13 @@ class Feeds:
 
     def _fetch_thumb(self, vid):
         self.wait_turn()
-        path = os.path.join(self.cache_dir, 'thumbs', vid + '.rgb565')
+        fmt = self.thumb_format
+        path = os.path.join(self.cache_dir, 'thumbs', vid + ('.rgb565' if fmt == 'rgb565' else '.yuv'))
         data = None
         try:
             with open(path, 'rb') as f:
                 data = f.read()
-            if len(data) != THUMB_W * THUMB_H * 2:
+            if len(data) != THUMB_BYTES[fmt]:
                 data = None
         except OSError:
             pass
@@ -474,10 +478,10 @@ class Feeds:
                 jpg = self._get('https://i.ytimg.com/vi/%s/mqdefault.jpg' % vid, timeout=10)
                 p = subprocess.run(
                     [self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-i', 'pipe:0',
-                     '-vf', 'scale=%d:%d:flags=area' % (THUMB_W, THUMB_H), '-pix_fmt', 'rgb565le',
+                     '-vf', 'scale=%d:%d:flags=area' % (THUMB_W, THUMB_H), '-pix_fmt', 'rgb565le' if fmt == 'rgb565' else 'yuv420p',
                      '-frames:v', '1', '-f', 'rawvideo', 'pipe:1'],
                     input=jpg, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
-                if p.returncode == 0 and len(p.stdout) == THUMB_W * THUMB_H * 2:
+                if p.returncode == 0 and len(p.stdout) == THUMB_BYTES[fmt]:
                     data = p.stdout
                     os.makedirs(os.path.dirname(path), exist_ok=True)
                     with open(path, 'wb') as f:

@@ -14,7 +14,17 @@ SLOTS = 8
 MAX_W, MAX_H = 640, 480            # largest source picture the line buffers hold
 FRAME_W, FRAME_H = 640, 480        # the CRT frame the picture is scaled into (240 lines per field in 480i)
 AUDIO_BYTES = 6400
-MAP_BYTES = SLOT_BASE + SLOTS * SLOT_BYTES          # the mailbox mapping grows to cover all slots
+# Overlay buffers (the GUI / on-screen display, 320x240 4:2:0, drawn 2x over the picture): three of 128 KiB after the slots.
+OVERLAY_BASE = SLOT_BASE + SLOTS * SLOT_BYTES
+OVERLAY_BYTES = 0x20000
+OVERLAYS = 3
+OV_W, OV_H = 320, 240
+OV_Y_OFF, OV_U_OFF, OV_V_OFF = 0x00000, 0x13000, 0x18000     # inside an overlay buffer; luma 0 = transparent
+MAP_BYTES = OVERLAY_BASE + OVERLAYS * OVERLAY_BYTES          # the mailbox mapping covers the mailbox, slots and overlays
+
+
+def overlay_offset(index):
+    return OVERLAY_BASE + (index % OVERLAYS) * OVERLAY_BYTES
 
 FLAG_601, FLAG_FULL_RANGE, FLAG_DITHER = 1, 2, 4
 
@@ -23,8 +33,9 @@ def slot_offset(number):
     return SLOT_BASE + (number % SLOTS) * SLOT_BYTES
 
 
-def pack_header(src_w, src_h, ystride, cstride, dx0, dw, dy0, dh, hstep, vstep, sx0, sy0, flags=0):
-    """64-byte slot header. hstep/vstep/sx0/sy0 are unsigned 16.16 fixed point."""
+def pack_header(src_w, src_h, ystride, cstride, dx0, dw, dy0, dh, hstep, vstep, sx0, sy0, flags=0, overlay=None):
+    """64-byte slot header. hstep/vstep/sx0/sy0 are unsigned 16.16 fixed point. `overlay` = None or the index (0..2)
+    of the overlay buffer to draw over this picture."""
     for name, v, hi in (('src_w', src_w, MAX_W), ('src_h', src_h, MAX_H)):
         if not 2 <= v <= hi or v % 2:
             raise ValueError('%s %d is outside 2..%d or odd' % (name, v, hi))
@@ -36,7 +47,8 @@ def pack_header(src_w, src_h, ystride, cstride, dx0, dw, dy0, dh, hstep, vstep, 
              src_w | (src_h << 16) | (ystride << 32) | (cstride << 48),
              dx0 | (dw << 16) | (dy0 << 32) | (dh << 48),
              hstep | (vstep << 32),
-             sx0 | (sy0 << 32), 0, 0, 0]
+             sx0 | (sy0 << 32),
+             0 if overlay is None else (1 | ((overlay % OVERLAYS) << 1)), 0, 0]
     return struct.pack('<8Q', *words)
 
 
@@ -48,7 +60,8 @@ def parse_header(data):
             'ystride': (w[1] >> 32) & 0xFFFF, 'cstride': (w[1] >> 48) & 0xFFFF,
             'dx0': w[2] & 0xFFFF, 'dw': (w[2] >> 16) & 0xFFFF, 'dy0': (w[2] >> 32) & 0xFFFF, 'dh': (w[2] >> 48) & 0xFFFF,
             'hstep': w[3] & 0xFFFFFFFF, 'vstep': (w[3] >> 32) & 0xFFFFFFFF,
-            'sx0': w[4] & 0xFFFFFFFF, 'sy0': (w[4] >> 32) & 0xFFFFFFFF}
+            'sx0': w[4] & 0xFFFFFFFF, 'sy0': (w[4] >> 32) & 0xFFFFFFFF,
+            'ov_en': bool(w[5] & 1), 'ov_idx': (w[5] >> 1) & 3}
 
 
 def aligned_size(width, height):
@@ -91,11 +104,11 @@ def layout(src_w, src_h, crop='Off', interlaced=True):
             'sx0': int(round(sx0 * 65536)), 'sy0': int(round(sy0 * 65536)), 'prescale': prescale}
 
 
-def header_for(src_w, src_h, crop='Off', interlaced=True, flags=0):
+def header_for(src_w, src_h, crop='Off', interlaced=True, flags=0, overlay=None):
     """Header for a frame of src_w x src_h samples (already aligned with aligned_size)."""
     g = layout(src_w, src_h, crop, interlaced)
     return pack_header(src_w, src_h, src_w, src_w // 2, g['dx0'], g['dw'], g['dy0'], g['dh'],
-                       g['hstep'], g['vstep'], g['sx0'], g['sy0'], flags)
+                       g['hstep'], g['vstep'], g['sx0'], g['sy0'], flags, overlay)
 
 
 def pieces(header, y, u, v, audio, number):

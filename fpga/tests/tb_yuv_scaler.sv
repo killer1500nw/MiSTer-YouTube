@@ -17,6 +17,7 @@ crt240 vid (.clk(clk), .reset(reset), .pattern(2'd0), .interlace(interlace), .il
             .next_y(ny), .next_field(nfield), .next_il(nil));
 
 reg [63:0] mem [0:65535];
+reg [63:0] ovmem [0:3*16384-1];                    // the three 128 KiB overlay buffers (beats)
 reg cfg_load = 0;
 wire have_frame, want, rd, busy, valid;
 wire [28:0] addr; wire [7:0] burst; wire [63:0] dout;
@@ -25,7 +26,7 @@ wire grant = want;
 yuv_scaler #(.BASE(BASE)) dut (
     .clk(clk), .reset(reset), .ce_pix(ce), .px(px), .ny(ny), .nfield(nfield), .nil(nil),
     .cfg_load(cfg_load), .cfg_slot(slot[2:0]), .cfg_flags(mem[0][34:32]),
-    .cfg_w1(mem[1]), .cfg_w2(mem[2]), .cfg_w3(mem[3]), .cfg_w4(mem[4]),
+    .cfg_w1(mem[1]), .cfg_w2(mem[2]), .cfg_w3(mem[3]), .cfg_w4(mem[4]), .cfg_w5(mem[5]),
     .have_frame(have_frame), .want(want), .grant(grant), .busy(busy), .valid(valid), .dout(dout),
     .addr(addr), .burst(burst), .rd(rd), .rgb(rgb));
 
@@ -35,6 +36,7 @@ reg active = 0, valid_r = 0;
 reg [63:0] dout_r = 0;
 reg [28:0] a_cur = 0; reg [7:0] left = 0; reg [3:0] lat = 0;
 wire [28:0] slot_base = BASE + 29'd512 + {10'd0, slot[2:0], 16'd0};
+localparam [28:0] OVB = BASE + 29'h80200;
 assign busy = (lfsr[1:0] == 2'b00) || active;
 assign valid = valid_r;
 assign dout = dout_r;
@@ -46,12 +48,13 @@ always @(posedge clk) begin
         if (a_cur < 0) $fatal(1, "bad address");
         active <= 1; a_cur <= addr; left <= burst; lat <= 4 + lfsr[5:4];
         bursts = bursts + 1;
-        if (addr < slot_base || addr + burst > slot_base + 29'd65536) $fatal(1, "read outside the slot: %h", addr);
+        if (!(addr >= slot_base && addr + burst <= slot_base + 29'd65536) &&
+            !(addr >= OVB && addr + burst <= OVB + 29'd49152)) $fatal(1, "read outside the slot and overlays: %h", addr);
     end
     if (active) begin
         if (lat != 0) lat <= lat - 1;
         else if (lfsr[8:7] != 0) begin
-            valid_r <= 1; dout_r <= mem[a_cur - slot_base];
+            valid_r <= 1; dout_r <= (a_cur >= OVB) ? ovmem[a_cur - OVB] : mem[a_cur - slot_base];
             a_cur <= a_cur + 1; left <= left - 1; beats = beats + 1;
             if (left == 1) active <= 0;
         end
@@ -90,6 +93,7 @@ initial begin
     if ($value$plusargs("IL=%d", il_arg)) interlace = il_arg[0];
     if ($value$plusargs("SLOT=%d", slot_arg)) slot = slot_arg;
     $readmemh("slot.hex", mem);
+    $readmemh("overlay.hex", ovmem);
     repeat (50) @(posedge clk);
     reset = 0;
     repeat (20) @(posedge clk);

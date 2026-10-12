@@ -537,7 +537,7 @@ class PlayPolicy(unittest.TestCase):
         import threading
         pipes = list(pipes)
 
-        def fake_open(rt, prof, media, start_s, speed, cancel, crop='Off'):
+        def fake_open(rt, prof, media, start_s, speed, cancel, crop='Off', target=None):
             self.opened.append((media.label, round(start_s)))
             return pipes.pop(0) if len(pipes) > 1 else pipes[0]
         pipeline.open_pipeline = fake_open
@@ -1062,7 +1062,7 @@ class SpeedTest(unittest.TestCase):
             tried.append(vid)
             return resolver(vid, info, fm, prof, quality)
         pipeline.resolve = fake_resolve
-        pipeline.benchmark = lambda rt, prof, media, speed, seconds=10, cancel=None, decode_only=False: (
+        pipeline.benchmark = lambda rt, prof, media, speed, seconds=10, cancel=None, decode_only=False, target=None: (
             1.2 if decode_only else {'Fast': 0.7, 'Fastest': 0.9}[speed])
         done = []
         threading.Thread(target=lambda: (a.run_benchmark(), done.append(1)), daemon=True).start()
@@ -1638,9 +1638,9 @@ class BenchmarkSlope(unittest.TestCase):
         saved = pipeline._bench_wall
         try:
             # 3 s of start-up overhead plus 1/1.5 s of decoding per video second
-            pipeline._bench_wall = lambda rt, prof, media, speed, seconds, cancel, decode_only: 3.0 + seconds / 1.5
+            pipeline._bench_wall = lambda rt, prof, media, speed, seconds, cancel, decode_only, target=None: 3.0 + seconds / 1.5
             self.assertAlmostEqual(pipeline.benchmark(None, None, None, 'Fast', 12), 1.5, places=2)   # the plain figure would be 12/11 = 1.09
-            pipeline._bench_wall = lambda rt, prof, media, speed, seconds, cancel, decode_only: 5.0     # no difference: falls back
+            pipeline._bench_wall = lambda rt, prof, media, speed, seconds, cancel, decode_only, target=None: 5.0     # no difference: falls back
             self.assertAlmostEqual(pipeline.benchmark(None, None, None, 'Fast', 12), 12 / 5.0, places=2)
         finally:
             pipeline._bench_wall = saved
@@ -1753,6 +1753,141 @@ class YuvFormat(unittest.TestCase):
         hdr = yuv.parse_header(yuv.header_for(w, h, flags=yuv.FLAG_DITHER))
         frame = ref.render_frame(y, u, v, hdr)
         self.assertTrue(all(c % 4 == 0 for px in frame[240] for c in px))
+
+
+class FakeYuvPipe:
+    """Stands in for RecordPipeline on the v0.15 core: yields (YUV frame, PCM) pairs."""
+
+    class Dec:
+        @staticmethod
+        def colour_flags(height):
+            return 0
+
+    def __init__(self, w=640, h=360, rate=500):
+        self.w, self.h, self.rate, self.t0, self.n = w, h, rate, time.monotonic(), 0
+        self.decoder = self.Dec()
+
+    def poll(self):
+        if self.n >= (time.monotonic() - self.t0) * self.rate:
+            return 'wait', None
+        self.n += 1
+        return 'record', (bytearray(self.w * self.h * 3 // 2), bytes(6400))
+
+    def close(self, wait=True):
+        pass
+
+
+class YuvPlayer(unittest.TestCase):
+    """The player talking to a v0.15 core (FakeYuvLink): the GUI is an overlay, pictures are YUV, crop is the FPGA's."""
+
+    def make(self):
+        from ytcrt import app as appmod
+        from ytcrt import yuv
+        self.appmod, self.yuv = appmod, yuv
+        tmp = tempfile.mkdtemp()
+        self.st = store.Store(tmp)
+        self.link = core_link.FakeYuvLink()
+        rt = type('Rt', (), {'ffmpeg': Path(tmp) / 'nope', 'missing': lambda self: []})()
+        self.inp = inputs.Input(evdev=False, tty=False)
+        self.app = appmod.App(self.link, self.st, offline_feeds(tmp + '/cache'), rt, self.inp, lambda m: None)
+        self.saved = (pipeline.resolve, pipeline.open_pipeline)
+        info, fm = fixture('landscape')
+        pipeline.resolve = lambda rt, prof, vid, cancel, log, note=None, quality='Auto', cal=None, mult=1.0: \
+            pipeline.media_from(info, fm, prof, quality, cal, mult)
+
+    def tearDown(self):
+        pipeline.resolve, pipeline.open_pipeline = self.saved
+
+    def test_the_menu_is_an_overlay_over_a_black_picture(self):
+        self.make()
+        self.assertTrue(self.app.yuv)
+        for _ in range(8):
+            self.app.pump(0.001)
+        self.assertGreaterEqual(self.link.sent, 4)                       # the core starts after four records
+        w, h, crop, flags, overlay = self.link.pictures[-1][2:]
+        self.assertEqual((w, h, overlay is not None), (16, 16, True))     # a tiny black picture carrying the menu
+        y, u, v = self.link.overlays[overlay]
+        self.assertEqual(len(y), 320 * 240)
+        self.assertNotIn(0, y)                                           # the menu is opaque (luma 0 would be transparent)
+        self.assertEqual(self.link.pictures[-1][1], bytes(6400))          # silence
+
+    def test_a_changed_screen_goes_to_another_overlay_buffer(self):
+        self.make()
+        for _ in range(8):
+            self.app.pump(0.001)
+        first = self.link.pictures[-1][6]
+        self.app.open_home_entry('Settings')
+        self.app.dirty = True
+        for _ in range(4):
+            self.app.pump(0.001)
+        second = self.link.pictures[-1][6]
+        self.assertNotEqual(first, second)                               # never overwritten while queued records still show it
+
+    def play(self, pipe_factory, stop_when):
+        import threading
+        opened = []
+
+        def fake_open(rt, prof, media, start_s, speed, cancel, crop='Off', target=None):
+            opened.append((target, crop))
+            return pipe_factory(target)
+        pipeline.open_pipeline = fake_open
+
+        def stopper():
+            end = time.monotonic() + 20
+            while time.monotonic() < end and not stop_when():
+                time.sleep(0.05)
+            time.sleep(0.2)
+            self.inp.push('back')                                       # closes the More panel if it is open ...
+            time.sleep(0.2)
+            self.inp.push('back')                                       # ... and this one stops the video
+        threading.Thread(target=stopper, daemon=True).start()
+        self.app.play({'id': 'v' * 11, 'title': 'A test video'}, 0)
+        return opened
+
+    def test_playback_sends_pictures_at_their_own_size_and_crop_needs_no_restart(self):
+        self.make()
+        st = self.st
+        st.settings['quality'] = '360p'
+        steps = {'n': 0}
+
+        def pipe(target):
+            return FakeYuvPipe(target['w'], target['h'])
+
+        def done():
+            steps['n'] += 1
+            if steps['n'] == 5:
+                self.inp.push('menu')                                    # the More panel
+            if steps['n'] == 8:
+                self.inp.push('ok')                                      # Crop: Off -> 14:9
+            return self.link.sent > 60 and self.link.pictures[-1][4] == '14:9'
+        opened = self.play(pipe, done)
+        self.assertEqual(len(opened), 1)                                 # no decoder restart for the crop
+        self.assertEqual((opened[0][0]['w'], opened[0][0]['h']), (640, 360))
+        pics = self.link.pictures
+        self.assertEqual((pics[-1][2], pics[-1][3]), (640, 360))
+        self.assertEqual(len(pics[-1][0]), 640 * 360 * 3 // 2)
+        self.assertEqual(pics[-1][4], '14:9')                            # the FPGA does the crop: only the header changed
+        self.assertIsNotNone(pics[-1][6])                                # and the More panel is an overlay, not burned in
+
+    def test_the_playback_bar_is_an_overlay_that_goes_away(self):
+        self.make()
+        self.st.settings['quality'] = '360p'
+        self.appmod.OSD_SECONDS = 0.3
+        try:
+            self.play(lambda t: FakeYuvPipe(t['w'], t['h'], rate=60), lambda: self.link.sent > 70)
+        finally:
+            self.appmod.OSD_SECONDS = 4.0
+        flags = [p[6] is not None for p in self.link.pictures]
+        self.assertIn(False, flags)                                      # the bar disappeared after its few seconds
+        shown = [p[6] for p in self.link.pictures if p[6] is not None]
+        if shown:
+            y = self.link.overlays[shown[-1]][0]
+            self.assertIn(0, y)                                          # mostly transparent: only the bar is drawn
+            self.assertGreater(sum(1 for b in y if b), 100)
+
+    def test_thumbnails_are_requested_as_yuv(self):
+        self.make()
+        self.assertEqual(self.app.feeds.thumb_format, 'yuv420p')
 
 
 if __name__ == '__main__':

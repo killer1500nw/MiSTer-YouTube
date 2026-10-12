@@ -4,9 +4,9 @@ import threading
 import re
 import time
 
-from . import feeds as feedsmod, pipeline, profiles, ui, urls
+from . import feeds as feedsmod, pipeline, profiles, ui, urls, yuv
 from .core_link import SLOTS
-from .gfx import Canvas
+from .gfx import Canvas, YuvCanvas
 from .store import RESUME_MIN_MS
 
 TEST_CLIP = 'M7kB0lis3xg'
@@ -51,11 +51,17 @@ class Job:
 class App:
     def __init__(self, link, store, feeds, rt, inputs, log=print):
         self.link, self.store, self.feeds, self.rt, self.inputs, self.log = link, store, feeds, rt, inputs, log
-        self.canvas = Canvas(320, 240)
+        self.yuv = getattr(link, 'kind', 'rgb') == 'yuv'              # the v0.15 core: the GUI is an overlay, pictures are YUV
+        self.canvas = YuvCanvas(320, 240) if self.yuv else Canvas(320, 240)
         self.stack = []
         self.dirty = True
         self.record = None
         self.silence = bytes(self.profile().audio_bytes)
+        self.menu_ov = None                                           # overlay buffer holding the current menu screen
+        self.osd_ov, self.osd_sig, self.osd_canvas = None, None, None  # and the one holding the playback bar
+        self.black = bytearray(b'\x10' * 256 + b'\x80' * 128)         # a 16x16 black picture: the menu's video
+        if self.yuv:
+            self.feeds.thumb_format = 'yuv420p'
         self.toast_text, self.toast_until = '', 0.0
         self.refresher = None
         self.lists_refresher = None
@@ -157,7 +163,15 @@ class App:
             c.rect(x, 188, w, 22, ui.PANEL)
             c.frame(x, 188, w, 22, ui.RED, 2)
             c.text(x + 8, 195, self.toast_text, ui.WHITE, ui.PANEL)
-        self.record = bytes(self.canvas.buf) + self.silence
+        if self.yuv:
+            idx = self.link.free_overlay(keep=self.menu_ov)
+            if idx is None:                                # every overlay buffer is still on its way to the screen: retry
+                self.dirty = True
+                return
+            self.link.upload_overlay(idx, self.canvas.y, self.canvas.u, self.canvas.v)
+            self.menu_ov, self.record = idx, True
+        else:
+            self.record = bytes(self.canvas.buf) + self.silence
         self.dirty = False
 
     def tick_ui(self):
@@ -184,7 +198,10 @@ class App:
         if self.dirty or self.record is None:
             self.render()
         if self.link.queued < MENU_DEPTH:
-            self.link.push(self.record)
+            if self.yuv:
+                self.link.push_picture(self.black, self.silence, 16, 16, 'Off', 0, self.menu_ov)
+            else:
+                self.link.push(self.record)
         return act
 
     def run(self):
@@ -445,7 +462,8 @@ class App:
                     self.log('Speed test: skipping %s (%s)' % (vid, exc))
             if media is None:
                 raise RuntimeError('No video in your lists could be used as a test clip.')
-            runs = [(sp, pipeline.benchmark(self.rt, prof, media, sp, 12, check)) for sp in ('Fast', 'Fastest')]
+            tgt = pipeline.yuv_target(media, self.link.interlaced) if self.yuv else None    # the pipeline the core really gets
+            runs = [(sp, pipeline.benchmark(self.rt, prof, media, sp, 12, check, target=tgt)) for sp in ('Fast', 'Fastest')]
             best_sp, best_x = max(runs, key=lambda r: r[1])
             # The same setting again with only the decoder (no scaling, no RGB565 conversion): the difference is the
             # share of the ARM's time that an FPGA scaler could take over.
@@ -616,6 +634,8 @@ class App:
                  'tick': time.monotonic(), 'tier': media.tier, 'retries': 0, 'smooth_noted': False,
                  'crashes': 0, 'crash_at': 0.0}
         dur_ms = media.duration * 1000
+        ytarget = pipeline.yuv_target(media, link.interlaced) if self.yuv else None
+        state['flags'] = 0
 
         def pos_ms():
             return min(dur_ms or 1 << 60, state['start'] + max(0, link.consumed - state['base']) * 1000 // fps)
@@ -627,7 +647,7 @@ class App:
             state['starved'], state['win_start'] = 0.0, time.monotonic()
             try:
                 return pipeline.open_pipeline(self.rt, prof, media, at_ms / 1000.0, speed, lambda: None,
-                                              crop=state['crop'])
+                                              crop=state['crop'], target=ytarget)
             except Exception as exc:
                 raise pipeline.PlaybackError(str(exc))
 
@@ -637,6 +657,9 @@ class App:
             if mode == state['crop']:
                 return
             state['crop'] = mode
+            if self.yuv:                                    # the FPGA does the crop: it takes effect on the next picture
+                state.update(note='Crop: ' + mode)
+                return
             if state['pending'] is None:
                 state['pending'] = pos_ms()
             state.update(pending_at=now, crop_change=True, note='Crop: ' + mode)
@@ -693,14 +716,14 @@ class App:
                 elif act:
                     state['osd_until'] = now + OSD_SECONDS
                 if state['pending'] is not None and now - state['pending_at'] > SEEK_SETTLE:
-                    target, state['pending'] = state['pending'], None
+                    seek_to, state['pending'] = state['pending'], None
                     pipe.close(wait=False)                  # do not wait for the old ffmpeg to exit
-                    pipe = open_pipe(target)
+                    pipe = open_pipe(seek_to)
                     state.update(paused=False, pause_pushed=False, seeking=True,
                                  note='Applying crop...' if state['crop_change'] else 'Seeking...',
                                  crop_change=False, osd_until=now + OSD_SECONDS + 3)
-                    if state['last'] is not None and link.queued < SLOTS:   # immediate on-screen feedback
-                        link.push(self._osd(state['last'], v, target, dur_ms, False, state, prof, silent=True))
+                    if state['last'] is not None and link.queued < link.slots:   # immediate on-screen feedback
+                        self._present(state['last'], v, seek_to, dur_ms, False, state, prof, True, True, ytarget)
                 # Is the ARM keeping up? The FPGA queue only runs dry when the decoder falls behind.
                 dt, state['tick'] = now - state['tick'], now
                 if (may_fall_back and not state['paused'] and not state['seeking'] and state['pending'] is None
@@ -720,12 +743,12 @@ class App:
                 if now >= next_save:
                     self.store.record_play(v, pos_ms(), dur_ms, force=False)
                     next_save = now + 10
-                if link.queued >= SLOTS:
+                if link.queued >= link.slots:
                     time.sleep(.002)
                     continue
                 if state['paused']:
                     if not state['pause_pushed'] and state['last'] is not None:
-                        link.push(self._osd(state['last'], v, pos_ms(), dur_ms, True, state, prof, silent=True))
+                        self._present(state['last'], v, pos_ms(), dur_ms, True, state, prof, True, True, ytarget)
                         state['pause_pushed'] = True
                     else:
                         time.sleep(.01)
@@ -768,26 +791,70 @@ class App:
                     return 'eof', dur_ms
                 state['last'] = rec
                 state['retries'] = 0
+                if self.yuv and not state.get('flags_known'):
+                    state['flags'] = pipe.decoder.colour_flags(ytarget['h'])      # matrix and range, from ffmpeg's stream line
+                    state['flags_known'] = True
                 if state.get('opened_at') and not state.get('first_logged'):
                     state['first_logged'] = True
                     self.log('First picture %.1f s after starting the decoders' % (time.monotonic() - state['opened_at']))
                 if state['seeking']:                         # first picture from the new position
                     state.update(seeking=False, note='', osd_until=now + 1.5)
-                if now < state['osd_until'] or state['more'] is not None:
+                show_osd = now < state['osd_until'] or state['more'] is not None
+                if show_osd:
                     shown = state['pending'] if state['pending'] is not None else pos_ms()
-                    rec = self._osd(rec, v, shown, dur_ms, False, state, prof)
-                elif state['note']:
-                    state['note'] = ''
-                link.push(rec)
+                else:
+                    shown = 0
+                    if state['note']:
+                        state['note'] = ''
+                self._present(rec, v, shown, dur_ms, False, state, prof, False, show_osd, ytarget)
         finally:
             pipe.close()
+
+    def _present(self, rec, v, pos, dur, paused, state, prof, silent, osd, target):
+        """Publish one decoded picture + PCM to the core, with the playback bar when `osd` (v0.15: as an overlay layer the
+        FPGA draws, so nothing is burned into the picture; v0.14: burned into the 320x240 record)."""
+        if not self.yuv:
+            if osd:
+                rec = self._osd(rec, v, pos, dur, paused, state, prof, silent)
+            elif silent:
+                rec = rec[:prof.video_bytes] + bytes(prof.audio_bytes)
+            self.link.push(rec)
+            return
+        frame, audio = rec
+        if silent:
+            audio = self.silence
+        overlay = self._osd_overlay(v, pos, dur, paused, state) if osd else None
+        self.link.push_picture(frame, audio, target['w'], target['h'], state['crop'], state.get('flags', 0), overlay)
+
+    def _osd_overlay(self, v, pos, dur, paused, state):
+        """The overlay buffer holding the playback bar for this moment: drawn again only when what it shows changes."""
+        m = state.get('more')
+        sig = (pos // 1000, paused, state['note'], None if m is None else m['sel'], state['crop'], state.get('tier'),
+               self.store.in_later(v['id']), state.get('flags', 0))
+        if sig == self.osd_sig and self.osd_ov is not None:
+            return self.osd_ov
+        idx = self.link.free_overlay(keep=self.osd_ov)
+        if idx is None:                                   # all busy: keep showing the old one
+            return self.osd_ov
+        bt601 = bool(state.get('flags', 0) & yuv.FLAG_601)
+        if self.osd_canvas is None or self.osd_canvas.bt601 != bt601:
+            self.osd_canvas = YuvCanvas(320, 240, bt601)
+        c = self.osd_canvas
+        c.clear()
+        self._draw_osd(c, v, pos, dur, paused, state)
+        self.link.upload_overlay(idx, c.y, c.u, c.v)
+        self.osd_ov, self.osd_sig = idx, sig
+        return idx
 
     def _osd(self, rec, v, pos, dur, paused, state, prof, silent=False):
         """Return `rec` with a title/progress bar burned into its picture."""
         buf = bytearray(rec)
         if silent:
             buf[prof.video_bytes:] = bytes(prof.audio_bytes)
-        c = Canvas(320, 240, buf, 0)
+        self._draw_osd(Canvas(320, 240, buf, 0), v, pos, dur, paused, state)
+        return bytes(buf)
+
+    def _draw_osd(self, c, v, pos, dur, paused, state):
         x, y, w = 12, 182, 296
         c.rect(x, y, w, 44, ui.BLACK)
         c.frame(x, y, w, 44, ui.RED, 2)
@@ -821,4 +888,3 @@ class App:
                 c.rect(px + 4, yy, pw - 8, 14, bg)
                 c.text(px + 10, yy + 3, text, ui.WHITE if i == m['sel'] else ui.TEXT, bg)
             c.text(px + 10, py + 74, 'Left/Right   B:Back', ui.DIM, ui.BLACK)
-        return bytes(buf)

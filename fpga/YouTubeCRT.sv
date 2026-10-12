@@ -123,18 +123,18 @@ wire [28:0] s_addr, c_addr;
 wire [7:0] s_burst, s_be, c_burst;
 wire s_rd, s_wr, c_rd, c_want, c_grant, s_busy, s_valid, c_busy, c_valid;
 wire [63:0] s_din;
-wire [63:0] h0, h1, h2, h3, h4;
+wire [63:0] h0, h1, h2, h3, h4, h5;
 wire [2:0] h_slot;
 wire rec_ready;
 ddr_stream stream (
-    .clk(clk_sys), .reset(reset), .enable(movie_mode),
+    .clk(clk_sys), .reset(reset), .enable(movie_mode), .il(raw_il),
     .busy(s_busy), .valid(s_valid), .dout(DDRAM_DOUT),
     .addr(s_addr), .burst(s_burst), .be(s_be),
     .rd(s_rd), .wr(s_wr), .din(s_din),
     .audio_wr(movie_audio_wr), .audio_addr(movie_audio_addr), .audio_data(movie_data),
     .audio_ready(movie_audio_ready), .commit(movie_commit),
     .clear_frame(stream_clear), .error(movie_error), .done(movie_done),
-    .hdr0(h0), .hdr1(h1), .hdr2(h2), .hdr3(h3), .hdr4(h4), .hdr_slot(h_slot), .record_ready(rec_ready),
+    .hdr0(h0), .hdr1(h1), .hdr2(h2), .hdr3(h3), .hdr4(h4), .hdr5(h5), .hdr_slot(h_slot), .record_ready(rec_ready),
     .in0({joy1,joy0}), .in1({key_seq,key_ev})
 );
 ddr_arb arb (
@@ -170,7 +170,7 @@ yuv_scaler scaler (
     .clk(clk_sys), .reset(reset | movie_clear), .ce_pix(raw_ce), .px(px),
     .ny(next_y), .nfield(next_field), .nil(next_il),
     .cfg_load(movie_commit), .cfg_slot(h_slot), .cfg_flags(h0[34:32] | {status[8],2'b00}),
-    .cfg_w1(h1), .cfg_w2(h2), .cfg_w3(h3), .cfg_w4(h4),
+    .cfg_w1(h1), .cfg_w2(h2), .cfg_w3(h3), .cfg_w4(h4), .cfg_w5(h5),
     .have_frame(have_frame),
     .want(c_want), .grant(c_grant), .busy(c_busy), .valid(c_valid), .dout(DDRAM_DOUT),
     .addr(c_addr), .burst(c_burst), .rd(c_rd), .rgb(scaled_rgb)

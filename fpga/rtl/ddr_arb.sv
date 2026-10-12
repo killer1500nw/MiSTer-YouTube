@@ -29,12 +29,15 @@ module ddr_arb (
     reg owner = 0;                    // 0 = stream controller, 1 = scaler
     reg s_out = 0;                    // a stream controller read is in flight (they are single-beat)
     wire s_accept_rd = !owner && s_rd && !ddr_busy;
+    // An Avalon command must stay unchanged until it is accepted, so ownership is never handed over while the
+    // stream controller has a command asserted that the bus has not taken yet.
+    wire s_pending = !owner && (s_rd || s_wr) && ddr_busy;
 
     always @(posedge clk) begin
         if (s_accept_rd) s_out <= 1;
         else if (!owner && ddr_valid && s_out) s_out <= 0;
         if (!owner) begin
-            if (c_want && !s_out && !s_accept_rd) owner <= 1;
+            if (c_want && !s_out && !s_accept_rd && !s_pending) owner <= 1;
         end else begin
             if (!c_want) owner <= 0;
         end

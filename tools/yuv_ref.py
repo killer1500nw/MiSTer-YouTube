@@ -44,11 +44,12 @@ def split(coord, size):
     return min(i, size - 1), min(i + 1, size - 1), (coord >> 8) & 255
 
 
-def render_frame(y, u, v, hdr, interlaced=True):
+def render_frame(y, u, v, hdr, interlaced=True, overlay=None):
     """The 640 x 480 frame the core draws from a decoded picture: list of 480 lines, each 640 (r, g, b) tuples.
 
     y/u/v are the plane bytes exactly as stored (strides from the header). In 480i field `f` shows lines f::2; in 240p
-    the core shows lines 0::2."""
+    the core shows lines 0::2. `overlay` = (oy, ou, ov) planes of the 320x240 overlay (luma 0 is transparent), used when
+    the header enables it: each overlay pixel covers 2x2 frame pixels."""
     w, h = hdr['src_w'], hdr['src_h']
     cw, chh = (w + 1) // 2, (h + 1) // 2
     ys, cs, flags = hdr['ystride'], hdr['cstride'], hdr['flags']
@@ -62,9 +63,13 @@ def render_frame(y, u, v, hdr, interlaced=True):
             xs.append(None)
     black = (0, 0, 0)
     frame = []
+    use_ov = overlay is not None and hdr.get('ov_en')
     for d in range(yuv.FRAME_H):
         if not hdr['dy0'] <= d < hdr['dy0'] + hdr['dh']:
-            frame.append([black] * yuv.FRAME_W)
+            line = [black] * yuv.FRAME_W
+            if use_ov:
+                _overlay_line(line, overlay, d, flags, dither)
+            frame.append(line)
             continue
         sy = (hdr['sy0'] + (d - hdr['dy0']) * hdr['vstep']) & 0xFFFFFFFF
         r0, r1, fy = split(sy, h)
@@ -90,8 +95,26 @@ def render_frame(y, u, v, hdr, interlaced=True):
                 t = BAYER[d & 3][x & 3]
                 r, g, b = min(255, r + t) & 0xFC, min(255, g + t) & 0xFC, min(255, b + t) & 0xFC
             line.append((r, g, b))
+        if use_ov:
+            _overlay_line(line, overlay, d, flags, dither)
         frame.append(line)
     return frame
+
+
+def _overlay_line(line, overlay, d, flags, dither):
+    """Draw the overlay over one finished frame line (same colour matrix and dither as the picture)."""
+    oy, ou, ov = overlay
+    row = d >> 1
+    for x in range(yuv.FRAME_W):
+        yy = oy[row * yuv.OV_W + (x >> 1)]
+        if yy == 0:
+            continue
+        ci = (row >> 1) * (yuv.OV_W // 2) + (x >> 2)
+        r, g, b = colour(yy, ou[ci], ov[ci], flags)
+        if dither:
+            t = BAYER[d & 3][x & 3]
+            r, g, b = min(255, r + t) & 0xFC, min(255, g + t) & 0xFC, min(255, b + t) & 0xFC
+        line[x] = (r, g, b)
 
 
 def planes_from_function(w, h, fn):

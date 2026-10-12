@@ -19,7 +19,7 @@ import yuv_ref  # noqa: E402
 from ytcrt import yuv  # noqa: E402
 
 MS = os.environ.get('MODELSIM_BIN', r'C:\intelFPGA_lite\17.0\modelsim_ase\win32aloem')
-RTL = [ROOT / 'fpga' / 'rtl' / n for n in ('crt240.sv', 'linebuf.sv', 'yuv_scaler.sv')]
+RTL = [ROOT / 'fpga' / 'rtl' / n for n in ('crt240.sv', 'linebuf.sv', 'linebuf64.sv', 'yuv_scaler.sv')]
 TB = ROOT / 'fpga' / 'tests' / 'tb_yuv_scaler.sv'
 
 # name: (width, height, crop, interlaced, flags, picture)
@@ -33,7 +33,42 @@ CASES = {
     'tall':      (256, 480, 'Off', True, 0, 'noise'),       # vertical picture: pillarboxed
     'p240':      (640, 360, 'Off', False, 0, 'noise'),      # 240p output
     'dither':    (480, 360, 'Off', True, yuv.FLAG_DITHER, 'noise'),
+    # with an overlay (GUI/OSD) drawn over the picture: the 7th item is the overlay buffer used
+    'ov360':     (640, 360, 'Off', True, 0, 'noise', 2),
+    'ov43':      (480, 360, 'Off', True, yuv.FLAG_601, 'noise', 0),
+    'ovp240':    (640, 360, 'Fill', False, yuv.FLAG_DITHER, 'noise', 1),
 }
+
+
+def make_overlay(seed):
+    """A 320x240 overlay: transparent (luma 0) with opaque boxes of random colour, a band along the bottom (outside the picture
+    in the letterboxed cases) and a frame line, so every plane and edge is exercised."""
+    rng = random.Random(seed)
+    oy = bytearray(yuv.OV_W * yuv.OV_H)
+    ou = bytearray([128]) * (yuv.OV_W * yuv.OV_H // 4)
+    ov = bytearray([128]) * (yuv.OV_W * yuv.OV_H // 4)
+
+    def box(x0, y0, w, h, yy, uu, vv):
+        x1 = min(yuv.OV_W, x0 + w)
+        for j in range(y0, min(yuv.OV_H, y0 + h)):
+            oy[j * yuv.OV_W + x0:j * yuv.OV_W + x1] = bytes([yy]) * (x1 - x0)
+        for j in range(y0 // 2, min(yuv.OV_H // 2, (y0 + h + 1) // 2)):
+            for i in range(x0 // 2, min(yuv.OV_W // 2, (x0 + w + 1) // 2)):
+                ou[j * (yuv.OV_W // 2) + i], ov[j * (yuv.OV_W // 2) + i] = uu, vv
+    for _ in range(14):
+        box(rng.randrange(0, 300), rng.randrange(0, 220), rng.randrange(8, 70), rng.randrange(8, 50),
+            rng.randrange(1, 255), rng.randrange(0, 256), rng.randrange(0, 256))
+    box(8, 214, 304, 18, 40, 128, 128)                  # a dark band near the bottom (the OSD bar)
+    box(0, 0, 320, 2, 235, 128, 128)                    # a frame line at the very top edge
+    return bytes(oy), bytes(ou), bytes(ov)
+
+
+def overlay_image(oy, ou, ov):
+    img = bytearray(yuv.OVERLAY_BYTES)
+    img[yuv.OV_Y_OFF:yuv.OV_Y_OFF + len(oy)] = oy
+    img[yuv.OV_U_OFF:yuv.OV_U_OFF + len(ou)] = ou
+    img[yuv.OV_V_OFF:yuv.OV_V_OFF + len(ov)] = ov
+    return bytes(img)
 
 
 def make_picture(kind, w, h, seed=1):
@@ -57,13 +92,20 @@ def slot_image(header, y, u, v):
 
 
 def run_case(name, work):
-    w, h, crop, interlaced, flags, kind = CASES[name]
+    w, h, crop, interlaced, flags, kind = CASES[name][:6]
+    ov_index = CASES[name][6] if len(CASES[name]) > 6 else None
     y, u, v = make_picture(kind, w, h)
-    header = yuv.header_for(w, h, crop, interlaced, flags)
+    header = yuv.header_for(w, h, crop, interlaced, flags, ov_index)
     hdr = yuv.parse_header(header)
     img = slot_image(header, y, u, v)
     words = struct.unpack('<%dQ' % (len(img) // 8), img)
     (work / 'slot.hex').write_text('\n'.join('%016x' % wd for wd in words) + '\n')
+    overlay = None
+    ovimg = bytearray(3 * yuv.OVERLAY_BYTES)
+    if ov_index is not None:
+        overlay = make_overlay(7 + ov_index)
+        ovimg[ov_index * yuv.OVERLAY_BYTES:(ov_index + 1) * yuv.OVERLAY_BYTES] = overlay_image(*overlay)
+    (work / 'overlay.hex').write_text('\n'.join('%016x' % wd for wd in struct.unpack('<%dQ' % (len(ovimg) // 8), bytes(ovimg))) + '\n')
     env = dict(os.environ)
     env['PATH'] = MS + os.pathsep + env['PATH']
     subprocess.run(['vlib', 'w'], cwd=work, check=True, capture_output=True, env=env)
@@ -75,7 +117,7 @@ def run_case(name, work):
                        cwd=work, capture_output=True, text=True, env=env, timeout=1800)
     if 'DONE' not in r.stdout:
         return 'FAIL sim: ' + r.stdout[-1500:]
-    expected = yuv_ref.render_frame(y, u, v, hdr, interlaced)
+    expected = yuv_ref.render_frame(y, u, v, hdr, interlaced, overlay)
     seen = bad = 0
     first = None
     for line in (work / 'out.txt').read_text().splitlines():

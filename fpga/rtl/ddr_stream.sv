@@ -9,6 +9,7 @@ module ddr_stream #(
  parameter integer POLL_CLOCKS=40000
 )(
  input wire clk,reset,enable,busy,valid,
+ input wire il,                                   // the core is showing 480i (published in the stats word, bit 33)
  input wire [63:0] dout,
  output wire [28:0] addr,
  output wire [7:0] burst,be,
@@ -20,7 +21,7 @@ module ddr_stream #(
  input wire commit,
  output reg clear_frame=0,error=0,done=0,
  // header of the record that is waiting to be committed (stable until the commit)
- output reg [63:0] hdr0=0,hdr1=0,hdr2=0,hdr3=0,hdr4=0,
+ output reg [63:0] hdr0=0,hdr1=0,hdr2=0,hdr3=0,hdr4=0,hdr5=0,
  output wire [2:0] hdr_slot,
  output wire record_ready,
  // Controller/keyboard state, published every poll at BASE+5 / BASE+6 (see PROTOCOL.md).
@@ -84,7 +85,7 @@ module ddr_stream #(
     end else delay_count<=delay_count+1'b1;
    end
    HEART: if(!busy) state<=ACK;
-   ACK: if(!busy) begin stats_data<={31'd0,error,played};state<=STATS;end
+   ACK: if(!busy) begin stats_data<={30'd0,il,error,played};state<=STATS;end
    STATS: if(!busy) state<=WIN0;
    WIN0: if(!busy) state<=WIN1;
    WIN1: if(!busy) state<=RHEAD;
@@ -121,7 +122,7 @@ module ddr_stream #(
      state<=IDLE;
     end
    end
-   // Header words 0..4 of the slot: geometry and flags for the scaler.
+   // Header words 0..5 of the slot: geometry and flags for the scaler.
    HRD: if(!busy) begin
     if(valid) begin
      case(hi)
@@ -129,9 +130,10 @@ module ddr_stream #(
       1: hdr1<=dout;
       2: hdr2<=dout;
       3: hdr3<=dout;
-      default: hdr4<=dout;
+      4: hdr4<=dout;
+      default: hdr5<=dout;
      endcase
-     if(hi==3'd4) state<=HCHK;
+     if(hi==3'd5) state<=HCHK;
      else begin hi<=hi+1'b1; state<=HRD; end
     end else state<=HWAIT;
    end
@@ -141,9 +143,10 @@ module ddr_stream #(
      1: hdr1<=dout;
      2: hdr2<=dout;
      3: hdr3<=dout;
-     default: hdr4<=dout;
+     4: hdr4<=dout;
+     default: hdr5<=dout;
     endcase
-    if(hi==3'd4) state<=HCHK;
+    if(hi==3'd5) state<=HCHK;
     else begin hi<=hi+1'b1; state<=HRD; end
    end
    HCHK: begin
