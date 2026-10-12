@@ -138,6 +138,7 @@ module yuv_scaler #(
             cur_ovy <= nxt_ovy; cur_ovc <= nxt_ovc;
             cur_fy <= nxt_fy; cur_fcy <= nxt_fcy; cur_d <= nxt_d;
         end
+        if (reset) begin cur_valid <= 0; cur_act <= 0; end
     end
 
     wire [8:0] dnext = nil ? {ny[7:0], nfield} : {ny[7:0], 1'b0};
@@ -271,7 +272,7 @@ module yuv_scaler #(
             default: st <= S_IDLE;
         endcase
         if (reset) begin st <= S_IDLE; want <= 0; rd <= 0; yv <= 0; cv <= 0; oyv <= 0; ocv <= 0;
-                         nxt_ready <= 0; nxt_valid <= 0; nxt_act <= 0; cur_valid <= 0; cur_act <= 0; end
+                         nxt_ready <= 0; nxt_valid <= 0; nxt_act <= 0; end
     end
     always @(posedge clk) begin
         if (st == S_ADDR) rd_sent <= 0;

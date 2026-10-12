@@ -10,17 +10,18 @@ LOG=/media/fat/YouTubeNative/YouTube-crt-log.txt
 RT=/media/fat/YouTubeNative
 VER="$(grep -o "__version__ = '[^']*'" "$BASE/ytcrt/__init__.py" 2>/dev/null | cut -d"'" -f2)"
 echo "YouTube CRT installer - files are version ${VER:-unknown}"
-CORE=YouTubeCRT_v0.14-auto.rbf
-
-if [ -f "$BASE/$CORE" ]; then
-  mkdir -p /media/fat/_Other
-  cp -f "$BASE/$CORE" /media/fat/_Other/"$CORE"
-  echo "Core installed: /media/fat/_Other/$CORE"
-elif [ -f /media/fat/_Other/"$CORE" ]; then
-  echo "Core already in /media/fat/_Other/"
-else
-  echo "WARNING: $CORE is not next to this script or in /media/fat/_Other/."
-fi
+# The current core (v0.15-yuv) and the older v0.14-auto one, which the same player still drives.
+for CORE in YouTubeCRT_v0.15-yuv.rbf YouTubeCRT_v0.14-auto.rbf; do
+  if [ -f "$BASE/$CORE" ]; then
+    mkdir -p /media/fat/_Other
+    cp -f "$BASE/$CORE" /media/fat/_Other/"$CORE"
+    echo "Core installed: /media/fat/_Other/$CORE"
+  elif [ -f /media/fat/_Other/"$CORE" ]; then
+    echo "Core already in /media/fat/_Other/: $CORE"
+  else
+    echo "NOTE: $CORE is not next to this script or in /media/fat/_Other/."
+  fi
+done
 command -v python3 >/dev/null || echo "WARNING: python3 not found; the player cannot run."
 echo "Checking the video tools (downloads them if missing; needs internet)..."
 if python3 "$BASE/ytcrt_setup.py" --root "$RT"; then
@@ -56,5 +57,5 @@ sync
 echo "--- player log ($LOG) ---"
 tail -n 8 "$LOG" 2>/dev/null || echo "(no log yet)"
 echo "-------------------------"
-echo "Expected: 'Waiting for the YouTubeCRT core to be loaded...'. Now load the core from _Other."
+echo "Expected: 'Waiting for the YouTubeCRT core to be loaded...'. Now load YouTubeCRT_v0.15-yuv from _Other."
 if [ -t 0 ]; then read -r -p "Press Enter to return to MiSTer." _ || true; fi

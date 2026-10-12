@@ -3,7 +3,8 @@
 
     python tools/make_sd_package.py
 
-Inputs: the built core (fpga/output_files/YouTubeCRT.rbf, else release/YouTubeCRT_v0.14-auto.rbf),
+Inputs: the built v0.15 core (fpga/output_files/YouTubeCRT.rbf, which must be newer than the RTL), the older
+v0.14-auto core (release/YouTubeCRT_v0.14-auto.rbf),
 scripts/YouTubeCRT, and the video tools already unpacked in release/SD_COPY/YouTubeNative
 (yt-dlp, QuickJS, ffmpeg ARM builds; see release/SD_COPY/YouTubeNative/TOOLS.txt).
 Output: release/SD_COPY/ and release/MiSTer-YouTube-SD.zip
@@ -15,7 +16,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'release' / 'SD_COPY'
-CORE = 'YouTubeCRT_v0.14-auto.rbf'
+CORE = 'YouTubeCRT_v0.15-yuv.rbf'
+LEGACY = 'YouTubeCRT_v0.14-auto.rbf'
 
 
 def main():
@@ -23,12 +25,25 @@ def main():
     for sub in ('_Other', 'Scripts'):
         shutil.rmtree(OUT / sub, ignore_errors=True)
     built = ROOT / 'fpga' / 'output_files' / 'YouTubeCRT.rbf'
-    core = built if built.is_file() else ROOT / 'release' / CORE
+    kept = ROOT / 'release' / CORE                          # the last good v0.15 build, kept in the repository
+    sources = [ROOT / 'fpga' / 'YouTubeCRT.sv'] + list((ROOT / 'fpga' / 'rtl').glob('*.sv'))
+    if built.is_file() and built.stat().st_mtime >= max(p.stat().st_mtime for p in sources):
+        core = built
+        shutil.copyfile(built, kept)
+    elif kept.is_file():
+        core = kept
+        print('NOTE: the RTL is newer than the last build; packaging the kept core release/%s' % CORE)
+    else:
+        sys.exit('No v0.15 core built yet: run the Quartus compile in fpga/ first.')
     (OUT / '_Other').mkdir(parents=True)
     shutil.copyfile(core, OUT / '_Other' / CORE)
-    # The folder people copy to the SD card carries the core too (the installer puts it in _Other); keep it current.
-    if Path(core).resolve() != (ROOT / 'scripts' / 'YouTubeCRT' / CORE).resolve():
-        shutil.copyfile(core, ROOT / 'scripts' / 'YouTubeCRT' / CORE)
+    legacy = ROOT / 'release' / LEGACY
+    if legacy.is_file():
+        shutil.copyfile(legacy, OUT / '_Other' / LEGACY)
+    # The folder people copy to the SD card carries the cores too (the installer puts them in _Other); keep it current.
+    shutil.copyfile(core, ROOT / 'scripts' / 'YouTubeCRT' / CORE)
+    if legacy.is_file():
+        shutil.copyfile(legacy, ROOT / 'scripts' / 'YouTubeCRT' / LEGACY)
     scripts = OUT / 'Scripts' / 'YouTubeCRT'
     shutil.copytree(ROOT / 'scripts' / 'YouTubeCRT', scripts,
                     ignore=shutil.ignore_patterns('__pycache__', '*.rbf', '*.pyc', '*.txt.tmp', 'YouTube-*log*.txt'))
@@ -43,7 +58,7 @@ def main():
         '(it merges with your existing _Other, Scripts and YouTubeNative folders).\n\n'
         '1. Put the SD card back in the MiSTer and boot it.\n'
         '2. Scripts -> YouTubeCRT -> Install_YouTube_CRT (run this once).\n'
-        '3. Load YouTubeCRT_v0.14-auto from _Other. The menu appears.\n\n'
+        '3. Load YouTubeCRT_v0.15-yuv from _Other. The menu appears.\n\n'
         'Add channels to /media/fat/YouTubeNative/ytcrt/subscriptions.txt (IDs or @handles).\n'
         'Support: Scripts -> YouTubeCRT -> Status_YouTube_CRT shows what the player is doing.\n', encoding='utf-8')
     zpath = ROOT / 'release' / 'MiSTer-YouTube-SD.zip'
@@ -58,6 +73,8 @@ def main():
             if p.is_file():
                 z.write(p, 'Scripts/YouTubeCRT/' + p.relative_to(scripts).as_posix())
         z.write(core, 'Scripts/YouTubeCRT/' + CORE)
+        if legacy.is_file():
+            z.write(legacy, 'Scripts/YouTubeCRT/' + LEGACY)
     print('Core:', core)
     print('Full package (offline): %s (%.1f MB)' % (zpath, zpath.stat().st_size / 1e6))
     print('Small installer: %s (%.1f MB)' % (small, small.stat().st_size / 1e6))

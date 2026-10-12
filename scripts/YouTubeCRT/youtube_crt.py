@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""YouTube CRT daemon: the GUI that lives inside the v0.14-auto core.
+"""YouTube CRT daemon: the GUI that lives inside the YouTubeCRT core (v0.15-yuv, or the older v0.14-auto).
 
 Started once at boot (see Install_YouTube_CRT.sh). It idles, reading one
 memory word a few times a second, until you load the YouTubeCRT core from the
@@ -92,7 +92,7 @@ def daemon():
     def cancel():
         if STOP.exists():
             raise core_link.Cancelled('Stopped by the stop file.')
-    log('YouTube CRT %s daemon; core v0.14-auto. %s' % (VERSION, datetime.now(timezone.utc).isoformat()))
+    log('YouTube CRT %s daemon. %s' % (VERSION, datetime.now(timezone.utc).isoformat()))
     rt = pipeline.Runtime(ROOT, HERE)
     if rt.missing():
         log('NOTE: external tools missing (playback disabled): ' + ', '.join(rt.missing()))

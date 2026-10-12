@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Run the YouTube CRT app on a PC against fake data and save screenshots.
 
-    python tools/ytcrt_sim.py OUTDIR
+    python tools/ytcrt_sim.py OUTDIR [yuv]
+
+With `yuv` it drives the v0.15 core's path (FakeYuvLink): YUV pictures, the GUI and playback bar as overlays, and every
+screenshot is the 640x480 frame the FPGA would draw (tools/yuv_ref.py composites picture + overlay).
 
 No MiSTer, network or ffmpeg needed. Uses FakeLink (software 30 fps consumer)
 and a fake pipeline that produces moving test frames, so menus, resume
@@ -15,8 +18,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts' / 'YouTubeCRT'))
 
-from ytcrt import app as appmod, core_link, feeds, inputs, pipeline, store  # noqa: E402
-from ytcrt.gfx import Canvas, rgb  # noqa: E402
+from ytcrt import app as appmod, core_link, feeds, inputs, pipeline, store, yuv  # noqa: E402
+from ytcrt.gfx import Canvas, YuvCanvas, rgb  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import yuv_ref  # noqa: E402
 
 NOW = time.time()
 TITLES = [
@@ -37,7 +43,14 @@ def fake_videos():
     return out
 
 
-def fake_thumb(seed):
+def fake_thumb(seed, yuv_format=False):
+    if yuv_format:
+        c = YuvCanvas(feeds.THUMB_W, feeds.THUMB_H + 1)             # an even height; the last row is cut off below
+        for y in range(feeds.THUMB_H):
+            for x in range(0, feeds.THUMB_W, 2):
+                c.rect(x, y, 2, 1, rgb(40 + seed * 17 % 160, 60 + x * 2 % 180, 80 + y * 4 % 160))
+        cw, ch = feeds.THUMB_W // 2, (feeds.THUMB_H + 1) // 2
+        return bytes(c.y[:feeds.THUMB_W * feeds.THUMB_H]) + bytes(c.u[:cw * ch]) + bytes(c.v[:cw * ch])
     px = bytearray()
     for y in range(feeds.THUMB_H):
         for x in range(feeds.THUMB_W):
@@ -47,7 +60,14 @@ def fake_thumb(seed):
 
 class FakePipe:
     """Stands in for RecordPipeline: endless moving frames."""
-    def __init__(self, start_s, fps, limit=None):
+    class Dec:
+        @staticmethod
+        def colour_flags(height):
+            return 0
+
+    def __init__(self, start_s, fps, limit=None, yuv_size=None):
+        self.decoder = self.Dec()
+        self.yuv_size = yuv_size
         self.n = int(start_s * fps)
         self.fps = fps
         self.t0 = time.monotonic()
@@ -60,6 +80,14 @@ class FakePipe:
         if self.sent >= (time.monotonic() - self.t0) * 400:
             return 'wait', None
         self.sent += 1
+        if self.yuv_size:                                            # a YUV picture of the video's own size
+            w, h = self.yuv_size
+            c = YuvCanvas(w, h)
+            c.fill(rgb(20, 90, 40))
+            c.rect((self.n * 8) % (w - 80), h // 3, 80, 80, rgb(220, 200, 40))
+            c.text(40, 30, 'frame %d' % self.n, rgb(255, 255, 255), rgb(20, 90, 40), 4, 4)
+            self.n += 1
+            return 'record', (bytearray(c.y + c.u + c.v), bytes(6400))
         c = Canvas()
         c.fill(rgb(20, 90, 40))
         x = (self.n * 4) % 280
@@ -72,7 +100,7 @@ class FakePipe:
         pass
 
 
-def main(outdir):
+def main(outdir, yuv_mode=False):
     os.makedirs(outdir, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix='ytcrt-sim-')
     st = store.Store(tmp)
@@ -91,7 +119,7 @@ def main(outdir):
     with open(st.p_subs, 'w') as f:
         f.write('\n'.join(subs) + '\n')
     for i, v in enumerate(vids):
-        fd.thumbs[v['id']] = fake_thumb(i)
+        fd.thumbs[v['id']] = fake_thumb(i, yuv_mode)
     st.toggle_later(vids[1])
     with open(st.p_subs, 'a') as f:
         f.write('PL' + 'q' * 32 + '\nMy Retro Mix | PL' + 'r' * 32 + '\nPL' + 'x' * 32 + '\n')
@@ -112,16 +140,52 @@ def main(outdir):
     pipeline.resolve = lambda rt, prof, vid, cancel, log, note=None, **kw: pipeline.Media(
         vid, 'Fake video ' + vid, 1800, {'width': 426, 'height': 240, 'fps': 30, 'tbr': 210}, None, '240p', None, '', 0.4)
     opened = []
-    pipeline.open_pipeline = lambda rt, prof, media, start_s, speed, cancel, crop='Off': (opened.append((round(start_s, 1), crop)), FakePipe(start_s, 30))[1]
-    link = core_link.FakeLink()
+    pipeline.open_pipeline = lambda rt, prof, media, start_s, speed, cancel, crop='Off', target=None: (
+        opened.append((round(start_s, 1), crop)), FakePipe(start_s, 30, yuv_size=(target['w'], target['h']) if target else None))[1]
+    link = core_link.FakeYuvLink() if yuv_mode else core_link.FakeLink()
     inp = inputs.Input(evdev=False, tty=False)
     a = appmod.App(link, st, fd, Rt(), inp)
     a.refresher = None
     n = [0]
 
+    def write_png(path, raw, w, h, scale=1):
+        import struct
+        import zlib
+        rows = []
+        for y in range(h):
+            line = raw[y * w * 3:(y + 1) * w * 3]
+            if scale > 1:
+                line = b''.join(line[i:i + 3] * scale for i in range(0, len(line), 3))
+            rows.extend([b'\x00' + line] * scale)
+
+        def chunk(tag, body):
+            c = struct.pack('>I', len(body)) + tag + body
+            return c + struct.pack('>I', zlib.crc32(tag + body) & 0xffffffff)
+        with open(path, 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w * scale, h * scale, 8, 2, 0, 0, 0)) +
+                    chunk(b'IDAT', zlib.compress(b''.join(rows), 6)) + chunk(b'IEND', b''))
+
+    def screen_png(path):
+        """The 640x480 frame the v0.15 core would draw for the newest picture (picture + overlay), written as a PNG."""
+        frame, audio, w, h, crop, flags, ov = link.pictures[-1]
+        hdr = yuv.parse_header(yuv.header_for(w, h, crop, link.interlaced, flags, ov))
+        y, u, v = frame[:w * h], frame[w * h:w * h * 5 // 4], frame[w * h * 5 // 4:]
+        px = yuv_ref.render_frame(y, u, v, hdr, True, link.overlays.get(ov) if ov is not None else None)
+        raw = bytearray()
+        for line in px:
+            for p_ in line:
+                raw += bytes(p_)
+        write_png(path, bytes(raw), 640, 480, 1)
+
     def shot(name):
-        a.render() if a.screen else None
-        a.canvas.save_png(os.path.join(outdir, '%02d_%s.png' % (n[0], name)), 3)
+        if a.screen:
+            a.render()
+        if yuv_mode:
+            for _ in range(8):                         # let the menu picture that references the new overlay go out
+                a.pump(0.001)
+            screen_png(os.path.join(outdir, '%02d_%s.png' % (n[0], name)))
+        else:
+            a.canvas.save_png(os.path.join(outdir, '%02d_%s.png' % (n[0], name)), 3)
         n[0] += 1
 
     def keys(*acts, settle=6):
@@ -169,8 +233,11 @@ def main(outdir):
     import threading
 
     def snap(name):
-        rec = link.last
-        Canvas(320, 240, bytearray(rec[:153600])).save_png(os.path.join(outdir, '%02d_%s.png' % (n[0], name)), 3)
+        if yuv_mode:
+            screen_png(os.path.join(outdir, '%02d_%s.png' % (n[0], name)))
+        else:
+            rec = link.last
+            Canvas(320, 240, bytearray(rec[:153600])).save_png(os.path.join(outdir, '%02d_%s.png' % (n[0], name)), 3)
         n[0] += 1
 
     def controller():
@@ -224,4 +291,4 @@ def main(outdir):
 
 
 if __name__ == '__main__':
-    main(sys.argv[1] if len(sys.argv) > 1 else 'sim_out')
+    main(sys.argv[1] if len(sys.argv) > 1 else 'sim_out', 'yuv' in sys.argv[2:])
