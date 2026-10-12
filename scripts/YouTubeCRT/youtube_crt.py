@@ -150,6 +150,9 @@ def daemon():
 
 
 if __name__ == '__main__':
+    # A thread that finishes a bulk copy (the GIL is released while it copies) waits at most this long for the interpreter;
+    # the default 5 ms made each of the five copies per picture wait for a busy thread.
+    sys.setswitchinterval(0.001)
     parser = argparse.ArgumentParser()
     parser.add_argument('--daemon', action='store_true')
     parser.add_argument('--stop', action='store_true')

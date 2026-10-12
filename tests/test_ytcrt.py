@@ -1913,5 +1913,117 @@ class MailboxCopy(unittest.TestCase):
         box.close()
 
 
+class CopyMethods(unittest.TestCase):
+    def test_pwrite_path_lands_in_memory_and_is_chosen_by_use_method(self):
+        from ytcrt import transport, yuv
+        mem = bytearray(yuv.MAP_BYTES)
+        box = transport.Mailbox(mem, fd=99)
+        writes = []
+
+        def fake_pwrite(fd, data, offset):                 # stands in for /dev/mem: physical address -> mapping offset
+            n = min(len(data), 100000)                      # short writes must be handled
+            at = offset - transport.BASE
+            mem[at:at + n] = bytes(data[:n])
+            writes.append((fd, at, n))
+            return n
+        saved = getattr(transport.os, 'pwrite', None)
+        transport.os.pwrite = fake_pwrite
+        try:
+            box.use_method('pwrite')
+            self.assertEqual(box.method, 'pwrite')
+            box.copy_in(yuv.slot_offset(1) + yuv.Y_OFF, bytes(range(256)) * 1000)
+        finally:
+            if saved is None:
+                del transport.os.pwrite
+            else:
+                transport.os.pwrite = saved
+        base = yuv.slot_offset(1) + yuv.Y_OFF
+        self.assertEqual(bytes(mem[base:base + 256000]), bytes(range(256)) * 1000)
+        self.assertGreater(len(writes), 2)
+        box.use_method('memmove')
+        self.assertEqual(box.method, 'memmove')
+        box.close()
+
+    def test_a_pwrite_that_writes_nothing_fails_instead_of_hanging(self):
+        from ytcrt import transport, yuv
+        box = transport.Mailbox(bytearray(yuv.MAP_BYTES), fd=99)
+        saved = getattr(transport.os, 'pwrite', None)
+        transport.os.pwrite = lambda fd, data, offset: 0
+        try:
+            box.use_method('pwrite')
+            with self.assertRaises(OSError):
+                box.copy_in(yuv.slot_offset(0) + yuv.Y_OFF, bytes(1000))
+        finally:
+            if saved is None:
+                del transport.os.pwrite
+            else:
+                transport.os.pwrite = saved
+        box.close()
+
+    def test_measure_copy_skips_a_method_that_fails(self):
+        from ytcrt import core_link, transport, yuv
+        link = core_link.Link.__new__(core_link.Link)
+        link.kind, link.sent = 'yuv', 0
+        link.copy_bytes, link.copy_report = 0, {}
+        link.box = transport.Mailbox(bytearray(yuv.MAP_BYTES), fd=99)
+        saved = getattr(transport.os, 'pwrite', None)
+        transport.os.pwrite = lambda fd, data, offset: 0
+        try:
+            avg, worst = link.measure_copy(2)
+        finally:
+            if saved is None:
+                del transport.os.pwrite
+            else:
+                transport.os.pwrite = saved
+        self.assertEqual(list(link.copy_report), ['memmove'])
+        self.assertEqual(link.box.method, 'memmove')
+        link.box.close()
+
+    def test_without_a_device_file_pwrite_is_refused(self):
+        from ytcrt import transport, yuv
+        box = transport.Mailbox(bytearray(yuv.MAP_BYTES))
+        box.use_method('pwrite')
+        self.assertEqual(box.method, 'memmove')
+        box.close()
+
+
+class CopyInTheCostModel(unittest.TestCase):
+    CAL = {'px': 640 * 360, 'tbr': 307.0, 'fps': 30.0, 'cost': 0.34}
+
+    def test_copy_time_adds_to_the_prediction(self):
+        s = stream(640, 360, 307)
+        plain = profiles.predicted_cost(s, self.CAL)
+        with_copy = profiles.predicted_cost(s, dict(self.CAL, copy_ms=10.0, copy_bytes=345600))
+        self.assertAlmostEqual(with_copy - plain, 0.30, places=2)             # 10 ms x 30 fps
+
+    def test_bigger_pictures_copy_more_but_stop_at_the_core_limit(self):
+        cal = dict(self.CAL, copy_ms=10.0, copy_bytes=345600)
+        c360 = profiles.copy_cost(stream(640, 360, 300), cal, 30)
+        c480 = profiles.copy_cost(stream(854, 480, 500), cal, 30)       # scaled down to 640x360 before it is copied
+        c43 = profiles.copy_cost(stream(640, 480, 500), cal, 30)
+        self.assertAlmostEqual(c480, c360, places=2)
+        self.assertAlmostEqual(c43 / c360, 640 * 480 / (640 * 360.0), places=2)
+
+    def test_the_rgb_core_copies_a_fixed_record(self):
+        cal = dict(self.CAL, copy_ms=7.0, copy_bytes=160000, copy_fixed=True)
+        self.assertAlmostEqual(profiles.copy_cost(stream(426, 240, 100), cal, 30), profiles.copy_cost(stream(640, 360, 300), cal, 30))
+
+    def test_the_limit_is_higher_only_when_the_copy_is_counted(self):
+        self.assertEqual(profiles.limit_for(self.CAL), profiles.LIMIT)
+        self.assertEqual(profiles.limit_for(dict(self.CAL, copy_ms=9.0, copy_bytes=1)), profiles.LIMIT_TOTAL)
+
+
+class Av1Probe(unittest.TestCase):
+    def test_codec_option_picks_av1_or_says_there_is_none(self):
+        fm = [stream(640, 360, 300, fid='a'), stream(640, 360, 220, fid='b', vcodec='av01.0.05M.08')]
+        for f in fm:
+            f['url'] = 'https://x/' + f['format_id']
+        info = {'id': 'x' * 11, 'title': 't', 'duration': 60}
+        v, a, label, cost, why = pipeline.choose_streams(info, fm, profiles.PROFILE, '360p', codec='av01')
+        self.assertEqual(v['format_id'] if isinstance(v, dict) and 'format_id' in v else v.get('format_id'), 'b')
+        with self.assertRaises(ValueError):
+            pipeline.choose_streams(info, fm[:1], profiles.PROFILE, '360p', codec='av01')
+
+
 if __name__ == '__main__':
     unittest.main()

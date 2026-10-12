@@ -34,6 +34,8 @@ QUALITY_BOX = {'240p': 240, '360p': 360, '480p': 480, 'Auto': 480}      # shorte
 CAL_DEFAULT = {'px': 640 * 360, 'tbr': 307.0, 'fps': 30.0, 'cost': 0.67}
 PIXEL_SHARE = 0.5          # assume half of the decoding cost follows the pixel count and half follows the bitrate
 LIMIT = 0.72              # the decoder may use at most this much of the ARM: the rest is the player's own pipe reading and record copying (about a quarter)
+LIMIT_TOTAL = 0.95         # used instead of LIMIT once the Speed test has measured the picture copy: decoding plus copying may use this much
+PICTURE_BOX = (640, 480)   # the v0.15 core takes pictures up to this size; a bigger stream is scaled down by ffmpeg first
 BIG_PX = 110000            # above this many pixels (a little more than 426x240) the cheaper decoder settings are used
 
 
@@ -42,8 +44,30 @@ def label_for(width, height):
     return '%dp' % min(width, height)
 
 
+def limit_for(cal=None):
+    """How much of the ARM the estimate (see predicted_cost) may use: more once it includes the picture copy."""
+    return LIMIT_TOTAL if cal and cal.get('copy_ms') else LIMIT
+
+
+def picture_bytes(stream):
+    """Bytes of YUV 4:2:0 the player copies to the core for one picture of this stream."""
+    w, h = stream['width'], stream['height']
+    f = min(1.0, PICTURE_BOX[0] / w, PICTURE_BOX[1] / h)
+    return int(w * f) * int(h * f) * 3 // 2
+
+
+def copy_cost(stream, cal, fps):
+    """Share of the ARM spent copying this stream's pictures to the core (0 until the Speed test measured it)."""
+    ms, base = cal.get('copy_ms'), cal.get('copy_bytes')
+    if not ms or not base:
+        return 0.0
+    ratio = 1.0 if cal.get('copy_fixed') else picture_bytes(stream) / float(base)
+    return ms / 1000.0 * ratio * fps
+
+
 def predicted_cost(stream, cal=None, mult=1.0):
-    """ARM seconds needed per second of video, from the stream's pixels, bitrate and frame rate.
+    """ARM seconds needed per second of video: decoding (from the stream's pixels, bitrate and frame rate) plus copying the
+    pictures to the core once the Speed test has measured that.
 
     A 24 fps stream has 20% fewer frames to decode than a 30 fps one, so it costs 20% less."""
     cal = cal or CAL_DEFAULT
@@ -51,7 +75,7 @@ def predicted_cost(stream, cal=None, mult=1.0):
     tbr = stream.get('tbr') or cal['tbr']
     fps = stream.get('fps') or cal['fps']
     shape = PIXEL_SHARE * px / cal['px'] + (1.0 - PIXEL_SHARE) * tbr / cal['tbr']
-    return cal['cost'] * mult * shape * fps / cal['fps']
+    return (cal['cost'] * shape * fps / cal['fps'] + copy_cost(stream, cal, fps)) * mult
 
 
 def speed_for(px, speed, learned):

@@ -23,6 +23,7 @@ SETTINGS_DEFAULTS = {
     'cal': dict(profiles.CAL_DEFAULT),   # measured by the Speed test: cost of one reference stream on this MiSTer
     'speed_clip': '',          # the video the last Speed test used: reused so repeated tests are comparable
     'cost_mult': 1.0,          # learned: grows when a stream starved, shrinks slowly while streams play cleanly
+    'copy_method': None,       # how pictures are copied to the v0.15 core ('memmove' | 'pwrite'), chosen by the Speed test
     'speed_big': 'Fast',       # decoder setting used for larger streams (learned by the Speed test)
     'crop': 'Off',             # Off | 14:9 | Fill : starting crop for each video (More > Crop changes it live)
 }

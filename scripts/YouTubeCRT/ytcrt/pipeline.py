@@ -293,7 +293,7 @@ def _area(f):
     return f['width'] * f['height']
 
 
-def choose_streams(info, formats, profile, quality='Auto', cal=None, mult=1.0, max_cost=None):
+def choose_streams(info, formats, profile, quality='Auto', cal=None, mult=1.0, max_cost=None, codec=None):
     """Pick the video and audio stream for a video.
 
     quality '240p' / '360p' / '480p': the largest stream whose shorter side is at most that (highest bitrate first),
@@ -312,7 +312,12 @@ def choose_streams(info, formats, profile, quality='Auto', cal=None, mult=1.0, m
             raise ValueError('This is a past livestream (segmented stream). Those cannot be played here yet.')
         raise ValueError('No supported video stream was found.')
     # H.264 is what the cost model describes and what the ARM decodes best; use anything else only if there is nothing else.
-    pool = [f for f in vids if (f.get('vcodec') or '').startswith('avc1')] or vids
+    if codec:                                       # an experiment (the Speed test's AV1 probe): that codec or nothing
+        pool = [f for f in vids if (f.get('vcodec') or '').startswith(codec)]
+        if not pool:
+            raise ValueError('No %s stream.' % codec)
+    else:
+        pool = [f for f in vids if (f.get('vcodec') or '').startswith('avc1')] or vids
     box = profiles.QUALITY_BOX.get(quality, 480)
     fit = [f for f in pool if min(f['width'], f['height']) <= box] or [min(pool, key=_area)]    # '360p' means 360 lines: 480x360 for 4:3, 640x360 for 16:9
     fit = [f for f in fit if min(f['width'], f['height']) >= 240] or fit          # never drop below 240p if 240p exists
@@ -320,7 +325,7 @@ def choose_streams(info, formats, profile, quality='Auto', cal=None, mult=1.0, m
     rank = sorted(fit, key=lambda f: (-_area(f), 0 if (f.get('fps') or 30) <= profile.fps else 1, -(f.get('tbr') or 0)))
     why = ''
     if quality == 'Auto':
-        limit = profiles.LIMIT if max_cost is None else max_cost
+        limit = profiles.limit_for(cal) if max_cost is None else max_cost
         cost = lambda f: profiles.predicted_cost(f, cal, mult)
         fits = [f for f in rank if cost(f) <= limit]
         video = fits[0] if fits else min(rank, key=cost)
@@ -351,8 +356,8 @@ def _client(src):
     return '%s/%s' % (parse_qs(urlparse(src['url']).query).get('c', ['?'])[0], src.get('format_id'))
 
 
-def media_from(info, formats, profile, quality='Auto', cal=None, mult=1.0, log=lambda m: None, max_cost=None):
-    video, audio, label, cost, why = choose_streams(info, formats, profile, quality, cal, mult, max_cost)
+def media_from(info, formats, profile, quality='Auto', cal=None, mult=1.0, log=lambda m: None, max_cost=None, codec=None):
+    video, audio, label, cost, why = choose_streams(info, formats, profile, quality, cal, mult, max_cost, codec)
     log('Streams: video=%s audio=%s ua=%s' % (_client(video), _client(audio) if audio else 'none',
                                               (video['headers'].get('User-Agent', '?'))[:50]))
     log('Selected %s: %sx%s %s fps %s kbps (%s), estimated load %d%%%s' % (
@@ -369,7 +374,7 @@ def step_down(media, profile, cal=None, mult=1.0, log=lambda m: None):
     cal = cal or profiles.CAL_DEFAULT
     cur = profiles.predicted_cost(media.video, cal, mult)
     smaller = media_from(media.catalog[0], media.catalog[1], profile, 'Auto', cal, mult, log,
-                         max_cost=min(profiles.LIMIT, cur * 0.75))
+                         max_cost=min(profiles.limit_for(cal), cur * 0.75))
     same = smaller.video['format_id'] == media.video['format_id']
     return None if same or smaller.cost >= cur else smaller
 

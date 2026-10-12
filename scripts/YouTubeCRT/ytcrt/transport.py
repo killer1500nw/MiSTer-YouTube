@@ -6,6 +6,7 @@ FPGA, identity 0x35445459, see docs/FPGA-YUV-v0.15.md). The mailbox words are th
 """
 from pathlib import Path
 import ctypes
+import os
 from .memory_layout import check_layout, BASE
 from . import yuv
 
@@ -50,10 +51,22 @@ def address_of(buf):
     return ctypes.cast(ctypes.c_char_p(buf), ctypes.c_void_p).value
 
 
+COPY_METHODS = ('memmove', 'pwrite')
+
+
 class Mailbox:
-    def __init__(self, memory):
+    def __init__(self, memory, fd=None):
         self.words = (ctypes.c_uint32 * (len(memory) // 4)).from_buffer(memory)
         self.base = ctypes.addressof(self.words)
+        self.fd = fd                    # /dev/mem opened O_SYNC: lets copy_in write with one system call instead of memmove
+        self.method = 'memmove'
+
+    def use_method(self, method):
+        """Pick how bulk copies are made ('memmove' into the mapping, or 'pwrite' to /dev/mem); ignores what it cannot do."""
+        if method == 'pwrite' and self.fd is not None and hasattr(os, 'pwrite'):
+            self.method = 'pwrite'
+        elif method == 'memmove':
+            self.method = 'memmove'
 
     def close(self):
         del self.words
@@ -92,7 +105,16 @@ class Mailbox:
         if offset < 0 or offset + n > len(self.words) * 4 or offset % 4:
             raise ValueError('copy outside the mapping')
         addr = address_of(src)
-        ctypes.memmove(self.base + offset, addr, n)
+        if self.method == 'pwrite':
+            view = memoryview(src).cast('B')[:n]
+            done = 0
+            while done < n:
+                wrote = os.pwrite(self.fd, view[done:], BASE + offset + done)
+                if wrote <= 0:                      # /dev/mem takes no writes here: fail instead of looping forever
+                    raise OSError('pwrite to /dev/mem wrote nothing')
+                done += wrote
+        else:
+            ctypes.memmove(self.base + offset, addr, n)
         k = min(n, 16)
         if ctypes.string_at(self.base + offset, k) != ctypes.string_at(addr, k) or \
                 ctypes.string_at(self.base + offset + n - k, k) != ctypes.string_at(addr + n - k, k):

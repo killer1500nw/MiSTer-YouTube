@@ -10,6 +10,7 @@ from .gfx import Canvas, YuvCanvas
 from .store import RESUME_MIN_MS
 
 TEST_CLIP = 'M7kB0lis3xg'
+COPY_BUSY = 2.0            # copying during decoding takes about this many times the idle figure (corrected by _learn_copy)
 # The core starts consuming only once 4 records are queued (PROTOCOL.md prefill),
 # so the menu must queue at least 4 or it never appears. ~130 ms of latency.
 MENU_DEPTH = 4
@@ -51,6 +52,7 @@ class Job:
 class App:
     def __init__(self, link, store, feeds, rt, inputs, log=print):
         self.link, self.store, self.feeds, self.rt, self.inputs, self.log = link, store, feeds, rt, inputs, log
+        getattr(link, 'use_copy_method', lambda m: None)(store.settings.get('copy_method'))      # the way the Speed test found fastest
         self.yuv = getattr(link, 'kind', 'rgb') == 'yuv'              # the v0.15 core: the GUI is an overlay, pictures are YUV
         self.canvas = YuvCanvas(320, 240) if self.yuv else Canvas(320, 240)
         self.stack = []
@@ -478,12 +480,19 @@ class App:
                     big = (bigger, pipeline.benchmark(self.rt, prof, bigger, best_sp, 12, check, decode_only=True))
             except (ValueError, RuntimeError, OSError) as exc:
                 self.log('Speed test: no larger stream measured (%s)' % exc)
-            return runs, media, bare, big
+            # AV1 at the same size (YouTube's AV1 carries more picture per kilobit; is the ARM able to decode it?).
+            av1 = None
+            try:
+                a = pipeline.media_from(media.catalog[0], media.catalog[1], prof, '360p', log=self.log, codec='av01')
+                av1 = (a, pipeline.benchmark(self.rt, prof, a, best_sp, 12, check, decode_only=True))
+            except (ValueError, RuntimeError, OSError, TypeError) as exc:
+                self.log('Speed test: AV1 not measured (%s)' % exc)
+            return runs, media, bare, big, av1
         res, err = self.run_job('Speed test', ['Decoding a test stream (three runs)...', 'B: cancel'], work)
         if err:
             self.push(ui.Message('Speed test failed', [str(err)[:140]], ui.AMBER))
             return
-        results, media, bare, big = res
+        results, media, bare, big, av1 = res
         copy_avg, copy_max = self.link.measure_copy()       # on this thread: nothing else is writing the next slot
         fast = self.link.measure_fast_copy()
         best_speed, best = max(results, key=lambda r: r[1])
@@ -495,22 +504,39 @@ class App:
         lines.append('Scale+colour: %d%% of the time' % round(share * 100))
         if big:
             lines.append('Decode only at %s (%d kbps): %.2fx' % (big[0].label, round(big[0].tbr), big[1]))
-        lines.append('Copy 160 KB: %.1f ms (max %.1f)' % (copy_avg, copy_max))
+        if av1:
+            lines.append('AV1 %s (%d kbps), decode only: %.2fx (H.264 %.2fx)' % (av1[0].label, round(av1[0].tbr), av1[1], bare))
+        kb = max(1, round(self.link.copy_bytes / 1000.0))
+        lines.append('Copy %d KB: %.1f ms (max %.1f)%s' % (kb, copy_avg, copy_max, (', ' + ', '.join(
+            '%s %.1f ms' % (m, r[0]) for m, r in sorted(self.link.copy_report.items()))) if len(self.link.copy_report) > 1 else ''))
         if fast:
             method, (bulk_ms, _, intact) = min(fast.items(), key=lambda kv: kv[1][0])
             lines.append('Bulk copy: %.1f ms (%s%s)' % (bulk_ms, method, '' if intact else ' BAD DATA'))
         else:
             lines.append('Bulk copy: not possible')
         lines.append('Test: %s, %d kbps, %d fps' % (media.label, round(media.tbr), round(v.get('fps') or 30)))
-        self.store.set('cal', {'px': v['width'] * v['height'], 'tbr': float(v.get('tbr') or 300),
-                               'fps': float(v.get('fps') or 30), 'cost': round(1.0 / best, 4)})
+        cal = {'px': v['width'] * v['height'], 'tbr': float(v.get('tbr') or 300),
+               'fps': float(v.get('fps') or 30), 'cost': round(1.0 / best, 4)}
+        if self.link.copy_bytes and copy_avg > 0:
+            # Copying while ffmpeg is decoding is slower than on an idle MiSTer; start with twice the idle time and let
+            # the real figures from playback correct it (see _learn_copy).
+            cal.update({'copy_ms': round(copy_avg * COPY_BUSY, 2), 'copy_bytes': self.link.copy_bytes,
+                        'copy_fixed': self.link.kind != 'yuv'})
+        self.store.set('cal', cal)
+        self.store.set('copy_method', getattr(self.link.box, 'method', None) if self.link.kind == 'yuv' else None)
         self.store.set('speed_big', best_speed)
         self.store.set('speed_clip', media.id)
         self.store.set('cost_mult', 1.0)
-        self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); copy 160 KB %.1f ms (worst %.1f); bulk copy %s; calibration %s, speed_big=%s%s' % (
-            media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), copy_avg, copy_max, fast, self.store.settings['cal'], best_speed,
-            ('; %s %dx%d %d kbps %d fps decode only %.2fx' % (big[0].label, big[0].video['width'], big[0].video['height'], round(big[0].tbr),
-                                                              round(big[0].video.get('fps') or 30), big[1])) if big else ''))
+        extra = ''
+        if big:
+            extra += '; %s %dx%d %d kbps %d fps decode only %.2fx' % (
+                big[0].label, big[0].video['width'], big[0].video['height'], round(big[0].tbr), round(big[0].video.get('fps') or 30), big[1])
+        if av1:
+            extra += '; AV1 %dx%d %d kbps %d fps decode only %.2fx' % (
+                av1[0].video['width'], av1[0].video['height'], round(av1[0].tbr), round(av1[0].video.get('fps') or 30), av1[1])
+        self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); copy %d KB %.1f ms (worst %.1f) %s; bulk copy %s; calibration %s, speed_big=%s%s' % (
+            media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), kb, copy_avg, copy_max,
+            {m: round(r[0], 1) for m, r in self.link.copy_report.items()}, fast, self.store.settings['cal'], best_speed, extra))
         self.push(ui.Message('Speed test', lines, ui.GREEN if best >= 1.15 else ui.AMBER))
 
     # playback ---------------------------------------------------------
@@ -536,9 +562,20 @@ class App:
         else:
             self.play(v, pos if pos >= RESUME_MIN_MS else 0)
 
+    def _learn_copy(self, media, avg_ms, n):
+        """Fold the copy time seen during real playback into the Auto cost model (an idle MiSTer copies faster)."""
+        cal = self.store.settings.get('cal')
+        if n < 300 or not (isinstance(cal, dict) and cal.get('copy_ms') and cal.get('copy_bytes')) or not media.video:
+            return
+        per_base = avg_ms if cal.get('copy_fixed') else avg_ms * cal['copy_bytes'] / float(profiles.picture_bytes(media.video))
+        new = round(0.7 * cal['copy_ms'] + 0.3 * min(per_base, 4.0 * cal['copy_ms']), 2)
+        if abs(new - cal['copy_ms']) >= 0.1:
+            self.store.set('cal', dict(cal, copy_ms=new))
+            self.log('Copy time per picture now estimated at %.1f ms (%d KB)' % (new, cal['copy_bytes'] // 1000))
+
     def _note_smooth(self, media):
         """A demanding stream ran for a while without starving: trust the cost estimate a little more."""
-        if media.cost >= 0.8 * profiles.LIMIT:
+        if media.cost >= 0.8 * profiles.limit_for(self.calibration()[0]):
             mult = max(0.7, float(self.store.settings.get('cost_mult', 1.0)) * 0.97)
             self.store.set('cost_mult', round(mult, 3))
             self.log('%s at estimated load %d%% played cleanly; cost multiplier now %.3f' %
@@ -632,8 +669,10 @@ class App:
             break
         if self.link.copy_count > copy0[1]:
             n = self.link.copy_count - copy0[1]
+            avg_ms = 1000.0 * (self.link.copy_total - copy0[0]) / n
             self.log('Record copy to the core: average %.1f ms, worst %.1f ms (%d records)' % (
-                1000.0 * (self.link.copy_total - copy0[0]) / n, 1000.0 * self.link.copy_max, n))
+                avg_ms, 1000.0 * self.link.copy_max, n))
+            self._learn_copy(media, avg_ms, n)
         self.log('Playback %s at %s of %s' % ('finished' if outcome == 'eof' else 'stopped', ui.mmss(pos_ms), ui.mmss(media.duration * 1000)))
         self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))
         self.dirty = True

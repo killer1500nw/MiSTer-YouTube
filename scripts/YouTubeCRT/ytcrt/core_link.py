@@ -52,6 +52,8 @@ class Link:
         self.copy_total = 0.0
         self.copy_max = 0.0
         self.copy_count = 0
+        self.copy_bytes = 0
+        self.copy_report = {}
 
     # lifecycle --------------------------------------------------------
     def open(self):
@@ -60,7 +62,7 @@ class Link:
         self.fd = os.open('/dev/mem', os.O_RDWR | os.O_SYNC)
         self.memory = mmap.mmap(self.fd, t.MAP_BYTES, flags=mmap.MAP_SHARED,
                                 prot=mmap.PROT_READ | mmap.PROT_WRITE, offset=t.BASE)
-        self.box = t.Mailbox(self.memory)
+        self.box = t.Mailbox(self.memory, self.fd)
 
     def _wait(self, test, timeout, message):
         end = time.monotonic() + timeout
@@ -300,19 +302,44 @@ print('slice %.2f %.2f %d' % (1000 * sum(t) / n, 1000 * max(t), check()))
                 res[parts[0]] = (float(parts[1]), float(parts[2]), parts[3] == '1')
         return res or None
 
+    def use_copy_method(self, method):
+        if self.kind == 'yuv':
+            self.box.use_method(method)
+
+    YUV_TEST_BYTES = 640 * 360 * 3 // 2        # a typical picture: 640x360 YUV 4:2:0
+
     def measure_copy(self, n=12):
-        """Time n 160 KB copies into the NEXT slot without publishing it (the core never reads an unpublished slot).
-        Call from the thread that pushes, so nothing else writes that slot meanwhile. -> (average ms, worst ms)."""
-        data = bytearray(RECORD_BYTES)
-        times = []
-        for _ in range(n):
-            started = time.monotonic()
-            if self.kind == 'yuv':
-                self.box.copy_in(yuv.slot_offset(self.sent) + yuv.Y_OFF, data)
-            else:
-                self.box.record(self.sent, bytes(data))
-            times.append(time.monotonic() - started)
-        return 1000.0 * sum(times) / len(times), 1000.0 * max(times)
+        """Time n copies of a typical picture into the NEXT slot without publishing it (the core never reads an unpublished
+        slot). The v0.15 link tries both ways of copying (memmove into the mapping, pwrite to /dev/mem), keeps the faster
+        and records every result in `copy_report`. Call from the thread that pushes, so nothing else writes that slot meanwhile.
+        -> (average ms, worst ms) of the method in use."""
+        def time_it(copy):
+            times = []
+            for _ in range(n):
+                started = time.monotonic()
+                copy()
+                times.append(time.monotonic() - started)
+            return 1000.0 * sum(times) / len(times), 1000.0 * max(times)
+        if self.kind != 'yuv':
+            data = bytearray(RECORD_BYTES)
+            self.copy_bytes = RECORD_BYTES
+            self.copy_report = {'record': time_it(lambda: self.box.record(self.sent, bytes(data)))}
+            return self.copy_report['record']
+        data = bytearray(self.YUV_TEST_BYTES)
+        where = yuv.slot_offset(self.sent) + yuv.Y_OFF
+        self.copy_bytes = self.YUV_TEST_BYTES
+        self.copy_report = {}
+        keep = self.box.method
+        for method in t.COPY_METHODS:
+            self.box.use_method(method)
+            if self.box.method == method:
+                try:
+                    self.copy_report[method] = time_it(lambda: self.box.copy_in(where, data))
+                except (OSError, RuntimeError, ValueError):
+                    pass                                   # this way of copying does not work on this system: leave it out
+        best = min(self.copy_report, key=lambda m: self.copy_report[m][0]) if self.copy_report else keep
+        self.box.use_method(best)
+        return self.copy_report.get(best, (0.0, 0.0))
 
 
 class FakeLink:
@@ -326,6 +353,11 @@ class FakeLink:
     slots = SLOTS
     interlaced = False
     PREFILL = 4
+    copy_bytes = 0
+    copy_report = {}
+
+    def use_copy_method(self, method):
+        pass
 
     def __init__(self, log=print, cancel=lambda: None, sink=None):
         self.log, self.cancel, self.sink = log, cancel, sink
