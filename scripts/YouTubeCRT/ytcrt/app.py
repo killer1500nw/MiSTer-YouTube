@@ -406,9 +406,10 @@ class App:
         cal, mult = self.calibration()
         res, err = self.run_job(
             'Loading',
-            lambda: [ui.clip(v.get('title', ''), 60),
-                     'Contacting YouTube... %ds' % (time.monotonic() - started), ui.clip(last[0], 60)]
-                    + (['This video needs a security check.', 'It can take a few minutes on a MiSTer.'] if 'Solving JS' in last[0] else []),
+            lambda: [ui.clip(v.get('title', ''), 33),
+                     'Contacting YouTube... %ds' % (time.monotonic() - started), ui.clip(last[0], 33),
+                     ('Security check: can take a few minutes. Please be patient.' if 'Solving JS' in last[0] else
+                      'This can take a minute or two. Please be patient.')],
             lambda check: pipeline.resolve(self.rt, prof, v['id'], check, self.log,
                                            note=lambda t: last.__setitem__(0, t), quality=quality, cal=cal, mult=mult))
         if err:

@@ -108,7 +108,7 @@ class Message(Screen):
         if self.spinner:
             n = int(time.monotonic() * 6) % 8
             for i in range(8):
-                c.rect(MX + 8 + i * 14, 190, 10, 8, RED if i == n else PANEL)
+                c.rect(MX + 8 + i * 14, min(max(190, y + 4), 212), 10, 8, RED if i == n else PANEL)
 
     def handle(self, app, act):
         if act == 'back' and self.on_back is not False:
