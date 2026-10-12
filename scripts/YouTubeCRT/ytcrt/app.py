@@ -474,6 +474,7 @@ class App:
                 media = fresh
                 continue
             break
+        self.log('Playback %s at %s of %s' % ('finished' if outcome == 'eof' else 'stopped', ui.mmss(pos_ms), ui.mmss(media.duration * 1000)))
         self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))
         self.dirty = True
 
