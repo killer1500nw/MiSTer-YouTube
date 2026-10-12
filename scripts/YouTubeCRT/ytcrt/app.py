@@ -482,19 +482,26 @@ class App:
                     media = pipeline.resolve(self.rt, prof, media.id, check, self.log, quality='360p')
             # How far the decoder alone gets with the next size up (the core now does the scaling): tells whether a
             # bigger source is worth offering. Optional: a video without a bigger H.264 stream just skips it.
+            def limited():
+                """The optional probes get about a minute each: a slow decoder must not hold up the whole test."""
+                check()
+                if time.monotonic() > deadline[0]:
+                    raise RuntimeError('probe took too long')
             big = None
+            deadline = [time.monotonic() + 75]
             try:
                 bigger = pipeline.resolve(self.rt, prof, media.id, check, self.log, quality='480p')
                 bv, mv = bigger.video, media.video
                 if bv['width'] * bv['height'] > mv['width'] * mv['height'] * 1.2:
-                    big = (bigger, pipeline.benchmark(self.rt, prof, bigger, best_sp, 12, check, decode_only=True))
+                    big = (bigger, pipeline.benchmark(self.rt, prof, bigger, best_sp, 8, limited, decode_only=True))
             except (ValueError, RuntimeError, OSError) as exc:
                 self.log('Speed test: no larger stream measured (%s)' % exc)
             # AV1 at the same size (YouTube's AV1 carries more picture per kilobit; is the ARM able to decode it?).
             av1 = None
+            deadline[0] = time.monotonic() + 75
             try:
                 a = pipeline.media_from(media.catalog[0], media.catalog[1], prof, '360p', log=self.log, codec='av01')
-                av1 = (a, pipeline.benchmark(self.rt, prof, a, best_sp, 12, check, decode_only=True))
+                av1 = (a, pipeline.benchmark(self.rt, prof, a, best_sp, 8, limited, decode_only=True))
             except (ValueError, RuntimeError, OSError, TypeError) as exc:
                 self.log('Speed test: AV1 not measured (%s)' % exc)
             return runs, media, bare, big, av1
