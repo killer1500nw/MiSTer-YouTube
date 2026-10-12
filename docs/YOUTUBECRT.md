@@ -39,7 +39,7 @@ Not included (yet): search, playlists, live streams, account login, on-screen ke
 **One script.** Download `Install_YouTube_CRT.sh` from the
 [latest release](https://github.com/killer1500nw/MiSTer-YouTube/releases/latest), put that single file in
 `/media/fat/Scripts/`, and run **Scripts → Install_YouTube_CRT** on the MiSTer. It downloads the installer package
-(about 1 MB), installs the core into `_Other`, downloads the ARM builds of yt-dlp, QuickJS and ffmpeg
+(about 1 MB), installs the core into `_Other`, downloads the ARM builds of yt-dlp, QuickJS, ffmpeg and Node.js
 (checksum-verified), adds the boot entry, starts the player and shows its log
 (*Waiting for the YouTubeCRT core to be loaded...*). It needs internet access and a roughly correct clock. Run it
 again to update. Then load **YouTubeCRT_v0.14-auto** from `_Other`.
@@ -102,7 +102,7 @@ the right place for you. (A `watch?v=...&list=PL...` link is filed as the playli
 
 **Removing an entry:** highlight it on Channels, Playlists or My Videos and press **Y** (Remove), then confirm. The line is deleted from `subscriptions.txt`; your other lines and comments stay. (Handy for a mistyped handle.)
 
-**Slow videos:** some videos need YouTube's JS security check, which takes minutes on a MiSTer. The Loading screen says so as soon as it sees it, and remembers it: next time the warning shows at once, and the video's details panel says *slow start*. Once a video has loaded, its details are saved for 3 hours, so replays are quick.
+**Slow videos:** some videos need YouTube's JS security check. With Node.js (installed by `Install_YouTube_CRT`, about 49 MB) it takes seconds to a minute; with only QuickJS it takes 3 to 5 minutes on a MiSTer and can time out. The Loading screen says so as soon as it sees it, and remembers it: next time the warning shows at once, and the video's details panel says *slow start*. Once a video has loaded, its details are saved for 3 hours, so replays are quick.
 
 A playlist or channel that does not load is listed with a `!`; open it to see why (for example *not found (check the
 spelling)* or *The playlist does not exist*). The same reason is in the log. YouTube's RSS feeds for channels are

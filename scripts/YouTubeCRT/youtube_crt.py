@@ -34,6 +34,7 @@ def startup_report(log, rt):
     log('clock: %s (a badly wrong MiSTer clock can break HTTPS)' % time.strftime('%Y-%m-%d %H:%M:%S %Z'))
     for name, p in (('yt-dlp', rt.resolver), ('qjs', rt.qjs), ('ffmpeg', rt.ffmpeg), ('cacert', rt.ca)):
         log('%s: %s %s' % (name, 'ok' if p.is_file() else 'MISSING', p))
+    log('node: %s' % (rt.node if getattr(rt, 'node', None) else 'not installed (security-check videos will be slow; run Install_YouTube_CRT)'))
     try:
         fams = sorted({'IPv6' if a[0] == socket.AF_INET6 else 'IPv4'
                        for a in socket.getaddrinfo('www.youtube.com', 443, type=socket.SOCK_STREAM)})

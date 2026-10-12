@@ -498,7 +498,8 @@ class App:
             'Loading',
             lambda: [ui.clip(v.get('title', ''), 33),
                      'Contacting YouTube... %ds' % (time.monotonic() - started), ui.clip(last[0], 33),
-                     ('This video needs a security check: it can take a few minutes. Please be patient.' if slow[0] else
+                     (('This video needs a security check: it can take a minute or so. Please be patient.' if getattr(self.rt, 'node', None)
+                       else 'This video needs a security check: it can take a few minutes. Please be patient.') if slow[0] else
                       'This can take a minute or two. Please be patient.')],
             lambda check: pipeline.resolve(self.rt, prof, v['id'], check, self.log,
                                            note=note, quality=quality, cal=cal, mult=mult))

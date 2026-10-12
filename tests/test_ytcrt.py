@@ -1504,5 +1504,62 @@ class SearchTests(unittest.TestCase):
         self.assertNotIn('\n', cmd[-1])
 
 
+class NodeRuntime(unittest.TestCase):
+    def tree(self):
+        d = Path(tempfile.mkdtemp())
+        res = d / 'resolver-2026.08.19-qjs-0.17.0'
+        (res / 'bundle').mkdir(parents=True)
+        (res / 'qjs').write_bytes(b'q')
+        return d
+
+    def test_runtime_finds_node_and_the_command_prefers_it_with_quickjs_as_fallback(self):
+        d = self.tree()
+        rt = pipeline.Runtime(str(d), str(d))
+        self.assertIsNone(rt.node)
+        cmd = [str(c) for c in pipeline.resolve_command(rt, profiles.PROFILE, 'https://www.youtube.com/watch?v=x')]
+        self.assertEqual([c for c in cmd if c.startswith(('node:', 'quickjs:'))], ['quickjs:' + str(rt.qjs)])
+        (d / 'node-test').mkdir()
+        (d / 'node-test' / 'node').write_bytes(b'n')                    # the copy Test_Node_JS.sh leaves
+        (d / 'node-22.23.3-armhf').mkdir()
+        (d / 'node-22.23.3-armhf' / 'node').write_bytes(b'n')           # the installed one wins
+        rt = pipeline.Runtime(str(d), str(d))
+        self.assertEqual(rt.node, d / 'node-22.23.3-armhf' / 'node')
+        cmd = [str(c) for c in pipeline.resolve_command(rt, profiles.PROFILE, 'https://www.youtube.com/watch?v=x')]
+        self.assertEqual([c for c in cmd if c.startswith(('node:', 'quickjs:'))],
+                         ['node:' + str(rt.node), 'quickjs:' + str(rt.qjs)])
+        self.assertEqual(rt.missing().count(str(rt.qjs)), 0)             # node is optional: never "missing"
+
+    def test_setup_installs_only_a_verified_runnable_node(self):
+        import hashlib, io, tarfile
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts' / 'YouTubeCRT'))
+        import ytcrt_setup as su
+        root, dl = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode='w:gz') as t:
+            data = b'#!fake'
+            info = tarfile.TarInfo('node-v22.23.3-linux-armv7l/bin/node')
+            info.size = len(data)
+            t.addfile(info, io.BytesIO(data))
+        blob = raw.getvalue()
+        saved = (su.fetch, su.NODE_SHA256, su.node_version)
+        su.fetch = lambda url, dest=None, label='': Path(dest).write_bytes(blob)
+        try:
+            su.NODE_SHA256 = hashlib.sha256(b'something else').hexdigest()            # wrong checksum: refuse
+            with self.assertRaises(RuntimeError):
+                su.setup_node(root, dl)
+            self.assertFalse(list(root.glob('node-*-armhf')))
+            su.NODE_SHA256 = hashlib.sha256(blob).hexdigest()
+            su.node_version = lambda path: ''                                         # unpacked but does not run: refuse
+            with self.assertRaises(RuntimeError):
+                su.setup_node(root, dl)
+            self.assertFalse(list(root.glob('node-*-armhf')))
+            su.node_version = lambda path: su.NODE_VER
+            su.setup_node(root, dl)
+            self.assertTrue((root / 'node-22.23.3-armhf' / 'node').is_file())
+            su.setup_node(root, dl)                                                   # a second run changes nothing
+        finally:
+            su.fetch, su.NODE_SHA256, su.node_version = saved
+
+
 if __name__ == '__main__':
     unittest.main()

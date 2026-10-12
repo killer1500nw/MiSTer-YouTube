@@ -8,6 +8,8 @@ anything already installed is left alone.
     yt-dlp  2026.08.19  (ARM onedir build)   Unlicense  github.com/yt-dlp/yt-dlp
     QuickJS v0.17.0     (qjs, ARM)           MIT        github.com/quickjs-ng/quickjs
     FFmpeg  static armhf (johnvansickle.com) GPLv3
+    Node.js v22         (linux-armv7l)       MIT        nodejs.org   (optional: solves YouTube's JS check in
+                                                              seconds instead of minutes; QuickJS stays as the fallback)
 """
 import argparse
 import hashlib
@@ -30,6 +32,9 @@ QJS_TAG = 'v0.17.0'
 QJS_URL = 'https://github.com/quickjs-ng/quickjs/releases/download/%s/qjs-linux-armv7' % QJS_TAG
 QJS_SHA256 = 'dbda6e499471c675bd991dbc477f14d6134c182409d15047e9b63e3df7bc3e64'
 FFMPEG_URL = 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-armhf-static.tar.xz'
+NODE_VER = 'v22.23.3'                      # yt-dlp needs Node 22 or newer
+NODE_URL = 'https://nodejs.org/dist/%s/node-%s-linux-armv7l.tar.gz' % (NODE_VER, NODE_VER)
+NODE_SHA256 = '8b99058ec6f4e372b9887f8ecb577a292adb132d59e5104356428a758fdb126c'
 UA = 'YouTubeCRT-setup/1.0'
 
 
@@ -117,6 +122,52 @@ def setup_ytdlp_and_qjs(root, dl):
     print('yt-dlp and QuickJS installed.')
 
 
+def node_version(path):
+    try:
+        return subprocess.check_output([str(path), '--version'], stderr=subprocess.STDOUT, timeout=30).decode().strip()
+    except Exception:
+        return ''
+
+
+def setup_node(root, dl):
+    """Node.js, only the `node` program (about 100 MB unpacked). Optional: a failure here is not fatal."""
+    final = root / ('node-%s-armhf' % NODE_VER.lstrip('v'))
+    if (final / 'node').is_file():
+        print('Node.js already installed.')
+        return
+    stage = root / ('_stage-' + final.name)
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(parents=True)
+    test = root / 'node-test' / 'node'              # left by Test_Node_JS.sh: reuse it instead of downloading again
+    if test.is_file() and node_version(test) == NODE_VER:
+        shutil.copyfile(test, stage / 'node')
+        print('Reusing the Node.js from the earlier test.')
+    else:
+        print('Downloading Node.js %s (about 49 MB)...' % NODE_VER, flush=True)
+        tpath = dl / 'node.tar.gz'
+        fetch(NODE_URL, tpath, 'node')
+        if digest(tpath, 'sha256') != NODE_SHA256:
+            raise RuntimeError('Node.js checksum mismatch; not installing it.')
+        print('  checksum OK; unpacking...', flush=True)
+        with tarfile.open(tpath, 'r:gz') as tar:
+            safe_members(tar.getnames())
+            for m in tar:
+                if m.isfile() and m.name.endswith('/bin/node'):
+                    with tar.extractfile(m) as src, open(stage / 'node', 'wb') as dst:
+                        shutil.copyfileobj(src, dst, 1 << 20)
+                    break
+    if not (stage / 'node').is_file():
+        raise RuntimeError('node not found in the archive.')
+    os.chmod(stage / 'node', 0o755)
+    got = node_version(stage / 'node')
+    if got != NODE_VER:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise RuntimeError('Node.js does not run on this MiSTer (%r).' % got)
+    shutil.rmtree(final, ignore_errors=True)
+    os.rename(stage, final)
+    print('Node.js installed (%s).' % got)
+
+
 def setup_ffmpeg(root, dl):
     if list(root.glob('ffmpeg-*-armhf-static/ffmpeg')):
         print('ffmpeg already installed.')
@@ -174,6 +225,10 @@ def main():
     except Exception as exc:
         print('SETUP FAILED: %s' % exc, flush=True)
         return 1
+    try:
+        setup_node(root, dl)
+    except Exception as exc:                      # optional: QuickJS still works, only slower
+        print('NOTE: Node.js was not installed (%s). Videos that need the JS security check will be slow.' % exc, flush=True)
     finally:
         shutil.rmtree(dl, ignore_errors=True)
     return 0

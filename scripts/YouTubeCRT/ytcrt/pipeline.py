@@ -36,6 +36,8 @@ class Runtime:
         self.resolver = rt / 'bundle/yt-dlp_linux_armv7l'
         self.qjs = rt / 'qjs'
         self.ffdir = ffs[-1]
+        nodes = sorted(base.glob('node-*-armhf/node')) + [base / 'node-test' / 'node']      # the last is Test_Node_JS.sh's copy
+        self.node = next((n for n in nodes if n.is_file()), None)    # Node.js solves YouTube's JS check in seconds; QuickJS needs minutes
         self.ffmpeg = self.ffdir / 'ffmpeg'
         self.ca = Path(here) / 'cacert.pem'
         self.resolve_cache = base / 'ytcrt' / 'cache' / 'resolve'      # recent resolves: YouTube's stream URLs last hours
@@ -164,12 +166,19 @@ PRINT_FORMATS = '%(formats.:.{format_id,protocol,vcodec,acodec,width,height,fps,
 LIVE_MESSAGE = 'This is a live or past livestream; those cannot be played here yet.'
 
 
+def js_runtime_args(rt):
+    """--js-runtimes for yt-dlp: Node first when installed (much faster on the ARM), QuickJS as the fallback."""
+    node = getattr(rt, 'node', None)
+    args = ['--js-runtimes', 'node:' + str(node)] if node else []
+    return args + ['--js-runtimes', 'quickjs:' + str(rt.qjs)]
+
+
 def resolve_command(rt, profile, url):
     return [rt.resolver, '--ignore-config', '--no-playlist', '--no-progress', '--verbose',     # -v: step lines on stderr, for the log
             '--no-cache-dir', '--skip-download', '--print', PRINT_INFO, '--print', PRINT_FORMATS,
             '--extractor-args', 'youtube:skip=translated_subs,hls',          # the HLS manifest is never used; skipping saves a request
             '--force-ipv4', '--socket-timeout', '20', '--retries', '1', '--fragment-retries', '1',
-            '--js-runtimes', 'quickjs:' + str(rt.qjs), '--compat-options', 'no-certifi',
+            *js_runtime_args(rt), '--compat-options', 'no-certifi',
             '--match-filters', '!is_live & !is_upcoming', '--ffmpeg-location', str(rt.ffdir), '--', url]
 
 
