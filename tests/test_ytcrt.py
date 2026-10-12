@@ -594,6 +594,21 @@ class PlayPolicy(unittest.TestCase):
         self.assertIn('403', ' '.join(self.app.screen.lines))
 
 
+    def test_a_decoder_crash_reconnects_at_the_same_place(self):
+        self.make(quality='240p')
+        crash = 'video decoder failed (-11): '
+        self.run_play([FakePipe(failures=[crash]), FakePipe()], lambda: self.app.link.sent > 20)
+        self.assertEqual(len(self.opened), 2)            # opened, crashed, reopened: playback went on
+        self.assertEqual(len(self.resolved), 1)          # without asking yt-dlp again
+
+    def test_repeated_decoder_crashes_give_up_after_five_reconnects(self):
+        self.make(quality='240p')
+        always = FakePipe(failures=['video decoder failed (-11): '] * 40)
+        self.run_play([always], lambda: type(self.app.screen).__name__ == 'TextView')
+        self.assertEqual(len(self.opened), 6)            # the first open + 5 reconnects, then a clear error screen
+        self.assertEqual(type(self.app.screen).__name__, 'TextView')
+
+
 class TypedLinks(unittest.TestCase):
     def test_links_and_ids(self):
         for text in ('M7kB0lis3xg', ' https://www.youtube.com/watch?v=M7kB0lis3xg&t=90s ', 'youtu.be/M7kB0lis3xg?si=x',

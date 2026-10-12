@@ -579,7 +579,8 @@ class App:
                  'pending': None, 'pending_at': 0.0, 'seeking': False,
                  'crop': self.store.settings.get('crop', 'Off'), 'more': None, 'crop_change': False,
                  'opened_at': time.monotonic(), 'starved': 0.0, 'win_start': time.monotonic(),
-                 'tick': time.monotonic(), 'tier': media.tier, 'retries': 0, 'smooth_noted': False}
+                 'tick': time.monotonic(), 'tier': media.tier, 'retries': 0, 'smooth_noted': False,
+                 'crashes': 0, 'crash_at': 0.0}
         dur_ms = media.duration * 1000
 
         def pos_ms():
@@ -710,6 +711,20 @@ class App:
                     if '403' in msg and can_refresh:
                         self.log('403 persists; asking YouTube for fresh stream URLs')
                         return 'refresh', pos_ms()
+                    if re.search(r'\(-11\)|reset by peer|Connection reset|Broken pipe', msg):
+                        # This ffmpeg build crashes (SIGSEGV) when YouTube drops the connection: carry on from here.
+                        if now - state['crash_at'] > 120:
+                            state['crashes'] = 0
+                        state['crash_at'] = now
+                        if state['crashes'] < 5:
+                            state['crashes'] += 1
+                            self.log('The decoder stopped (%s); reconnecting at %s (%d of 5)' % (
+                                ' | '.join(msg.splitlines())[:120], ui.mmss(pos_ms()), state['crashes']))
+                            pipe.close(wait=False)
+                            time.sleep(0.3)
+                            pipe = open_pipe(pos_ms())
+                            state.update(seeking=True, note='Reconnecting...', osd_until=now + OSD_SECONDS + 3)
+                            continue
                     raise pipeline.PlaybackError(msg)
                 if kind == 'wait':
                     time.sleep(.002)
