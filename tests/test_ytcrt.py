@@ -2379,5 +2379,29 @@ class PlaylistCooldown(unittest.TestCase):
         self.assertEqual(len(calls), 2)
 
 
+class ProbeScripts(unittest.TestCase):
+    def test_probe_scripts_can_be_passed_as_arguments(self):
+        from ytcrt import core_link
+        for name in ('FB_PROBE', 'FAST_COPY_PROBE'):
+            text = getattr(core_link.Link, name)
+            self.assertNotIn(chr(0), text, name)                        # a NUL character cannot be an argument: it ended the session once
+            compile(text, name, 'exec')                                 # and the script is valid Python
+
+    def test_a_probe_that_cannot_start_returns_nothing(self):
+        import subprocess
+        from ytcrt import core_link
+        link = core_link.Link.__new__(core_link.Link)
+        link.kind = 'yuv'
+        saved = subprocess.run
+
+        def boom(*a, **k):
+            raise ValueError('embedded null byte')
+        subprocess.run = boom
+        try:
+            self.assertIsNone(link.measure_fb_copy())
+        finally:
+            subprocess.run = saved
+
+
 if __name__ == '__main__':
     unittest.main()

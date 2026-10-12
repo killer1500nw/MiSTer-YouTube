@@ -344,7 +344,7 @@ except OSError as exc:
     sys.exit(0)
 info = bytearray(160)
 fcntl.ioctl(fd, 0x4602, info)                       # FBIOGET_FSCREENINFO
-ident = bytes(info[:16]).split(b'\0')[0].decode('ascii', 'replace') or '?'
+ident = bytes(info[:16]).split(bytes(1))[0].decode('ascii', 'replace') or '?'
 start, length = struct.unpack('<II', bytes(info[16:24]))
 size = min(length, 4 * 1024 * 1024)
 mm = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
@@ -367,7 +367,7 @@ print('fb0 %s start=0x%x len=%d avg_ms=%.2f worst_ms=%.2f' % (ident, start, leng
             return None
         try:
             out = subprocess.run([sys.executable, '-c', self.FB_PROBE, str(n)], capture_output=True, text=True, timeout=30)
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, subprocess.SubprocessError):      # a probe must never end the session
             return None
         lines = out.stdout.strip().splitlines()
         return lines[-1] if (lines and not out.returncode) else ('failed (%d) %s' % (out.returncode, out.stderr.strip()[-80:]))

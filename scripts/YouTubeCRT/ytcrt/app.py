@@ -623,7 +623,10 @@ class App:
         results, media, bare, big, av1 = res
         copy_avg, copy_max = self.link.measure_copy()       # on this thread: nothing else is writing the next slot
         fast = self.link.measure_fast_copy()
-        fb = self.link.measure_fb_copy() if hasattr(self.link, 'measure_fb_copy') else None
+        try:
+            fb = self.link.measure_fb_copy() if hasattr(self.link, 'measure_fb_copy') else None
+        except Exception:                                    # an experiment: whatever goes wrong, the Speed test carries on
+            fb = None
         best_speed, best = 'Fast', dict(results)['Fast']
         v = media.video
         lines = ['  '.join('%s %.2fx' % (sp, f) for sp, f in results)]
