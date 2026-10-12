@@ -10,7 +10,7 @@ from .gfx import Canvas, YuvCanvas
 from .store import RESUME_MIN_MS
 
 TEST_CLIP = 'M7kB0lis3xg'
-COPY_BUSY = 2.0            # copying during decoding takes about this many times the idle figure (corrected by _learn_copy)
+COPY_BUSY = 3.2            # copying while ffmpeg decodes took about 23 ms against 7 ms on an idle MiSTer (corrected by _learn_copy)
 # The core starts consuming only once 4 records are queued (PROTOCOL.md prefill),
 # so the menu must queue at least 4 or it never appears. ~130 ms of latency.
 MENU_DEPTH = 4
@@ -680,7 +680,7 @@ class App:
     def _learn_copy(self, media, avg_ms, n):
         """Fold the copy time seen during real playback into the Auto cost model (an idle MiSTer copies faster)."""
         cal = self.store.settings.get('cal')
-        if n < 300 or not (isinstance(cal, dict) and cal.get('copy_ms') and cal.get('copy_bytes')) or not media.video:
+        if n < 90 or not (isinstance(cal, dict) and cal.get('copy_ms') and cal.get('copy_bytes')) or not media.video:
             return
         per_base = avg_ms if cal.get('copy_fixed') else avg_ms / profiles.copy_scale(media.video, cal)
         new = round(0.7 * cal['copy_ms'] + 0.3 * min(per_base, 4.0 * cal['copy_ms']), 2)
@@ -691,7 +691,7 @@ class App:
     def _note_smooth(self, media):
         """A demanding stream ran for a while without starving: trust the cost estimate a little more."""
         if media.cost >= 0.8 * profiles.limit_for(self.calibration()[0]):
-            mult = max(0.7, float(self.store.settings.get('cost_mult', 1.0)) * 0.97)
+            mult = max(0.9, float(self.store.settings.get('cost_mult', 1.0)) * 0.97)      # never more optimistic than 0.9: an empty queue is not the only way to stutter
             self.store.set('cost_mult', round(mult, 3))
             self.log('%s at estimated load %d%% played cleanly; cost multiplier now %.3f' %
                      (media.label, round(media.cost * 100), mult))
@@ -906,7 +906,7 @@ class App:
                 rs = getattr(pipe, 'restarts', 0)                 # an audio stream reopened: the picture waits for it, not for the ARM
                 if rs != state.get('restarts', 0):
                     state['restarts'], state['restart_at'] = rs, now
-                settling = (now - state.get('restart_at', -99.0) < 20.0) or bool(dur_ms and pos_ms() > dur_ms - 20000)
+                settling = (now - state.get('restart_at', -99.0) < 8.0) or bool(dur_ms and pos_ms() > dur_ms - 20000)
                 if (may_fall_back and not state['paused'] and not state['seeking'] and state['pending'] is None
                         and state['last'] is not None and now - state['opened_at'] > STARVE_GRACE
                         and link.queued == 0 and not settling):
