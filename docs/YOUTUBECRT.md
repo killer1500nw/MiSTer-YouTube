@@ -205,6 +205,7 @@ Settings → **Stream quality**:
 
 **Speed test** decodes a reference stream with both cheap decoder settings (Fast and Fastest), shows each result in
 "x real time", and calibrates the estimate to *your* MiSTer. It also records which decoder setting larger pictures use.
+It then runs the best setting once more with only the decoder (no scaling, no RGB565 colour conversion) and reports *Scale+colour: N% of the time*: the share of the ARM's time that scaling and colour conversion take. That is the part a future FPGA scaler could take over.
 The playback bar shows the size in use (`240p`, `360p`...) next to the time, and `YouTube-crt-log.txt` records every
 choice with its estimated load and any step-down.
 

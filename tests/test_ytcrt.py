@@ -1056,7 +1056,8 @@ class SpeedTest(unittest.TestCase):
             tried.append(vid)
             return resolver(vid, info, fm, prof, quality)
         pipeline.resolve = fake_resolve
-        pipeline.benchmark = lambda rt, prof, media, speed, seconds=10, cancel=None: {'Fast': 0.7, 'Fastest': 0.9}[speed]
+        pipeline.benchmark = lambda rt, prof, media, speed, seconds=10, cancel=None, decode_only=False: (
+            1.2 if decode_only else {'Fast': 0.7, 'Fastest': 0.9}[speed])
         done = []
         threading.Thread(target=lambda: (a.run_benchmark(), done.append(1)), daemon=True).start()
         end = time.time() + 15
@@ -1609,6 +1610,18 @@ class RssBreaker(unittest.TestCase):
             self.assertEqual(f.rss_failed, 0)
         finally:
             feeds.RSS_BACKOFF = feeds.RSS_BACKOFF_SAVED
+
+
+class DecodeOnlyCommand(unittest.TestCase):
+    def test_decode_only_has_no_scaling_or_rgb_conversion(self):
+        rt = type('R', (), {'ffmpeg': Path('ffmpeg'), 'ca': Path('ca')})()
+        src = {'url': 'https://example.invalid/v', 'headers': {}}
+        full = [str(x) for x in pipeline.decoder_command(rt, profiles.PROFILE, src, 'video', to_null=True)]
+        bare = [str(x) for x in pipeline.decoder_command(rt, profiles.PROFILE, src, 'video', to_null=True, decode_only=True)]
+        self.assertIn('rgb565le', full)
+        self.assertNotIn('rgb565le', bare)
+        self.assertEqual(bare[bare.index('-vf') + 1], 'null')
+        self.assertEqual(bare[bare.index('-pix_fmt') + 1], 'yuv420p')
 
 
 if __name__ == '__main__':

@@ -434,23 +434,32 @@ class App:
                     self.log('Speed test: skipping %s (%s)' % (vid, exc))
             if media is None:
                 raise RuntimeError('No video in your lists could be used as a test clip.')
-            return [(sp, pipeline.benchmark(self.rt, prof, media, sp, 8, check)) for sp in ('Fast', 'Fastest')], media
-        res, err = self.run_job('Speed test', ['Decoding a test stream (twice)...', 'B: cancel'], work)
+            runs = [(sp, pipeline.benchmark(self.rt, prof, media, sp, 8, check)) for sp in ('Fast', 'Fastest')]
+            best_sp, best_x = max(runs, key=lambda r: r[1])
+            # The same setting again with only the decoder (no scaling, no RGB565 conversion): the difference is the
+            # share of the ARM's time that an FPGA scaler could take over.
+            bare = pipeline.benchmark(self.rt, prof, media, best_sp, 8, check, decode_only=True)
+            return runs, media, bare
+        res, err = self.run_job('Speed test', ['Decoding a test stream (three runs)...', 'B: cancel'], work)
         if err:
             self.push(ui.Message('Speed test failed', [str(err)[:140]], ui.AMBER))
             return
-        results, media = res
+        results, media, bare = res
         best_speed, best = max(results, key=lambda r: r[1])
         v = media.video
-        lines = ['%s decoder: %.2fx real time' % (sp, f) for sp, f in results]
-        lines.append('Test stream: %s, %d kbps, %d fps' % (media.label, round(media.tbr), round(v.get('fps') or 30)))
+        lines = ['%s: %.2fx real time' % (sp, f) for sp, f in results]
+        t_full, t_bare = 1.0 / best, 1.0 / bare
+        share = max(0.0, (t_full - t_bare) / t_full)           # fraction of the ARM's time spent scaling and converting colour
+        lines.append('Decode only: %.2fx' % bare)
+        lines.append('Scale+colour: %d%% of the time' % round(share * 100))
+        lines.append('Test: %s, %d kbps, %d fps' % (media.label, round(media.tbr), round(v.get('fps') or 30)))
         self.store.set('cal', {'px': v['width'] * v['height'], 'tbr': float(v.get('tbr') or 300),
                                'fps': float(v.get('fps') or 30), 'cost': round(1.0 / best, 4)})
         self.store.set('speed_big', best_speed)
         self.store.set('cost_mult', 1.0)
-        lines.append('Auto now picks streams by estimated load')
-        self.log('Speed test %s: %s; calibration %s, speed_big=%s' % (
-            media.label, ', '.join('%s %.2fx' % r for r in results), self.store.settings['cal'], best_speed))
+        lines.append('Auto now uses these numbers')
+        self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); calibration %s, speed_big=%s' % (
+            media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), self.store.settings['cal'], best_speed))
         self.push(ui.Message('Speed test', lines, ui.GREEN if best >= 1.15 else ui.AMBER))
 
     # playback ---------------------------------------------------------

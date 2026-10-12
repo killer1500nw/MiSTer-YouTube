@@ -454,7 +454,8 @@ def resolve(rt, profile, video_id, cancel, log, note=None, quality='Auto', cal=N
     return media_from(info, formats, profile, quality, cal, mult, log)
 
 
-def decoder_command(rt, profile, source, kind, start_s=0, speed='Normal', limit_s=None, to_null=False, crop='Off'):
+def decoder_command(rt, profile, source, kind, start_s=0, speed='Normal', limit_s=None, to_null=False, crop='Off',
+                    decode_only=False):
     args = [str(rt.ffmpeg), '-hide_banner', '-loglevel', 'error', '-nostdin',
             '-threads', '2', '-filter_threads', '1', '-rw_timeout', '20000000',
             '-protocol_whitelist', 'http,https,tcp,tls,crypto']
@@ -473,7 +474,10 @@ def decoder_command(rt, profile, source, kind, start_s=0, speed='Normal', limit_
     args += ['-i', source['url']]
     if limit_s:
         args += ['-t', str(limit_s)]
-    if kind == 'video':
+    if kind == 'video' and decode_only:
+        # Speed test only: just the decoder, with no scaling or colour conversion (what an FPGA scaler would leave to the ARM).
+        args += ['-map', '0:v:0', '-an', '-vf', 'null', '-pix_fmt', 'yuv420p', '-threads', '1', '-f', 'rawvideo']
+    elif kind == 'video':
         args += ['-map', '0:v:0', '-an', '-vf', profiles.video_filter(profile, crop=crop),
                  '-pix_fmt', 'rgb565le', '-threads', '1', '-f', 'rawvideo']
     else:
@@ -686,12 +690,13 @@ def open_pipeline(rt, profile, media, start_s, speed, cancel, crop='Off'):
                           cancel)
 
 
-def benchmark(rt, profile, media, speed, seconds=10, cancel=lambda: None):
+def benchmark(rt, profile, media, speed, seconds=10, cancel=lambda: None, decode_only=False):
     """Decode `seconds` of video into the void; returns achieved/real-time fps.
 
-    >= 1.0x means the ARM keeps up at this profile and speed setting."""
+    >= 1.0x means the ARM keeps up at this profile and speed setting. decode_only skips the scaling and colour
+    conversion, to show how much of the time they take."""
     cmd = decoder_command(rt, profile, media.video, 'video', start_s=min(30, max(0, media.duration // 3)),
-                          speed=speed, limit_s=seconds, to_null=True)
+                          speed=speed, limit_s=seconds, to_null=True, decode_only=decode_only)
     started = time.monotonic()
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE, start_new_session=True)
