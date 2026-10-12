@@ -51,20 +51,36 @@ def address_of(buf):
     return ctypes.cast(ctypes.c_char_p(buf), ctypes.c_void_p).value
 
 
-COPY_METHODS = ('memmove', 'pwrite')
+COPY_METHODS = ('memmove', 'cached')
+ARM_NR_CACHEFLUSH = 0x0F0002       # ARM Linux: cacheflush(start, end, 0) writes the data cache back to memory
+
+
+def cacheflush(start, end):
+    """Write the CPU's cached copy of [start, end) back to DDR so the FPGA sees it. False if the system call is not there."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.argtypes = [ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+        return libc.syscall(ARM_NR_CACHEFLUSH, start, end, 0) == 0
+    except (OSError, AttributeError):
+        return False
 
 
 class Mailbox:
-    def __init__(self, memory, fd=None):
+    def __init__(self, memory, fd=None, cached=None):
         self.words = (ctypes.c_uint32 * (len(memory) // 4)).from_buffer(memory)
         self.base = ctypes.addressof(self.words)
-        self.fd = fd                    # /dev/mem opened O_SYNC: lets copy_in write with one system call instead of memmove
+        self.fd = fd                    # kept for older callers
+        # A second mapping of the same memory WITHOUT O_SYNC: if the kernel makes it cacheable, writes through it run at RAM
+        # speed instead of one slow uncached store at a time; copy_in then flushes the cache and checks the result through
+        # the uncached mapping above, and drops back to the plain copy if anything is off.
+        self.cached = cached
+        self.cached_base = ctypes.addressof(ctypes.c_char.from_buffer(cached)) if cached is not None else None
         self.method = 'memmove'
 
     def use_method(self, method):
-        """Pick how bulk copies are made ('memmove' into the mapping, or 'pwrite' to /dev/mem); ignores what it cannot do."""
-        if method == 'pwrite' and self.fd is not None and hasattr(os, 'pwrite'):
-            self.method = 'pwrite'
+        """Pick how bulk copies are made ('memmove' into the uncached mapping, or 'cached'); ignores what it cannot do."""
+        if method == 'cached' and self.cached_base is not None:
+            self.method = 'cached'
         elif method == 'memmove':
             self.method = 'memmove'
 
@@ -105,20 +121,24 @@ class Mailbox:
         if offset < 0 or offset + n > len(self.words) * 4 or offset % 4:
             raise ValueError('copy outside the mapping')
         addr = address_of(src)
-        if self.method == 'pwrite':
-            view = memoryview(src).cast('B')[:n]
-            done = 0
-            while done < n:
-                wrote = os.pwrite(self.fd, view[done:], BASE + offset + done)
-                if wrote <= 0:                      # /dev/mem takes no writes here: fail instead of looping forever
-                    raise OSError('pwrite to /dev/mem wrote nothing')
-                done += wrote
+        if self.method == 'cached':
+            ctypes.memmove(self.cached_base + offset, addr, n)
+            flushed = cacheflush(self.cached_base + offset, self.cached_base + offset + n)
+            if not (flushed and self._intact(offset, addr, n)):
+                self.method = 'memmove'             # the cached mapping does not behave here: never use it again
+                ctypes.memmove(self.base + offset, addr, n)
         else:
             ctypes.memmove(self.base + offset, addr, n)
         k = min(n, 16)
         if ctypes.string_at(self.base + offset, k) != ctypes.string_at(addr, k) or \
                 ctypes.string_at(self.base + offset + n - k, k) != ctypes.string_at(addr + n - k, k):
             raise RuntimeError('Bulk copy verification failed.')
+
+    def _intact(self, offset, addr, n):
+        """Did the flushed data reach memory? Compare a few spots through the uncached mapping."""
+        spots = {0, max(0, n // 3 - 8), max(0, 2 * n // 3 - 8), max(0, n - 16)}
+        return all(ctypes.string_at(self.base + offset + p, min(16, n - p)) == ctypes.string_at(addr + p, min(16, n - p))
+                   for p in spots)
 
     def picture(self, number, header, frame, ysize, audio):
         """v0.15 core: header, Y/U/V planes (`frame` = Y then U then V, ysize bytes of Y) and PCM into slot `number`."""

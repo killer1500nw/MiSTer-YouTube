@@ -1977,77 +1977,88 @@ class MailboxCopy(unittest.TestCase):
 
 
 class CopyMethods(unittest.TestCase):
-    def test_pwrite_path_lands_in_memory_and_is_chosen_by_use_method(self):
-        from ytcrt import transport, yuv
-        mem = bytearray(yuv.MAP_BYTES)
-        box = transport.Mailbox(mem, fd=99)
-        writes = []
+    """The cached copy: write through a cacheable mapping, flush, and check the result through the uncached one."""
 
-        def fake_pwrite(fd, data, offset):                 # stands in for /dev/mem: physical address -> mapping offset
-            n = min(len(data), 100000)                      # short writes must be handled
-            at = offset - transport.BASE
-            mem[at:at + n] = bytes(data[:n])
-            writes.append((fd, at, n))
-            return n
-        saved = getattr(transport.os, 'pwrite', None)
-        transport.os.pwrite = fake_pwrite
+    def make(self):
+        import mmap
+        from ytcrt import transport, yuv
+        plain = mmap.mmap(-1, yuv.MAP_BYTES)                 # stands in for the O_SYNC mapping
+        cached = mmap.mmap(-1, yuv.MAP_BYTES)                # and for the cacheable one (separate memory here, so the "flush" copies)
+        return transport, yuv, plain, cached, transport.Mailbox(plain, None, cached)
+
+    def test_cached_copy_lands_in_memory_after_the_flush(self):
+        transport, yuv, plain, cached, box = self.make()
+        saved = transport.cacheflush
+
+        def fake_flush(start, end):                          # what the real flush does: the cached data reaches memory
+            off = start - box.cached_base
+            plain[off:off + (end - start)] = cached[off:off + (end - start)]
+            return True
+        transport.cacheflush = fake_flush
         try:
-            box.use_method('pwrite')
-            self.assertEqual(box.method, 'pwrite')
-            box.copy_in(yuv.slot_offset(1) + yuv.Y_OFF, bytes(range(256)) * 1000)
+            box.use_method('cached')
+            self.assertEqual(box.method, 'cached')
+            data = bytes(range(256)) * 1000
+            where = yuv.slot_offset(1) + yuv.Y_OFF
+            box.copy_in(where, data)
+            self.assertEqual(box.method, 'cached')           # it worked, so it stays in use
         finally:
-            if saved is None:
-                del transport.os.pwrite
-            else:
-                transport.os.pwrite = saved
-        base = yuv.slot_offset(1) + yuv.Y_OFF
-        self.assertEqual(bytes(mem[base:base + 256000]), bytes(range(256)) * 1000)
-        self.assertGreater(len(writes), 2)
-        box.use_method('memmove')
+            transport.cacheflush = saved
+        self.assertEqual(bytes(plain[where:where + len(data)]), data)
+        box.close()
+
+    def test_a_flush_that_does_nothing_is_caught_and_the_plain_copy_takes_over(self):
+        transport, yuv, plain, cached, box = self.make()
+        saved = transport.cacheflush
+        transport.cacheflush = lambda start, end: True       # claims success but the data never reaches memory
+        try:
+            box.use_method('cached')
+            data = bytes(range(256)) * 400
+            where = yuv.slot_offset(2) + yuv.Y_OFF
+            box.copy_in(where, data)
+        finally:
+            transport.cacheflush = saved
+        self.assertEqual(box.method, 'memmove')              # never used again
+        self.assertEqual(bytes(plain[where:where + len(data)]), data)      # and this copy still arrived
+        box.close()
+
+    def test_a_missing_flush_call_falls_back_too(self):
+        transport, yuv, plain, cached, box = self.make()
+        saved = transport.cacheflush
+        transport.cacheflush = lambda start, end: False
+        try:
+            box.use_method('cached')
+            box.copy_in(yuv.slot_offset(0) + yuv.Y_OFF, bytes(1000))
+        finally:
+            transport.cacheflush = saved
         self.assertEqual(box.method, 'memmove')
         box.close()
 
-    def test_a_pwrite_that_writes_nothing_fails_instead_of_hanging(self):
+    def test_without_a_cached_mapping_the_cached_method_is_refused(self):
         from ytcrt import transport, yuv
-        box = transport.Mailbox(bytearray(yuv.MAP_BYTES), fd=99)
-        saved = getattr(transport.os, 'pwrite', None)
-        transport.os.pwrite = lambda fd, data, offset: 0
-        try:
-            box.use_method('pwrite')
-            with self.assertRaises(OSError):
-                box.copy_in(yuv.slot_offset(0) + yuv.Y_OFF, bytes(1000))
-        finally:
-            if saved is None:
-                del transport.os.pwrite
-            else:
-                transport.os.pwrite = saved
+        box = transport.Mailbox(bytearray(yuv.MAP_BYTES))
+        box.use_method('cached')
+        self.assertEqual(box.method, 'memmove')
         box.close()
 
-    def test_measure_copy_skips_a_method_that_fails(self):
+    def test_measure_copy_reports_only_the_methods_that_work(self):
         from ytcrt import core_link, transport, yuv
+        import mmap
         link = core_link.Link.__new__(core_link.Link)
         link.kind, link.sent = 'yuv', 0
         link.copy_bytes, link.copy_report = 0, {}
-        link.box = transport.Mailbox(bytearray(yuv.MAP_BYTES), fd=99)
-        saved = getattr(transport.os, 'pwrite', None)
-        transport.os.pwrite = lambda fd, data, offset: 0
+        plain = mmap.mmap(-1, yuv.MAP_BYTES)
+        cached = mmap.mmap(-1, yuv.MAP_BYTES)
+        link.box = transport.Mailbox(plain, None, cached)
+        saved = transport.cacheflush
+        transport.cacheflush = lambda start, end: False       # the flush is not available: only memmove can be measured
         try:
-            avg, worst = link.measure_copy(2)
+            link.measure_copy(2)
         finally:
-            if saved is None:
-                del transport.os.pwrite
-            else:
-                transport.os.pwrite = saved
-        self.assertEqual(list(link.copy_report), ['memmove'])
+            transport.cacheflush = saved
+        self.assertEqual(sorted(link.copy_report), ['memmove'])
         self.assertEqual(link.box.method, 'memmove')
         link.box.close()
-
-    def test_without_a_device_file_pwrite_is_refused(self):
-        from ytcrt import transport, yuv
-        box = transport.Mailbox(bytearray(yuv.MAP_BYTES))
-        box.use_method('pwrite')
-        self.assertEqual(box.method, 'memmove')
-        box.close()
 
 
 class CopyInTheCostModel(unittest.TestCase):
@@ -2245,6 +2256,34 @@ class PlaylistSearch(unittest.TestCase):
             self.assertEqual(seen_bg, [False])                              # a fetch the user waits for must not be frozen by pause_background()
         finally:
             pipeline.search_playlists, pipeline.playlist_entries = saved
+
+
+class CpuLog(unittest.TestCase):
+    def test_proc_stat_with_spaces_in_the_name(self):
+        from ytcrt import cpu
+        text = '123 (ff mpeg (x)) S 1 2 3 4 5 6 7 8 9 10 400 150 0 0 20 0 1 0 100 0 0'
+        self.assertEqual(cpu.parse_proc_stat(text), 550)
+        self.assertEqual(cpu.parse_cpu_line('cpu  100 0 50 800 50 0 0 0 0 0' + chr(10) + 'cpu0 1 2 3'), (150, 850))
+
+    def test_watch_reports_percent_of_one_core(self):
+        from ytcrt import cpu
+        files = {}
+        clock = [0.0]
+
+        def read(path):
+            return files.get(path)
+        files['/proc/%d/stat' % os.getpid()] = '1 (python3) S 1 2 3 4 5 6 7 8 9 10 0 0 0 0 20 0 1 0 100 0 0'
+        files['/proc/77/stat'] = '77 (ffmpeg) S 1 2 3 4 5 6 7 8 9 10 0 0 0 0 20 0 1 0 100 0 0'
+        files['/proc/stat'] = 'cpu 0 0 0 0 0 0 0 0 0 0'
+        w = cpu.CpuWatch({'video ffmpeg': 77}, read, lambda: clock[0])
+        clock[0] = 10.0
+        files['/proc/%d/stat' % os.getpid()] = '1 (python3) S 1 2 3 4 5 6 7 8 9 10 300 0 0 0 20 0 1 0 100 0 0'      # 300 jiffies in 10 s = 30%
+        files['/proc/77/stat'] = '77 (ffmpeg) S 1 2 3 4 5 6 7 8 9 10 1500 0 0 0 20 0 1 0 100 0 0'                  # 150%
+        files['/proc/stat'] = 'cpu 1500 0 300 200 0 0 0 0 0 0'
+        text = w.sample()
+        self.assertIn('player 30%', text)
+        self.assertIn('video ffmpeg 150%', text)
+        self.assertIn('idle 10% of all cores', text)
 
 
 if __name__ == '__main__':

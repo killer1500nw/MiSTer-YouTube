@@ -64,7 +64,14 @@ class Link:
         self.fd = os.open('/dev/mem', os.O_RDWR | os.O_SYNC)
         self.memory = mmap.mmap(self.fd, t.MAP_BYTES, flags=mmap.MAP_SHARED,
                                 prot=mmap.PROT_READ | mmap.PROT_WRITE, offset=t.BASE)
-        self.box = t.Mailbox(self.memory, self.fd)
+        self.fd2 = self.cached_memory = None
+        try:                                                     # the same memory without O_SYNC (cacheable if the kernel allows it)
+            self.fd2 = os.open('/dev/mem', os.O_RDWR)
+            self.cached_memory = mmap.mmap(self.fd2, t.MAP_BYTES, flags=mmap.MAP_SHARED,
+                                           prot=mmap.PROT_READ | mmap.PROT_WRITE, offset=t.BASE)
+        except (OSError, ValueError):
+            self.cached_memory = None
+        self.box = t.Mailbox(self.memory, self.fd, self.cached_memory)
 
     def _wait(self, test, timeout, message):
         end = time.monotonic() + timeout
@@ -178,6 +185,15 @@ class Link:
             if self.memory:
                 self.memory.close()
                 self.memory = None
+            if getattr(self, 'cached_memory', None):
+                try:
+                    self.cached_memory.close()
+                except (OSError, ValueError, BufferError):
+                    pass
+                self.cached_memory = None
+            if getattr(self, 'fd2', None) is not None:
+                os.close(self.fd2)
+                self.fd2 = None
             if self.fd is not None:
                 os.close(self.fd)
                 self.fd = None
@@ -351,7 +367,9 @@ print('slice %.2f %.2f %d' % (1000 * sum(t) / n, 1000 * max(t), check()))
             self.box.use_method(method)
             if self.box.method == method:
                 try:
-                    self.copy_report[method] = time_it(lambda: self.box.copy_in(where, data))
+                    result = time_it(lambda: self.box.copy_in(where, data))
+                    if self.box.method == method:          # (a cached copy that failed its check switches itself off)
+                        self.copy_report[method] = result
                 except (OSError, RuntimeError, ValueError):
                     pass                                   # this way of copying does not work on this system: leave it out
         best = min(self.copy_report, key=lambda m: self.copy_report[m][0]) if self.copy_report else keep

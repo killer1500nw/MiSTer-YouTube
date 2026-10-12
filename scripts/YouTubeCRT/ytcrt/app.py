@@ -4,13 +4,15 @@ import threading
 import re
 import time
 
-from . import feeds as feedsmod, pipeline, profiles, ui, urls, yuv
+from . import cpu, feeds as feedsmod, pipeline, profiles, ui, urls, yuv
 from .core_link import SLOTS
 from .gfx import Canvas, YuvCanvas
 from .store import RESUME_MIN_MS
 
 TEST_CLIP = 'M7kB0lis3xg'
+CPU_LOG_SECONDS = 30.0         # how often playback logs the CPU split between the player and the decoders
 QUALITY_SETTLE = 1.2        # seconds after the last Quality press in the More panel before the picture restarts
+COPY_BUSY_CACHED = 1.5        # the same for the cached copy, which does not stall the CPU on every store
 COPY_BUSY = 3.2            # copying while ffmpeg decodes took about 23 ms against 7 ms on an idle MiSTer (corrected by _learn_copy)
 # The core starts consuming only once 4 records are queued (PROTOCOL.md prefill),
 # so the menu must queue at least 4 or it never appears. ~130 ms of latency.
@@ -632,7 +634,8 @@ class App:
         if self.link.copy_bytes and copy_avg > 0:
             # Copying while ffmpeg is decoding is slower than on an idle MiSTer; start with twice the idle time and let
             # the real figures from playback correct it (see _learn_copy).
-            cal.update({'copy_ms': round(copy_avg * COPY_BUSY, 2), 'copy_bytes': self.link.copy_bytes,
+            busy = COPY_BUSY if getattr(self.link.box, 'method', 'memmove') == 'memmove' else COPY_BUSY_CACHED
+            cal.update({'copy_ms': round(copy_avg * busy, 2), 'copy_bytes': self.link.copy_bytes,
                         'copy_fixed': self.link.kind != 'yuv'})
         self.store.set('cal', cal)
         self.store.set('copy_method', getattr(self.link.box, 'method', None) if self.link.kind == 'yuv' else None)
@@ -885,6 +888,7 @@ class App:
             state['pause_pushed'] = False                 # redraw a paused frame so the panel updates
         pipe = open_pipe(start_ms)
         next_save = time.monotonic() + 10
+        cpuw, next_cpu = cpu.CpuWatch({}), time.monotonic() + CPU_LOG_SECONDS
         try:
             while True:
                 link.health()
@@ -955,6 +959,17 @@ class App:
                                  (state['starved'], state.get('dry', 0), now - state['win_start'], media.tier))
                         return 'downgrade', pos_ms()
                     state['starved'], state['dry'], state['win_start'] = 0.0, 0, now
+                if now >= next_cpu:                          # where the ARM's time goes (percent of one core; both busy = 200)
+                    next_cpu = now + CPU_LOG_SECONDS
+                    try:
+                        procs = getattr(getattr(pipe, 'decoder', None), 'procs', {}) or {}
+                        cpuw.named = {'video ffmpeg': getattr(procs.get('video'), 'pid', None),
+                                      'audio ffmpeg': getattr(procs.get('audio'), 'pid', None)}
+                        text = cpuw.sample()
+                        if text and not state['paused']:
+                            self.log('CPU %s (%s, %d queued)' % (text, media.tier, link.queued))
+                    except Exception:                        # a log line must never stop a video
+                        pass
                 if now >= next_save:
                     self.store.record_play(v, pos_ms(), dur_ms, force=False)
                     next_save = now + 10
