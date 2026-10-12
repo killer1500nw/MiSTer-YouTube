@@ -86,6 +86,12 @@ always @(posedge clk) begin
         got[d] <= 1;
     end
 end
+// the analogue output looks at rgb on every clock: it must hold for the whole 3-clock pixel period
+reg [23:0] held = 0; reg [1:0] hold_n = 0; integer hold_bad = 0;
+always @(posedge clk) begin
+    if (ce_sr[LAT-1]) begin held <= rgb; hold_n <= 2; end
+    else if (hold_n != 0) begin hold_n <= hold_n - 1; if (capturing && rgb !== held) hold_bad <= hold_bad + 1; end
+end
 
 integer f, il_arg, slot_arg;
 initial begin
@@ -111,7 +117,7 @@ initial begin
         $fwrite(f, "\n");
     end
     $fclose(f);
-    $display("DONE bursts=%0d beats=%0d have_frame=%0d", bursts, beats, have_frame);
+    $display("DONE bursts=%0d beats=%0d have_frame=%0d hold_bad=%0d", bursts, beats, have_frame, hold_bad);
     $finish;
 end
 initial begin #3000000000; $fatal(1, "watchdog"); end

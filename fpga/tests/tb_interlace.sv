@@ -37,7 +37,7 @@ initial begin
         if(spacing[i]==262*2544) full=full+1;
         else if(spacing[i]==667800) half=half+1;
         else $fatal(1,"Unexpected vsync spacing %0d at %0d", spacing[i], i);
-        if(f_active[i]!=153600 && i>1) $fatal(1,"Active pixels per field %0d at %0d", f_active[i], i);
+        if(f_active[i]!=153600 && f_active[i]!=76800 && i>1) $fatal(1,"Active pixels per field %0d at %0d", f_active[i], i);
     end
     // Steady 480i: every pair of fields is 525 lines, fields alternate 0/1.
     k=0;

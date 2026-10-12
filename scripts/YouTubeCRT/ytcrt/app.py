@@ -468,12 +468,22 @@ class App:
             # The same setting again with only the decoder (no scaling, no RGB565 conversion): the difference is the
             # share of the ARM's time that an FPGA scaler could take over.
             bare = pipeline.benchmark(self.rt, prof, media, best_sp, 12, check, decode_only=True)
-            return runs, media, bare
+            # How far the decoder alone gets with the next size up (the core now does the scaling): tells whether a
+            # bigger source is worth offering. Optional: a video without a bigger H.264 stream just skips it.
+            big = None
+            try:
+                bigger = pipeline.resolve(self.rt, prof, media.id, check, self.log, quality='480p')
+                bv, mv = bigger.video, media.video
+                if bv['width'] * bv['height'] > mv['width'] * mv['height'] * 1.2:
+                    big = (bigger, pipeline.benchmark(self.rt, prof, bigger, best_sp, 12, check, decode_only=True))
+            except (ValueError, RuntimeError, OSError) as exc:
+                self.log('Speed test: no larger stream measured (%s)' % exc)
+            return runs, media, bare, big
         res, err = self.run_job('Speed test', ['Decoding a test stream (three runs)...', 'B: cancel'], work)
         if err:
             self.push(ui.Message('Speed test failed', [str(err)[:140]], ui.AMBER))
             return
-        results, media, bare = res
+        results, media, bare, big = res
         copy_avg, copy_max = self.link.measure_copy()       # on this thread: nothing else is writing the next slot
         fast = self.link.measure_fast_copy()
         best_speed, best = max(results, key=lambda r: r[1])
@@ -483,6 +493,8 @@ class App:
         share = max(0.0, (t_full - t_bare) / t_full)           # fraction of the ARM's time spent scaling and converting colour
         lines.append('Decode only: %.2fx' % bare)
         lines.append('Scale+colour: %d%% of the time' % round(share * 100))
+        if big:
+            lines.append('Decode only at %s (%d kbps): %.2fx' % (big[0].label, round(big[0].tbr), big[1]))
         lines.append('Copy 160 KB: %.1f ms (max %.1f)' % (copy_avg, copy_max))
         if fast:
             method, (bulk_ms, _, intact) = min(fast.items(), key=lambda kv: kv[1][0])
@@ -495,8 +507,10 @@ class App:
         self.store.set('speed_big', best_speed)
         self.store.set('speed_clip', media.id)
         self.store.set('cost_mult', 1.0)
-        self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); copy 160 KB %.1f ms (worst %.1f); bulk copy %s; calibration %s, speed_big=%s' % (
-            media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), copy_avg, copy_max, fast, self.store.settings['cal'], best_speed))
+        self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); copy 160 KB %.1f ms (worst %.1f); bulk copy %s; calibration %s, speed_big=%s%s' % (
+            media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), copy_avg, copy_max, fast, self.store.settings['cal'], best_speed,
+            ('; %s %dx%d %d kbps %d fps decode only %.2fx' % (big[0].label, big[0].video['width'], big[0].video['height'], round(big[0].tbr),
+                                                              round(big[0].video.get('fps') or 30), big[1])) if big else ''))
         self.push(ui.Message('Speed test', lines, ui.GREEN if best >= 1.15 else ui.AMBER))
 
     # playback ---------------------------------------------------------

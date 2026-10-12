@@ -6,6 +6,7 @@
 Needs ModelSim (the Quartus Lite one: set MODELSIM_BIN if it is not in the usual place). Prints PASS/FAIL per case.
 """
 import os
+import re
 import random
 import struct
 import subprocess
@@ -117,6 +118,9 @@ def run_case(name, work):
                        cwd=work, capture_output=True, text=True, env=env, timeout=1800)
     if 'DONE' not in r.stdout:
         return 'FAIL sim: ' + r.stdout[-1500:]
+    m = re.search(r'hold_bad=(\d+)', r.stdout)
+    if m and int(m.group(1)):
+        return 'FAIL %s: the output changed within a pixel period %s times (the analogue output needs it held)' % (name, m.group(1))
     expected = yuv_ref.render_frame(y, u, v, hdr, interlaced, overlay)
     seen = bad = 0
     first = None
@@ -125,6 +129,8 @@ def run_case(name, work):
         d, pix = int(parts[0]), parts[1:]
         seen += 1
         for x, p in enumerate(pix):
+            if not interlaced and x % 2:                    # 240p: the core outputs every second pixel of the 640-wide frame
+                continue
             got = int(p, 16)
             exp = expected[d][x]
             want = (exp[0] << 16) | (exp[1] << 8) | exp[2]
@@ -137,8 +143,8 @@ def run_case(name, work):
         return 'FAIL %s: captured %d lines, wanted %d' % (name, seen, need)
     if bad:
         return 'FAIL %s: %d of %d pixels differ; first at line %d x %d: got %s expected %s' % (
-            name, bad, seen * 640, first[0], first[1], first[2], first[3])
-    return 'PASS %s: %d lines x 640 pixels identical to the model' % (name, seen)
+            name, bad, seen * (640 if interlaced else 320), first[0], first[1], first[2], first[3])
+    return 'PASS %s: %d lines x %d pixels identical to the model' % (name, seen, 640 if interlaced else 320)
 
 
 def main(argv):

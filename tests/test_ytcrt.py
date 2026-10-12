@@ -1080,7 +1080,7 @@ class SpeedTest(unittest.TestCase):
                 raise ValueError(pipeline.LIVE_MESSAGE)
             return pipeline.media_from(info, fm, prof, quality)
         a, st, tried = self.run_test(resolver)
-        self.assertEqual(tried[-1], 'M7kB0lis3xg')                     # fell through to the known good clip
+        self.assertIn('M7kB0lis3xg', tried)                            # fell through to the known good clip
         self.assertEqual(len([t for t in tried if t.startswith('live')]), 2)
         self.assertEqual(a.screen.title, 'Speed test')                  # success, not "Speed test failed"
         self.assertIn('Bulk copy: 1.2 ms (memmove)', a.screen.lines)    # the copy measurements are shown
@@ -1888,6 +1888,29 @@ class YuvPlayer(unittest.TestCase):
     def test_thumbnails_are_requested_as_yuv(self):
         self.make()
         self.assertEqual(self.app.feeds.thumb_format, 'yuv420p')
+
+
+class MailboxCopy(unittest.TestCase):
+    """The real v0.15 copy path (libc memmove) against ordinary memory standing in for /dev/mem."""
+
+    def test_picture_and_overlay_land_in_memory(self):
+        from ytcrt import transport, yuv
+        mem = bytearray(yuv.MAP_BYTES)
+        box = transport.Mailbox(mem)
+        w, h = 64, 32
+        ysize = w * h
+        frame = bytearray(range(256)) * (ysize * 3 // 2 // 256)
+        audio = bytes(range(200)) * 32
+        hdr = bytes(range(64))
+        box.picture(2, hdr, frame, ysize, audio)
+        base = yuv.slot_offset(2)
+        self.assertEqual(bytes(mem[base:base + 64]), hdr)
+        self.assertEqual(bytes(mem[base + yuv.Y_OFF:base + yuv.Y_OFF + ysize]), bytes(frame[:ysize]))
+        self.assertEqual(bytes(mem[base + yuv.AUDIO_OFF:base + yuv.AUDIO_OFF + yuv.AUDIO_BYTES]), audio)
+        ov = yuv.overlay_offset(1)
+        box.overlay(1, bytes(range(256)) * 300, bytes(80), bytes(80))
+        self.assertEqual(bytes(mem[ov + yuv.OV_Y_OFF:ov + yuv.OV_Y_OFF + 256]), bytes(range(256)))
+        box.close()
 
 
 if __name__ == '__main__':

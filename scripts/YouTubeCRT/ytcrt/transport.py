@@ -40,7 +40,9 @@ def load_native(path=None):
 
 
 def address_of(buf):
-    """Address of the first byte of a bytes / bytearray / memoryview (writable or not)."""
+    """Address of the first byte of a bytes / bytearray / memoryview (writable or not) or a ctypes array."""
+    if isinstance(buf, ctypes.Array):
+        return ctypes.addressof(buf)
     if isinstance(buf, (bytearray, memoryview)) and not (isinstance(buf, memoryview) and buf.readonly):
         return ctypes.addressof(ctypes.c_char.from_buffer(buf))
     if isinstance(buf, memoryview):

@@ -498,9 +498,16 @@ module yuv_scaler #(
         reg [8:0] s;
         begin s = {1'b0, c} + {7'd0, tt}; dith = (s > 9'd255 ? 8'd255 : s[7:0]) & 8'hFC; end
     endfunction
+    // The pixel is held for the whole pixel period (3 clocks): the analogue output shows every clock, not just the ones
+    // at ce_pix. ce_s11 is the pixel enable delayed to line up with stage 11.
+    reg [LAT-2:0] ce_sh = 0;
+    always @(posedge clk) ce_sh <= {ce_sh[LAT-3:0], ce_pix};
+    wire ce_s11 = ce_sh[LAT-2];
     always @(posedge clk) begin
-        if (!s11_valid) rgb <= 24'd0;
-        else if (dither) rgb <= {dith(s11_r, t), dith(s11_g, t), dith(s11_b, t)};
-        else rgb <= {s11_r, s11_g, s11_b};
+        if (ce_s11) begin
+            if (!s11_valid) rgb <= 24'd0;
+            else if (dither) rgb <= {dith(s11_r, t), dith(s11_g, t), dith(s11_b, t)};
+            else rgb <= {s11_r, s11_g, s11_b};
+        end
     end
 endmodule

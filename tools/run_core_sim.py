@@ -113,7 +113,9 @@ def run(mode, nrec, nlate, work):
             expected[rec] = yuv_ref.render_frame(y, u, v, hdr, interlaced, ov)
             seen[rec] = set()
         for x, px in enumerate(p[3:]):
-            e = expected[rec][d][x]
+            if not interlaced and x >= 320:                 # 240p has 320 pixels per line: every second pixel of the 640-wide frame
+                break
+            e = expected[rec][d][x if interlaced else 2 * x]
             if int(px, 16) != (e[0] << 16 | e[1] << 8 | e[2]):
                 bad += 1
                 if first_bad is None:

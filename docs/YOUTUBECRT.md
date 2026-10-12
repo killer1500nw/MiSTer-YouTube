@@ -1,9 +1,10 @@
 # YouTube CRT — on-screen browser and player
 
-A gamepad/keyboard GUI that runs **inside the same streaming session** as the
-video: menus are 320×240 frames pushed through the v0.13-smooth DDR mailbox, so
-they appear on the CRT (and HDMI) exactly like video does. Playback uses the
-validated pipeline from `YouTubeURL` (yt-dlp → ffmpeg → bounded A/V records).
+A gamepad/keyboard GUI that runs **inside the same streaming session** as the video. With the **v0.15-yuv** core the ARM only
+decodes: it hands the core the decoded picture at the video's own size and the FPGA scales it to a true 640×480 interlaced
+(or 640×240) picture with 8-bit colour; the menus and the playback bar are a separate overlay layer the FPGA draws over the
+picture (see [FPGA-YUV-v0.15.md](FPGA-YUV-v0.15.md)). The older v0.14-auto core (320×240 RGB565 records) still works with
+the same player. Playback uses the validated pipeline from `YouTubeURL` (yt-dlp → ffmpeg → bounded A/V records).
 
 > **Status: not yet run on hardware.** The core compiles and its RTL tests pass in simulation (see below). The menus, store, feed parsing, resume
 > logic and the playback loop (OSD, pause, seek, end-of-video) were exercised on
@@ -42,7 +43,7 @@ Not included (yet): search, playlists, live streams, account login, on-screen ke
 (about 1 MB), installs the core into `_Other`, downloads the ARM builds of yt-dlp, QuickJS, ffmpeg and Node.js
 (checksum-verified), adds the boot entry, starts the player and shows its log
 (*Waiting for the YouTubeCRT core to be loaded...*). It needs internet access and a roughly correct clock. Run it
-again to update. Then load **YouTubeCRT_v0.14-auto** from `_Other`.
+again to update. Then load **YouTubeCRT_v0.15-yuv** from `_Other` (the older YouTubeCRT_v0.14-auto is installed beside it as a fallback).
 
 **Offline instead.** `MiSTer-YouTube-SD.zip` (release asset; rebuild with `python tools/make_sd_package.py`) holds
 the core, the player and the tools (see its `TOOLS.txt`): unzip it to the **root of the SD card** (it merges with your
@@ -148,8 +149,8 @@ refused with a message. A typed video gets its title from YouTube once it starts
 ## Video crop
 
 Most YouTube video is 16:9 but a CRT is 4:3. **Settings → Video crop** sets how each video starts; during
-playback press **X** for the **More** panel and change **Crop** for that video only (it restarts the picture at
-the current position, so allow a few seconds).
+playback press **X** for the **More** panel and change **Crop** for that video only. With the v0.15 core it takes effect on the very
+next picture (the FPGA does the crop); with the v0.14 core it restarts the picture at the current position, so allow a few seconds.
 
 | Crop | What you see |
 | --- | --- |
@@ -167,11 +168,14 @@ arrows, Enter, Space, Esc, Backspace, Tab, PgUp/PgDn, W and Q work too.
 
 ## Output modes and performance
 
-The core menu (F12) is deliberately short: **Output: 240p / 480i** (default 240p), **480i field order** and **Reset**.
+The core menu (F12) is deliberately short: **Output: 240p / 480i** (default 240p), **480i field order**, **Analog dither** and **Reset**.
 Everything else (streaming, test pattern, test tone, loading a frame) used to be there for development and is gone.
-In 480i the same 320×240 picture is sent as 525-line interlaced video (262/263-line fields at
-59.94 Hz, the same 15.7 kHz line rate as 240p). It adds compatibility, not detail. The player needs no setting
-for it: only the core's Output option changes the video signal. 60 fps is not offered: no core supports 60 fps
+With the v0.15 core the picture is drawn at 640 pixels per line (a 13.3 MHz pixel clock, the same 15.7 kHz line rate). In **480i**
+it is a real interlaced picture: the two fields show alternate lines of one 640×480 frame, so a 360p video really has three times
+the pixels it had at 320×240. **240p** shows 640×240. **Analog dither** adds a little ordered dither before the picture is cut to
+the analog output's 6 bits, which hides colour banding in smooth gradients on a CRT (leave it Off for HDMI). The player needs no
+setting for any of this: it reads the core's mode and sends pictures that fit it. (With the v0.14 core the same 320×240 picture is
+sent as 525-line video: it adds compatibility, not detail.) 60 fps is not offered: no core supports 60 fps
 records, and the ARM cannot decode 60 fps H.264 at useful sizes anyway (see
 [PROTOCOL-v0.14-draft.md](PROTOCOL-v0.14-draft.md)).
 

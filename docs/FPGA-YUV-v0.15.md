@@ -4,8 +4,9 @@ Goal: the ARM only decodes. The core scales the decoded picture to the CRT, conv
 480i (or 640x240) picture. Measured on a real MiSTer (Speed test), scaling plus RGB565 conversion take about half of
 ffmpeg's time at 360p (1.49x with them, 2.97x without), and the picture is squeezed into 320x240 before the CRT sees it.
 
-Status: **design + reference model** (`tools/yuv_ref.py`). The RTL is written against this document and checked
-pixel for pixel against the model.
+Status: **RTL written and simulated** (ModelSim): the scaler matches the Python model (`tools/yuv_ref.py`) pixel for pixel in 12
+cases, and the whole core matches it at the VGA pins in 480i and 240p with slot reuse. Quartus build and hardware tests: see the
+release notes.
 
 ## Video timing
 
@@ -47,9 +48,21 @@ Header (little-endian 64-bit words):
 | 2 | 47:32 / 63:48 | `dy0`, `dh` |
 | 3 | 31:0 / 63:32 | `hstep`, `vstep`: source samples per destination pixel / line, unsigned 16.16 (vstep <= 2.0) |
 | 4 | 31:0 / 63:32 | `sx0`, `sy0`: source coordinate of the first destination pixel / line, unsigned 16.16 |
+| 5 | 0 / 2:1 | overlay enable, overlay buffer index (0..2) |
 
 The player computes the steps and start offsets (crop, aspect, letterbox) so the RTL stays simple. Pixel centres:
 `sx0 = max(0, (0.5 * hstep - 0.5 + crop_x)) * 65536`, likewise `sy0`.
+
+## Overlay layer (GUI and on-screen display)
+
+The menu and the playback bar are not part of the picture. The player draws them once into a 320 x 240 overlay buffer
+(YUV 4:2:0: Y at +0, U at +0x13000, V at +0x18000 of a 128 KiB buffer; three buffers after the slots, at
+`BASE + 0x401000 + n * 0x20000`) and a record's header names the buffer to draw over its picture (word 5). The core reads the
+overlay a row at a time, doubles every overlay pixel to 2 x 2 frame pixels (so text stays crisp) and draws it over the picture
+and the letterbox bars: **luma 0 is transparent**, every other luma value is opaque, and the same colour matrix, range and
+dither as the picture apply. In the menu the "picture" is a 16 x 16 black one, so a static menu costs the ARM no copying; during
+playback the bar costs nothing per frame and is redrawn only when it changes. The player never rewrites an overlay buffer that
+a queued or displayed record still names.
 
 The ARM must not overwrite the slot being displayed, so the acknowledged `consumed` count lags one record behind the
 commit count (the displayed record is released only when the next one is committed). With 8 slots the player keeps at
@@ -76,6 +89,16 @@ colour: C = Y - 16 (limited) or Y,  D = U - 128,  E = V - 128
         saturate 0..255
 dither: out = min(255, v + M[d&3][x&3]) & 0xFC, M = 0 2 0 2 / 3 1 3 1 / 0 2 0 2 / 3 1 3 1   (flag bit2)
 ```
+
+## Verification
+
+* `tools/run_yuv_sim.py`: the scaler RTL in ModelSim with random DDR wait states and burst latency, against `yuv_ref.py`:
+  16:9 and 4:3 pictures, Fill / 14:9 crops, a 416 x 240 picture magnified 1.54x, a vertical picture, 240p output, BT.601, full
+  range, dither, and three overlay cases. Every pixel of every case is identical.
+* `tools/run_core_sim.py`: the whole core (`emu`) with a player-like DDR model: mailbox, header parsing, six differently
+  sized records plus three that reuse slots, overlays, PCM order, acknowledgement one record behind the commit count,
+  played count, session and identity, in 480i and 240p. Video at the VGA pins is identical to the model.
+* The first full-core run found a real bug (the arbiter handing the bus over while a command was waiting); both are in the repo.
 
 ## Hardware structure
 
