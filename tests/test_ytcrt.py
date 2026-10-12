@@ -365,7 +365,7 @@ AUDIO = [{'format_id': '140', 'protocol': 'https', 'vcodec': 'none', 'acodec': '
 class CostModel(unittest.TestCase):
     def test_the_calibration_stream_costs_what_was_measured(self):
         cal = profiles.CAL_DEFAULT
-        ref = {'width': 640, 'height': 360, 'tbr': 591, 'fps': 30}
+        ref = {'width': 640, 'height': 360, 'tbr': cal['tbr'], 'fps': 30}
         self.assertAlmostEqual(profiles.predicted_cost(ref, cal), cal['cost'], places=3)
 
     def test_fewer_frames_cost_less(self):
@@ -425,8 +425,8 @@ class ChooseStreams(unittest.TestCase):
 
     def test_24_fps_content_is_allowed_a_bigger_picture_than_30_fps(self):
         # Same pixels and bitrate; only the frame rate differs. 24 fps decodes 20% faster, which tips the choice.
-        v24 = self.pick([stream(426, 240, 126, 24), stream(640, 360, 349, 24)])
-        v30 = self.pick([stream(426, 240, 126, 30), stream(640, 360, 349, 30)])
+        v24 = self.pick([stream(426, 240, 126, 24), stream(640, 360, 360, 24)])
+        v30 = self.pick([stream(426, 240, 126, 30), stream(640, 360, 360, 30)])
         self.assertEqual(v24[2], '360p')
         self.assertEqual(v30[2], '240p')
 
@@ -559,14 +559,19 @@ class PlayPolicy(unittest.TestCase):
         self.assertGreater(st.settings['cost_mult'], 1.0)                 # and the estimate was corrected upwards
 
     def test_clean_playback_trusts_the_estimate_a_little_more(self):
-        st = self.make(cost=0.9)                         # 360p@452k predicted ~0.79: allowed, and close to the limit
+        st = self.make(cost=0.78)                        # 360p@452k predicted ~0.69: allowed, and close to the limit
         self.appmod.SMOOTH_AFTER = 0.5
         self.run_play([FakePipe()], lambda: st.settings['cost_mult'] < 1.0)
         self.assertEqual(self.opened[0][0], '360p')
         self.assertLess(st.settings['cost_mult'], 1.0)
 
-    def test_the_default_calibration_sends_a_busy_stream_to_240p(self):
+    def test_the_default_calibration_allows_a_moderate_360p_stream(self):
         self.make(cost=profiles.CAL_DEFAULT['cost'])
+        self.run_play([FakePipe()], lambda: self.app.link.sent > 20)
+        self.assertEqual(self.opened[0][0], '360p')
+
+    def test_a_slow_measured_arm_sends_a_busy_stream_to_240p(self):
+        self.make(cost=1.2)                              # what a Speed test on a much slower ARM would say
         self.run_play([FakePipe()], lambda: self.app.link.sent > 20)
         self.assertEqual(self.opened[0][0], '240p')
 

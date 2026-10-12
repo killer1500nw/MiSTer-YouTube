@@ -189,7 +189,7 @@ source **downscaled** to 320×240 is what actually looks cleaner, but it costs t
 
 What the ARM can decode in real time depends on the stream: how many **pixels**, how many **kbps** and how many
 **frames per second**. Auto estimates that load for every stream a video offers and picks the largest picture
-predicted to need at most 85% of the ARM, which leaves room for busy scenes:
+predicted to need at most 72% of the ARM, which leaves room for the player's own work (reading the video and copying records to the core, about a quarter):
 
 * A calm, low-bitrate upload (a 90s sitcom, an old movie) is cheap, so it gets **360p** (or 480×360 for 4:3 shows).
 * Busy footage (game capture, sports) is expensive and stays at **240p**.

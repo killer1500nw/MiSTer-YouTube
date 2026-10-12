@@ -28,12 +28,12 @@ DEFAULT = PROFILE.key
 # depends on the stream: how many pixels, how many kbps and how many frames per second. The player estimates that
 # cost for every stream a video offers and picks the best picture that fits.
 QUALITY_BOX = {'240p': 240, '360p': 360, '480p': 480, 'Auto': 480}      # shorter side allowed, in pixels (4:3 and 16:9 alike)
-# Calibration, from one real measurement on a Cyclone V MiSTer (Speed test): a 640x360, 30 fps, 591 kbps stream ran
-# at 0.87x real time with the cheapest decoder setting. `cost` is ARM seconds per video second (1/0.87).
+# Calibration, from one real measurement on a Cyclone V MiSTer (Speed test, start-up time cancelled out): a 640x360, 30 fps,
+# 307 kbps stream ran at 1.49x real time with the cheapest decoder setting. `cost` is ARM seconds per video second (1/1.49).
 # The Speed test replaces this with a measurement of your own MiSTer.
-CAL_DEFAULT = {'px': 640 * 360, 'tbr': 591.0, 'fps': 30.0, 'cost': 1 / 0.87}
+CAL_DEFAULT = {'px': 640 * 360, 'tbr': 307.0, 'fps': 30.0, 'cost': 0.67}
 PIXEL_SHARE = 0.5          # assume half of the decoding cost follows the pixel count and half follows the bitrate
-LIMIT = 0.85              # a stream must be predicted to need at most this much ARM time per second of video (headroom for busy scenes)
+LIMIT = 0.72              # the decoder may use at most this much of the ARM: the rest is the player's own pipe reading and record copying (about a quarter)
 BIG_PX = 110000            # above this many pixels (a little more than 426x240) the cheaper decoder settings are used
 
 
