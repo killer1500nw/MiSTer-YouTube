@@ -445,6 +445,7 @@ class App:
             self.push(ui.Message('Speed test failed', [str(err)[:140]], ui.AMBER))
             return
         results, media, bare = res
+        copy_avg, copy_max = self.link.measure_copy()       # on this thread: nothing else is writing the next slot
         best_speed, best = max(results, key=lambda r: r[1])
         v = media.video
         lines = ['%s: %.2fx real time' % (sp, f) for sp, f in results]
@@ -452,14 +453,14 @@ class App:
         share = max(0.0, (t_full - t_bare) / t_full)           # fraction of the ARM's time spent scaling and converting colour
         lines.append('Decode only: %.2fx' % bare)
         lines.append('Scale+colour: %d%% of the time' % round(share * 100))
+        lines.append('Copy 160 KB: %.1f ms (max %.1f)' % (copy_avg, copy_max))
         lines.append('Test: %s, %d kbps, %d fps' % (media.label, round(media.tbr), round(v.get('fps') or 30)))
         self.store.set('cal', {'px': v['width'] * v['height'], 'tbr': float(v.get('tbr') or 300),
                                'fps': float(v.get('fps') or 30), 'cost': round(1.0 / best, 4)})
         self.store.set('speed_big', best_speed)
         self.store.set('cost_mult', 1.0)
-        lines.append('Auto now uses these numbers')
-        self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); calibration %s, speed_big=%s' % (
-            media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), self.store.settings['cal'], best_speed))
+        self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); copy 160 KB %.1f ms (worst %.1f); calibration %s, speed_big=%s' % (
+            media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), copy_avg, copy_max, self.store.settings['cal'], best_speed))
         self.push(ui.Message('Speed test', lines, ui.GREEN if best >= 1.15 else ui.AMBER))
 
     # playback ---------------------------------------------------------
@@ -544,6 +545,8 @@ class App:
         if not v.get('title'):
             v['title'] = media.title                      # a typed link has no title until YouTube tells us
         refresh_left, pos_ms, outcome = 1, start_ms, 'stop'
+        copy0 = (self.link.copy_total, self.link.copy_count)
+        self.link.copy_max = 0.0
         while True:
             cal, mult = self.calibration()
             can_step = q == 'Auto' and pipeline.step_down(media, prof, cal, mult) is not None
@@ -577,6 +580,10 @@ class App:
                 media = fresh
                 continue
             break
+        if self.link.copy_count > copy0[1]:
+            n = self.link.copy_count - copy0[1]
+            self.log('Record copy to the core: average %.1f ms, worst %.1f ms (%d records)' % (
+                1000.0 * (self.link.copy_total - copy0[0]) / n, 1000.0 * self.link.copy_max, n))
         self.log('Playback %s at %s of %s' % ('finished' if outcome == 'eof' else 'stopped', ui.mmss(pos_ms), ui.mmss(media.duration * 1000)))
         self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))
         self.dirty = True

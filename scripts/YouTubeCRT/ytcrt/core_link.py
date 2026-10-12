@@ -39,6 +39,7 @@ class Link:
         self.heart_timeout = 0.5       # FPGA heartbeat is ~kHz; stop writing fast if it stops
         self.copy_total = 0.0
         self.copy_max = 0.0
+        self.copy_count = 0
 
     # lifecycle --------------------------------------------------------
     def open(self):
@@ -192,6 +193,7 @@ class Link:
         self.box.record(self.sent, record)
         took = time.monotonic() - started
         self.copy_total += took
+        self.copy_count += 1
         self.copy_max = max(self.copy_max, took)
         if self.sent - self.consumed == 3:
             self.last_progress = time.monotonic()
@@ -200,6 +202,17 @@ class Link:
 
     def finish(self):
         self.box.write(12, self.sent)
+
+    def measure_copy(self, n=12):
+        """Time n record copies into the NEXT slot without publishing it (the core never reads an unpublished slot).
+        Call from the thread that pushes, so nothing else writes that slot meanwhile. -> (average ms, worst ms)."""
+        data = bytes(RECORD_BYTES)
+        times = []
+        for _ in range(n):
+            started = time.monotonic()
+            self.box.record(self.sent, data)
+            times.append(time.monotonic() - started)
+        return 1000.0 * sum(times) / len(times), 1000.0 * max(times)
 
 
 class FakeLink:
@@ -216,6 +229,7 @@ class FakeLink:
         self.sent = 0
         self.t0 = None
         self.copy_total = self.copy_max = 0.0
+        self.copy_count = 0
         self.last = None
 
     def open(self):
@@ -249,9 +263,13 @@ class FakeLink:
         if self.sink:
             self.sink(self.sent, record)
         self.last = record
+        self.copy_count += 1
         self.sent += 1
         if self.t0 is None and self.sent >= self.PREFILL:
             self.t0 = time.monotonic()
 
     def finish(self):
         pass
+
+    def measure_copy(self, n=12):
+        return 0.0, 0.0
