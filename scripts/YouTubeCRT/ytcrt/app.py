@@ -446,21 +446,27 @@ class App:
             return
         results, media, bare = res
         copy_avg, copy_max = self.link.measure_copy()       # on this thread: nothing else is writing the next slot
+        fast = self.link.measure_fast_copy()
         best_speed, best = max(results, key=lambda r: r[1])
         v = media.video
-        lines = ['%s: %.2fx real time' % (sp, f) for sp, f in results]
+        lines = ['  '.join('%s %.2fx' % (sp, f) for sp, f in results)]
         t_full, t_bare = 1.0 / best, 1.0 / bare
         share = max(0.0, (t_full - t_bare) / t_full)           # fraction of the ARM's time spent scaling and converting colour
         lines.append('Decode only: %.2fx' % bare)
         lines.append('Scale+colour: %d%% of the time' % round(share * 100))
         lines.append('Copy 160 KB: %.1f ms (max %.1f)' % (copy_avg, copy_max))
+        if fast:
+            best = min(fast.items(), key=lambda kv: kv[1][0])
+            lines.append('Bulk copy: %.1f ms (%s%s)' % (best[1][0], best[0], '' if best[1][2] else ' BAD DATA'))
+        else:
+            lines.append('Bulk copy: not possible')
         lines.append('Test: %s, %d kbps, %d fps' % (media.label, round(media.tbr), round(v.get('fps') or 30)))
         self.store.set('cal', {'px': v['width'] * v['height'], 'tbr': float(v.get('tbr') or 300),
                                'fps': float(v.get('fps') or 30), 'cost': round(1.0 / best, 4)})
         self.store.set('speed_big', best_speed)
         self.store.set('cost_mult', 1.0)
-        self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); copy 160 KB %.1f ms (worst %.1f); calibration %s, speed_big=%s' % (
-            media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), copy_avg, copy_max, self.store.settings['cal'], best_speed))
+        self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); copy 160 KB %.1f ms (worst %.1f); bulk copy %s; calibration %s, speed_big=%s' % (
+            media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), copy_avg, copy_max, fast, self.store.settings['cal'], best_speed))
         self.push(ui.Message('Speed test', lines, ui.GREEN if best >= 1.15 else ui.AMBER))
 
     # playback ---------------------------------------------------------

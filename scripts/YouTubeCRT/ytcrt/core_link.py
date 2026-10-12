@@ -7,6 +7,8 @@ The handshake and health checks are the ones validated in url_player.py
 import mmap
 import os
 import secrets
+import subprocess
+import sys
 import time
 
 from . import transport as t
@@ -203,6 +205,45 @@ class Link:
     def finish(self):
         self.box.write(12, self.sent)
 
+    FAST_COPY_PROBE = """
+import ctypes, mmap, os, sys, time
+BASE, MAP, SIZE = 0x30000000, 0x201000, 160000
+slot, n = int(sys.argv[1]), int(sys.argv[2])
+fd = os.open('/dev/mem', os.O_RDWR | os.O_SYNC)
+mm = mmap.mmap(fd, MAP, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE, offset=BASE)
+base = ctypes.addressof(ctypes.c_char.from_buffer(mm))
+dst = base + 0x1000 + slot * 0x40000
+src = ctypes.create_string_buffer(bytes(range(256)) * 625, SIZE)
+def check():
+    return ctypes.string_at(dst, 64) == src.raw[:64] and ctypes.string_at(dst + SIZE - 64, 64) == src.raw[SIZE - 64:]
+t = []
+for _ in range(n):
+    s = time.monotonic(); ctypes.memmove(dst, src, SIZE); t.append(time.monotonic() - s)
+print('memmove %.2f %.2f %d' % (1000 * sum(t) / n, 1000 * max(t), check()))
+t = []
+for _ in range(n):
+    s = time.monotonic(); mm[0x1000 + slot * 0x40000: 0x1000 + slot * 0x40000 + SIZE] = src.raw; t.append(time.monotonic() - s)
+print('slice %.2f %.2f %d' % (1000 * sum(t) / n, 1000 * max(t), check()))
+"""
+
+    def measure_fast_copy(self, n=12):
+        """Experiment for the Speed test: would a bulk copy (libc memmove / mmap slice) into the same unpublished slot be
+        faster than the helper's word-by-word stores, and is it intact? Runs in a separate process, so a bus error
+        from an unsuitable access kills only that process. -> {method: (average ms, worst ms, intact)} or None."""
+        try:
+            out = subprocess.run([sys.executable, '-c', self.FAST_COPY_PROBE, str(self.sent % SLOTS), str(n)],
+                                 capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if out.returncode:
+            return None
+        res = {}
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 4:
+                res[parts[0]] = (float(parts[1]), float(parts[2]), parts[3] == '1')
+        return res or None
+
     def measure_copy(self, n=12):
         """Time n record copies into the NEXT slot without publishing it (the core never reads an unpublished slot).
         Call from the thread that pushes, so nothing else writes that slot meanwhile. -> (average ms, worst ms)."""
@@ -273,3 +314,6 @@ class FakeLink:
 
     def measure_copy(self, n=12):
         return 0.0, 0.0
+
+    def measure_fast_copy(self, n=12):
+        return None
