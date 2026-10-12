@@ -548,8 +548,7 @@ class Decoders:
             raise RuntimeError('The audio stream kept ending early.')
         self.restarts += 1
         pos = self._audio_position()
-        why = safe_text(self.errors['audio'].decode(errors='replace')).strip().replace('
-', ' | ')[-160:]
+        why = safe_text(self.errors['audio'].decode(errors='replace')).strip().replace(chr(10), ' | ')[-160:]
         hook_log('audio stream ended early (exit %s) at %.0f s; reopening it there (%d)%s' % (
             code, pos, self.restarts, (': ' + why) if why else ''))
         stop_process(self.procs['audio'])
