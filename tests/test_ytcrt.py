@@ -655,8 +655,31 @@ class PlayPolicy(unittest.TestCase):
         self.make(quality='240p')
         always = FakePipe(failures=['video decoder failed (-11): '] * 40)
         self.run_play([always], lambda: type(self.app.screen).__name__ == 'TextView')
-        self.assertEqual(len(self.opened), 6)            # the first open + 5 reconnects, then a clear error screen
+        self.assertEqual(len(self.opened), 2)            # it crashes before any picture: one more try, then a clear error screen
         self.assertEqual(type(self.app.screen).__name__, 'TextView')
+        self.assertIn('Try a lower quality', ' '.join(self.app.screen.lines))
+
+    def test_auto_steps_down_when_the_decoder_crashes_as_soon_as_it_starts(self):
+        st = self.make(cost=0.3)                          # Auto picks something big first
+        crash = 'audio decoder failed (-11): '
+        self.run_play([FakePipe(failures=[crash] * 5), FakePipe(failures=[crash] * 5), FakePipe()], lambda: len(self.opened) >= 3)
+        self.assertEqual(len(self.opened), 3)                             # opened, crashed, tried again, crashed again: then lighter
+        self.assertEqual(self.opened[0][0], self.opened[1][0])
+        self.assertNotEqual(self.opened[1][0], self.opened[2][0])        # a lighter stream the third time
+        self.assertEqual(st.settings['cost_mult'], 1.0)                  # and nothing learned about the ARM's speed from a crash
+
+    def test_a_starting_screen_shows_until_the_first_picture(self):
+        self.make(quality='240p')
+        seen = []
+        orig = self.app.loading_frame
+
+        def spy():
+            seen.append(type(self.app.screen).__name__)
+            orig()
+        self.app.loading_frame = spy
+        self.run_play([FakePipe(rate=5)], lambda: self.app.link.sent > 8)
+        self.assertIn('Message', seen)                                   # the spinner screen was drawn while waiting
+        self.assertNotEqual(type(self.app.screen).__name__, 'Message')   # and it is gone again
 
 
 class TypedLinks(unittest.TestCase):

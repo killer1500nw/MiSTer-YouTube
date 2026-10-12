@@ -1,5 +1,6 @@
 """The on-screen app: menus and playback share one streaming session, so the
 GUI is simply more 320x240 frames pushed through the same DDR mailbox."""
+import subprocess
 import threading
 import re
 import time
@@ -211,6 +212,17 @@ class App:
             else:
                 self.link.push(self.record)
         return act
+
+    def loading_frame(self):
+        """Keep the screen alive while a video starts: the menu loop's redraw and feeding, without its input or health checks."""
+        self.tick_ui()
+        if self.dirty or self.record is None:
+            self.render()
+        if self.link.queued < MENU_DEPTH:
+            if self.yuv:
+                self.link.push_picture(self.black, self.silence, 16, 16, 'Off', 0, self.menu_ov)
+            else:
+                self.link.push(self.record)
 
     def run(self):
         self.refresh_feeds()
@@ -610,6 +622,7 @@ class App:
         results, media, bare, big, av1 = res
         copy_avg, copy_max = self.link.measure_copy()       # on this thread: nothing else is writing the next slot
         fast = self.link.measure_fast_copy()
+        fb = self.link.measure_fb_copy() if hasattr(self.link, 'measure_fb_copy') else None
         best_speed, best = 'Fast', dict(results)['Fast']
         v = media.video
         lines = ['  '.join('%s %.2fx' % (sp, f) for sp, f in results)]
@@ -629,6 +642,8 @@ class App:
             lines.append('Bulk copy: %.1f ms (%s%s)' % (bulk_ms, method, '' if intact else ' BAD DATA'))
         else:
             lines.append('Bulk copy: not possible')
+        if fb:
+            lines.append('Framebuffer: ' + fb[:34])
         lines.append('Test: %s, %d kbps, %d fps' % (media.label, round(media.tbr), round(v.get('fps') or 30)))
         cal = {'px': v['width'] * v['height'], 'tbr': float(v.get('tbr') or 300),
                'fps': float(v.get('fps') or 30), 'cost': round(1.0 / best, 4)}
@@ -651,6 +666,8 @@ class App:
         if av1:
             extra += '; VP9 %dx%d %d kbps %d fps decode only %.2fx (H.264 %.2fx at %d kbps)' % (
                 av1[0].video['width'], av1[0].video['height'], round(av1[0].tbr), round(av1[0].video.get('fps') or 30), av1[1], bare, round(media.tbr))
+        if fb:
+            self.log('Framebuffer probe: ' + fb)
         self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); copy %d KB %.1f ms (worst %.1f) %s; bulk copy %s; calibration %s, speed_big=%s%s' % (
             media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), kb, copy_avg, copy_max,
             {m: round(r[0], 1) for m, r in self.link.copy_report.items()}, fast, self.store.settings['cal'], best_speed, extra))
@@ -683,6 +700,35 @@ class App:
                                 lambda i: self.play(v, pos if i == 0 else 0)))
         else:
             self.play(v, pos if pos >= RESUME_MIN_MS else 0)
+
+    def _probe_audio(self, media, prof, at_ms):
+        """After the audio decoder crashed at start: run it once more, verbosely, for two seconds and log what it says. A refused or
+        reset connection normally prints a line before the crash that the normal run (errors only) does not show."""
+        try:
+            if not media.audio:
+                return
+            cmd = pipeline.decoder_command(self.rt, prof, media.audio, 'audio', start_s=at_ms / 1000.0, limit_s=2, to_null=True)
+            cmd[cmd.index('-loglevel') + 1] = 'verbose'
+            done = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+            tail = pipeline.safe_text(done.stderr).splitlines()[-14:]
+            self.log('Audio probe (exit %s): %s' % (done.returncode, ' | '.join(l.strip()[:110] for l in tail if l.strip())))
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            self.log('Audio probe failed: %s' % exc)
+
+    def _log_crash_clues(self):
+        """After a decoder crash at start: what the kernel says about it (a segfault line or an out-of-memory kill) and free memory."""
+        try:
+            out = subprocess.run(['dmesg'], capture_output=True, text=True, timeout=4).stdout.splitlines()
+            hits = [l for l in out[-60:] if re.search(r'segfault|ffmpeg|out of memory|oom|killed process|Killed', l, re.I)]
+            self.log('Kernel notes after the crash: %s' % (' | '.join(l[-110:] for l in hits[-4:]) or 'none'))
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            with open('/proc/meminfo', encoding='utf-8') as f:
+                mem = dict(l.split(':', 1) for l in f.read().splitlines()[:5])
+            self.log('Memory: ' + ', '.join('%s %s' % (k, v.strip()) for k, v in mem.items()))
+        except OSError:
+            pass
 
     def _learn_copy(self, media, avg_ms, n):
         """Fold the copy time seen during real playback into the Auto cost model (an idle MiSTer copies faster)."""
@@ -774,12 +820,13 @@ class App:
                 self.log('Playback error: ' + ' | '.join(str(exc).splitlines())[:600])
                 self.push(ui.TextView('Playback stopped', ['!' + l for l in ui.wrap(str(exc), 37, 14)]))
                 return
-            if outcome == 'downgrade':                    # the ARM could not keep up: learn from it, use a lighter stream
-                mult = min(3.0, mult * 1.25)
-                self.store.set('cost_mult', round(mult, 3))
+            if outcome in ('downgrade', 'crashstep'):     # the ARM could not keep up (or the decoder crashes at start): use a lighter stream
+                if outcome == 'downgrade':                # ...and learn from it; a crash says nothing about the ARM's speed
+                    mult = min(3.0, mult * 1.25)
+                    self.store.set('cost_mult', round(mult, 3))
                 smaller = pipeline.step_down(media, prof, cal, mult, self.log)
-                self.log('%s (estimated load %d%%) could not keep up; cost multiplier now %.3f; %s' % (
-                    media.label, round(media.cost * 100), mult,
+                self.log('%s (estimated load %d%%) %s; cost multiplier now %.3f; %s' % (
+                    media.label, round(media.cost * 100), 'could not keep up' if outcome == 'downgrade' else 'crashed at start', mult,
                     ('switching to %s' % smaller.label) if smaller else 'nothing lighter to switch to'))
                 if smaller is not None:
                     self.toast('Too heavy for %s - using %s' % (media.label, smaller.label))
@@ -890,8 +937,21 @@ class App:
         pipe = open_pipe(start_ms)
         next_save = time.monotonic() + 10
         cpuw, next_cpu = cpu.CpuWatch({}), time.monotonic() + CPU_LOG_SECONDS
+
+        def starting_lines():
+            """What the screen says while the decoders start (a video whose stream details are cached has no lookup to show)."""
+            try:
+                tail = bytes(pipe.decoder.errors.get('video', b'')).decode(errors='replace').strip().splitlines()
+            except Exception:
+                tail = []
+            return [ui.clip(v.get('title', ''), 33), 'Starting the decoders... %ds' % (time.monotonic() - state['opened_at']),
+                    '%s, %d kbps' % (media.label, round(media.tbr or 0)), ui.clip(pipeline.safe_text(tail[-1]) if tail else '', 33)]
+        loading = ui.Message('Starting', starting_lines, spinner=True, on_back=False)
+        self.push(loading)                                   # with the spinner, until the first picture arrives
         try:
             while True:
+                if loading is not None:
+                    self.loading_frame()
                 link.health()
                 now = time.monotonic()
                 act = self.inputs.get(0.003)
@@ -1002,6 +1062,22 @@ class App:
                         return 'refresh', pos_ms()
                     if re.search(r'\(-11\)|reset by peer|Connection reset|Broken pipe', msg):
                         # This ffmpeg build crashes (SIGSEGV) when YouTube drops the connection: carry on from here.
+                        if now - state['opened_at'] < 8.0 and not state['first_logged']:
+                            # It crashed before showing a single picture: starting again the same way will crash again.
+                            state['early'] = state.get('early', 0) + 1
+                            if state['early'] == 1:
+                                self._log_crash_clues()
+                                if msg.startswith('audio'):
+                                    self._probe_audio(media, prof, pos_ms())
+                            if state['early'] >= 2:
+                                if may_fall_back:
+                                    self.log('The decoder crashes as soon as it starts at %s: stepping down' % media.tier)
+                                    return 'crashstep', pos_ms()
+                                raise pipeline.PlaybackError(
+                                    'The decoder crashed as soon as it started at %s (%s). Try a lower quality (X, then Quality) or Auto.' %
+                                    (media.tier, ' '.join(msg.split())[:50]))
+                        else:
+                            state['early'] = 0
                         if now - state['crash_at'] > 120:
                             state['crashes'] = 0
                         state['crash_at'] = now
@@ -1028,6 +1104,10 @@ class App:
                 if state.get('opened_at') and not state.get('first_logged'):
                     state['first_logged'] = True
                     self.log('First picture %.1f s after starting the decoders' % (time.monotonic() - state['opened_at']))
+                if loading is not None:
+                    if self.screen is loading:
+                        self.pop()
+                    loading = None
                 if state['seeking']:                         # first picture from the new position
                     state.update(seeking=False, note='', osd_until=now + 1.5)
                 show_osd = now < state['osd_until'] or state['more'] is not None
@@ -1039,6 +1119,8 @@ class App:
                         state['note'] = ''
                 self._present(rec, v, shown, dur_ms, False, state, prof, False, show_osd, ytarget)
         finally:
+            if loading is not None and self.screen is loading:
+                self.pop()
             pipe.close(wait=False)        # kill the decoders at once: a step-down or a stop must not wait for a busy ffmpeg to exit
 
     def _present(self, rec, v, pos, dur, paused, state, prof, silent, osd, target):

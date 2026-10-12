@@ -335,6 +335,43 @@ print('slice %.2f %.2f %d' % (1000 * sum(t) / n, 1000 * max(t), check()))
                 res[parts[0]] = (float(parts[1]), float(parts[2]), parts[3] == '1')
         return res or None
 
+    FB_PROBE = """
+import ctypes, fcntl, mmap, os, struct, sys, time
+try:
+    fd = os.open('/dev/fb0', os.O_RDWR)
+except OSError as exc:
+    print('none %s' % exc)
+    sys.exit(0)
+info = bytearray(160)
+fcntl.ioctl(fd, 0x4602, info)                       # FBIOGET_FSCREENINFO
+ident = bytes(info[:16]).split(b'\0')[0].decode('ascii', 'replace') or '?'
+start, length = struct.unpack('<II', bytes(info[16:24]))
+size = min(length, 4 * 1024 * 1024)
+mm = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+base = ctypes.addressof(ctypes.c_char.from_buffer(mm))
+n = int(sys.argv[1])
+src = ctypes.create_string_buffer(345600)
+times = []
+for _ in range(n):
+    t0 = time.monotonic()
+    ctypes.memmove(base, src, 345600)
+    times.append(time.monotonic() - t0)
+print('fb0 %s start=0x%x len=%d avg_ms=%.2f worst_ms=%.2f' % (ident, start, length, 1000.0 * sum(times) / n, 1000.0 * max(times)))
+"""
+
+    def measure_fb_copy(self, n=12):
+        """Experiment for the Speed test: how fast can a 345 KB picture be written to the Linux framebuffer /dev/fb0? The kernel maps
+        it for fast merged writes and the FPGA can read the same DDR, so it may be a much faster way to hand pictures over than the
+        uncached region used now. Runs in its own process and writes zeros. -> the probe's one line of text, or None."""
+        if self.kind != 'yuv':
+            return None
+        try:
+            out = subprocess.run([sys.executable, '-c', self.FB_PROBE, str(n)], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        lines = out.stdout.strip().splitlines()
+        return lines[-1] if (lines and not out.returncode) else ('failed (%d) %s' % (out.returncode, out.stderr.strip()[-80:]))
+
     def use_copy_method(self, method):
         if self.kind == 'yuv':
             self.box.use_method(method)
