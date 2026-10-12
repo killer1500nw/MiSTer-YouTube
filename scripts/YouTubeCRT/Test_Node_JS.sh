@@ -52,11 +52,28 @@ TARBALL="$DIR/node.tar.gz"
 if [ ! -x "$DIR/node" ]; then
   say ""
   say "--- 1. downloading Node.js $NODE_VER (about 43 MB) ---"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fL --retry 3 --connect-timeout 20 -o "$TARBALL" "$NODE_URL" || rm -f "$TARBALL"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -T 30 -t 3 -O "$TARBALL" "$NODE_URL" || rm -f "$TARBALL"
-  fi
+  # The same way the installer downloads yt-dlp: Python with the certificate bundle shipped next to this script
+  # (the MiSTer's own curl may not trust nodejs.org). Errors are shown, not hidden.
+  python3 - "$NODE_URL" "$TARBALL" "$BASE/cacert.pem" <<'PY' 2>&1 | while read -r l; do say "$l"; done
+import ssl, sys, urllib.request
+url, out, ca = sys.argv[1:4]
+try:
+    ctx = ssl.create_default_context(cafile=ca)
+    done, step = 0, 0
+    with urllib.request.urlopen(url, timeout=60, context=ctx) as r, open(out, 'wb') as f:
+        total = int(r.headers.get('Content-Length') or 0)
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            f.write(chunk)
+            done += len(chunk)
+            if done // (8 << 20) > step:
+                step = done // (8 << 20)
+                print('  downloaded %d of %d MB' % (done >> 20, total >> 20), flush=True)
+except Exception as exc:
+    print('download error: %s: %s' % (type(exc).__name__, exc))
+PY
   [ -s "$TARBALL" ] || { say "ERROR: could not download Node.js. Check the internet connection and the MiSTer's clock, then run again."; finish 1; }
   GOT="$(python3 - "$TARBALL" <<'PY'
 import hashlib, sys
