@@ -1646,5 +1646,114 @@ class BenchmarkSlope(unittest.TestCase):
             pipeline._bench_wall = saved
 
 
+class YuvFormat(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+        import yuv_ref
+        self.ref = yuv_ref
+        from ytcrt import yuv
+        self.yuv = yuv
+
+    def test_header_round_trips_and_rejects_nonsense(self):
+        yuv = self.yuv
+        h = yuv.pack_header(640, 360, 640, 320, 0, 640, 60, 360, 65536, 65536, 0, 0, yuv.FLAG_601 | yuv.FLAG_DITHER)
+        self.assertEqual(len(h), 64)
+        p = yuv.parse_header(h)
+        self.assertEqual((p['src_w'], p['src_h'], p['ystride'], p['cstride'], p['dy0'], p['dh'], p['flags']),
+                         (640, 360, 640, 320, 60, 360, 5))
+        with self.assertRaises(ValueError):
+            yuv.pack_header(641, 360, 648, 328, 0, 640, 60, 360, 65536, 65536, 0, 0)       # odd width
+        with self.assertRaises(ValueError):
+            yuv.pack_header(640, 360, 636, 320, 0, 640, 60, 360, 65536, 65536, 0, 0)       # stride not a multiple of 8
+        with self.assertRaises(ValueError):
+            yuv.pack_header(640, 360, 640, 320, 0, 640, 200, 360, 65536, 65536, 0, 0)      # rectangle leaves the frame
+        with self.assertRaises(ValueError):
+            yuv.parse_header(bytes(64))
+
+    def test_slots_and_the_four_writes_of_a_record(self):
+        yuv = self.yuv
+        self.assertEqual(yuv.slot_offset(0), 0x1000)
+        self.assertEqual(yuv.slot_offset(9), 0x1000 + 0x80000)
+        self.assertLessEqual(yuv.AUDIO_OFF + yuv.AUDIO_BYTES, yuv.SLOT_BYTES)
+        self.assertLessEqual(yuv.Y_OFF + yuv.MAX_W * yuv.MAX_H, yuv.U_OFF)
+        self.assertLessEqual(yuv.U_OFF + yuv.MAX_W * yuv.MAX_H // 4, yuv.V_OFF)
+        self.assertLessEqual(yuv.V_OFF + yuv.MAX_W * yuv.MAX_H // 4, yuv.AUDIO_OFF)
+        w = yuv.pieces(yuv.header_for(640, 360), bytes(640 * 360), bytes(320 * 180), bytes(320 * 180), bytes(6400), 3)
+        self.assertEqual([o - yuv.slot_offset(3) for o, _ in w], [0, yuv.U_OFF, yuv.V_OFF, yuv.AUDIO_OFF])
+        self.assertEqual(len(w[0][1]), yuv.Y_OFF + 640 * 360)
+
+    def test_geometry_of_common_pictures(self):
+        yuv = self.yuv
+        g = yuv.layout(640, 360)                                           # 16:9 letterboxed in the 4:3 frame
+        self.assertEqual((g['dx0'], g['dw'], g['dy0'], g['dh']), (0, 640, 60, 360))
+        self.assertEqual((g['hstep'], g['vstep'], g['sx0'], g['sy0']), (65536, 65536, 0, 0))
+        g = yuv.layout(480, 360)                                           # 4:3 fills the frame, magnified 1.333x
+        self.assertEqual((g['dx0'], g['dw'], g['dy0'], g['dh']), (0, 640, 0, 480))
+        self.assertAlmostEqual(g['hstep'] / 65536.0, 0.75, places=4)
+        g = yuv.layout(640, 360, 'Fill')                                   # trims the sides to 4:3
+        self.assertEqual((g['dw'], g['dh']), (640, 480))
+        self.assertAlmostEqual(g['hstep'] / 65536.0, 0.75, places=4)
+        self.assertAlmostEqual(g['sx0'] / 65536.0, 80 + 0.375 - 0.5, places=3)  # 80 source pixels off the left edge
+        g = yuv.layout(640, 360, '14:9')
+        self.assertEqual((g['dw'], g['dh']), (640, 410))
+        g = yuv.layout(360, 640)                                           # a vertical short: pillarboxed
+        self.assertEqual((g['dh'], g['dw']), (480, 270))
+        self.assertIsNone(g['prescale'])
+
+    def test_pictures_too_tall_for_the_line_step_are_prescaled(self):
+        yuv = self.yuv
+        self.assertIsNone(yuv.layout(848, 480, 'Off', True)['prescale'])   # 480 rows into 360 lines: 1.33 rows per line, fine in 480i
+        p = yuv.layout(848, 480, 'Off', False)['prescale']                 # but 240p can step at most 1 row per line
+        self.assertEqual(p[1], yuv.layout(848, 480)['dh'])               # no more rows than the destination has lines
+        self.assertEqual(p[0] % 16, 0)
+        self.assertEqual(yuv.aligned_size(426, 240), (416, 240))
+        self.assertEqual(yuv.aligned_size(854, 480), (848, 480))
+
+    def test_model_identity_scale_is_just_the_colour_conversion(self):
+        yuv, ref = self.yuv, self.ref
+        w, h = 640, 480
+        y, u, v = ref.planes_from_function(w, h, lambda i, j: (16 + (i * 219) // w, 128 + (j % 5), 128 - (j % 7)))
+        hdr = yuv.parse_header(yuv.header_for(w, h))
+        self.assertEqual((hdr['hstep'], hdr['vstep']), (65536, 65536))
+        frame = ref.render_frame(y, u, v, hdr)
+        for d, x in ((0, 0), (0, 639), (240, 320), (479, 100), (17, 5)):
+            yy, uu, vv = y[d * w + x], u[(d // 2) * 320 + x // 2], v[(d // 2) * 320 + x // 2]
+            # with a 1:1 mapping luma is exact; chroma is interpolated half a sample, so allow its small difference
+            r, g, b = frame[d][x]
+            er, eg, eb = ref.colour(yy, uu, vv, 0)
+            self.assertLessEqual(max(abs(r - er), abs(g - eg), abs(b - eb)), 4)
+
+    def test_model_black_bars_white_black_and_primaries(self):
+        yuv, ref = self.yuv, self.ref
+        w, h = 640, 360
+        y, u, v = ref.planes_from_function(w, h, lambda i, j: (235, 128, 128) if i < 320 else (16, 128, 128))
+        frame = ref.render_frame(y, u, v, yuv.parse_header(yuv.header_for(w, h)))
+        self.assertEqual(frame[0][100], (0, 0, 0))                          # inside the top letterbox bar
+        self.assertEqual(frame[479][100], (0, 0, 0))
+        self.assertEqual(frame[240][10], (255, 255, 255))                   # limited-range white
+        self.assertEqual(frame[240][630], (0, 0, 0))                        # limited-range black
+        self.assertEqual(ref.colour(81, 90, 240, 0)[0] > 200, True)         # the red bar is red
+        r, g, b = ref.colour(145, 54, 34, 0)
+        self.assertGreater(g, r)                                           # the green bar is green
+        self.assertEqual(ref.colour(255, 128, 128, yuv.FLAG_FULL_RANGE), (255, 255, 255))
+
+    def test_model_upscaling_interpolates_and_stays_in_range(self):
+        yuv, ref = self.yuv, self.ref
+        w, h = 480, 360                                                      # 4:3 magnified 1.333x
+        y, u, v = ref.planes_from_function(w, h, lambda i, j: (16 + (i * 219) // w, 128, 128))
+        frame = ref.render_frame(y, u, v, yuv.parse_header(yuv.header_for(w, h)))
+        row = [px[0] for px in frame[240]]
+        self.assertEqual(row, sorted(row))                                   # a ramp stays monotonic
+        self.assertGreater(len(set(row)), 200)                               # and uses many levels, with no banding
+
+    def test_model_dither_gives_six_bit_values(self):
+        yuv, ref = self.yuv, self.ref
+        w, h = 480, 360
+        y, u, v = ref.planes_from_function(w, h, lambda i, j: (16 + (i * 219) // w, 128, 128))
+        hdr = yuv.parse_header(yuv.header_for(w, h, flags=yuv.FLAG_DITHER))
+        frame = ref.render_frame(y, u, v, hdr)
+        self.assertTrue(all(c % 4 == 0 for px in frame[240] for c in px))
+
+
 if __name__ == '__main__':
     unittest.main()

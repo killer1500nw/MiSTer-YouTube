@@ -1,0 +1,107 @@
+"""The v0.15 core's YUV record format: header, slot layout and picture geometry.
+
+See docs/FPGA-YUV-v0.15.md. The ARM decodes to planar YUV 4:2:0 at (almost) the video's own size and the core scales
+it to the CRT, so everything here is arithmetic on sizes; no pixels are touched on the MiSTer.
+"""
+import struct
+
+MAGIC = 0x35565559                 # "YUV5"
+HEADER_BYTES = 64
+Y_OFF, U_OFF, V_OFF, AUDIO_OFF = 0x00100, 0x4C000, 0x60000, 0x74000
+SLOT_BYTES = 0x80000
+SLOT_BASE = 0x1000                 # first slot, after the mailbox words
+SLOTS = 8
+MAX_W, MAX_H = 640, 480            # largest source picture the line buffers hold
+FRAME_W, FRAME_H = 640, 480        # the CRT frame the picture is scaled into (240 lines per field in 480i)
+AUDIO_BYTES = 6400
+MAP_BYTES = SLOT_BASE + SLOTS * SLOT_BYTES          # the mailbox mapping grows to cover all slots
+
+FLAG_601, FLAG_FULL_RANGE, FLAG_DITHER = 1, 2, 4
+
+
+def slot_offset(number):
+    return SLOT_BASE + (number % SLOTS) * SLOT_BYTES
+
+
+def pack_header(src_w, src_h, ystride, cstride, dx0, dw, dy0, dh, hstep, vstep, sx0, sy0, flags=0):
+    """64-byte slot header. hstep/vstep/sx0/sy0 are unsigned 16.16 fixed point."""
+    for name, v, hi in (('src_w', src_w, MAX_W), ('src_h', src_h, MAX_H)):
+        if not 2 <= v <= hi or v % 2:
+            raise ValueError('%s %d is outside 2..%d or odd' % (name, v, hi))
+    if ystride % 8 or cstride % 8 or ystride < src_w or cstride < src_w // 2:
+        raise ValueError('bad strides')
+    if dx0 < 0 or dy0 < 0 or dw < 1 or dh < 1 or dx0 + dw > FRAME_W or dy0 + dh > FRAME_H:
+        raise ValueError('destination rectangle outside the frame')
+    words = [MAGIC | (flags << 32),
+             src_w | (src_h << 16) | (ystride << 32) | (cstride << 48),
+             dx0 | (dw << 16) | (dy0 << 32) | (dh << 48),
+             hstep | (vstep << 32),
+             sx0 | (sy0 << 32), 0, 0, 0]
+    return struct.pack('<8Q', *words)
+
+
+def parse_header(data):
+    w = struct.unpack('<8Q', bytes(data[:HEADER_BYTES]))
+    if w[0] & 0xFFFFFFFF != MAGIC:
+        raise ValueError('not a YUV5 header')
+    return {'flags': (w[0] >> 32) & 7, 'src_w': w[1] & 0xFFFF, 'src_h': (w[1] >> 16) & 0xFFFF,
+            'ystride': (w[1] >> 32) & 0xFFFF, 'cstride': (w[1] >> 48) & 0xFFFF,
+            'dx0': w[2] & 0xFFFF, 'dw': (w[2] >> 16) & 0xFFFF, 'dy0': (w[2] >> 32) & 0xFFFF, 'dh': (w[2] >> 48) & 0xFFFF,
+            'hstep': w[3] & 0xFFFFFFFF, 'vstep': (w[3] >> 32) & 0xFFFFFFFF,
+            'sx0': w[4] & 0xFFFFFFFF, 'sy0': (w[4] >> 32) & 0xFFFFFFFF}
+
+
+def aligned_size(width, height):
+    """The size ffmpeg should hand over: even height, width a multiple of 16 (so every row starts on a 64-bit boundary)."""
+    return max(16, width - width % 16), max(2, height - height % 2)
+
+
+def layout(src_w, src_h, crop='Off', interlaced=True):
+    """Where and how the core draws a src_w x src_h picture: -> dict with the header geometry fields.
+
+    crop 'Off' shows the whole picture inside the 4:3 frame (black bars where the aspect differs), '14:9' trims the sides
+    of wider pictures to 14:9, 'Fill' trims them to 4:3 so they fill the screen (same meaning as the old ffmpeg crop).
+    `prescale` is the (w, h) ffmpeg must shrink the picture to first when the core could not step through it fast
+    enough (more than 2 source rows per line in 480i, 1 in 240p); None when no pre-scaling is needed."""
+    cw = float(src_w)
+    if crop == '14:9':
+        cw = min(cw, src_h * 14 / 9.0)
+    elif crop == 'Fill':
+        cw = min(cw, src_h * 4 / 3.0)
+    cx = (src_w - cw) / 2.0
+    aspect = cw / src_h
+    if aspect >= FRAME_W / float(FRAME_H):
+        dw = FRAME_W
+        dh = int(round(FRAME_W / aspect)) & ~1
+    else:
+        dh = FRAME_H
+        dw = int(round(FRAME_H * aspect)) & ~1
+    dh, dw = max(2, min(dh, FRAME_H)), max(2, min(dw, FRAME_W))
+    dx0, dy0 = (FRAME_W - dw) // 2, ((FRAME_H - dh) // 2) & ~1
+    hstep, vstep = cw / dw, src_h / float(dh)
+    sx0 = max(0.0, cx + 0.5 * hstep - 0.5)
+    sy0 = max(0.0, 0.5 * vstep - 0.5)
+    limit = 2.0 if interlaced else 1.0
+    prescale = None
+    if vstep > limit:
+        ph = int(dh * limit) & ~1
+        prescale = (max(16, int(round(src_w * ph / float(src_h))) & ~15), ph)
+    return {'dx0': dx0, 'dw': dw, 'dy0': dy0, 'dh': dh,
+            'hstep': int(round(hstep * 65536)), 'vstep': int(round(vstep * 65536)),
+            'sx0': int(round(sx0 * 65536)), 'sy0': int(round(sy0 * 65536)), 'prescale': prescale}
+
+
+def header_for(src_w, src_h, crop='Off', interlaced=True, flags=0):
+    """Header for a frame of src_w x src_h samples (already aligned with aligned_size)."""
+    g = layout(src_w, src_h, crop, interlaced)
+    return pack_header(src_w, src_h, src_w, src_w // 2, g['dx0'], g['dw'], g['dy0'], g['dh'],
+                       g['hstep'], g['vstep'], g['sx0'], g['sy0'], flags)
+
+
+def pieces(header, y, u, v, audio, number):
+    """The four (slot offset, bytes) writes of one record. Y follows the header directly."""
+    base = slot_offset(number)
+    if len(audio) != AUDIO_BYTES:
+        raise ValueError('audio must be %d bytes' % AUDIO_BYTES)
+    return [(base, header + bytes(Y_OFF - HEADER_BYTES) + bytes(y)),
+            (base + U_OFF, bytes(u)), (base + V_OFF, bytes(v)), (base + AUDIO_OFF, bytes(audio))]
