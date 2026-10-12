@@ -456,8 +456,8 @@ class App:
         lines.append('Scale+colour: %d%% of the time' % round(share * 100))
         lines.append('Copy 160 KB: %.1f ms (max %.1f)' % (copy_avg, copy_max))
         if fast:
-            best = min(fast.items(), key=lambda kv: kv[1][0])
-            lines.append('Bulk copy: %.1f ms (%s%s)' % (best[1][0], best[0], '' if best[1][2] else ' BAD DATA'))
+            method, (bulk_ms, _, intact) = min(fast.items(), key=lambda kv: kv[1][0])
+            lines.append('Bulk copy: %.1f ms (%s%s)' % (bulk_ms, method, '' if intact else ' BAD DATA'))
         else:
             lines.append('Bulk copy: not possible')
         lines.append('Test: %s, %d kbps, %d fps' % (media.label, round(media.tbr), round(v.get('fps') or 30)))

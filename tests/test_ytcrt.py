@@ -1043,6 +1043,7 @@ class SpeedTest(unittest.TestCase):
         rt = type('Rt', (), {'ffmpeg': Path(tmp) / 'nope', 'resolver': Path(tmp) / 'nope', 'missing': lambda self: []})()
         a = appmod.App(core_link.FakeLink(), st, offline_feeds(tmp + '/cache'), rt,
                        inputs.Input(evdev=False, tty=False), lambda m: None)
+        a.link.measure_fast_copy = lambda n=12: {'memmove': (1.2, 2.0, True), 'slice': (3.0, 4.0, True)}   # a MiSTer's answer
         uc = 'UC' + 'e' * 22
         a.feeds.channels[uc] = {'name': 'C', 'at': time.time(), 'ok': True, 'videos': [
             {'id': 'live' + 'a' * 7, 'title': 'LIVE', 'channel': 'C', 'published': 3, 'short': False},
@@ -1077,6 +1078,7 @@ class SpeedTest(unittest.TestCase):
         self.assertEqual(tried[-1], 'M7kB0lis3xg')                     # fell through to the known good clip
         self.assertEqual(len([t for t in tried if t.startswith('live')]), 2)
         self.assertEqual(a.screen.title, 'Speed test')                  # success, not "Speed test failed"
+        self.assertIn('Bulk copy: 1.2 ms (memmove)', a.screen.lines)    # the copy measurements are shown
         self.assertEqual(st.settings['speed_big'], 'Fastest')
         self.assertEqual(st.settings['cal']['cost'], round(1 / 0.9, 4))
 
