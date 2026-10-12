@@ -112,6 +112,10 @@ channel's newest uploads instead. Videos loaded that way, and playlist videos, s
 To import your real subscriptions, export them with Google Takeout (YouTube → subscriptions), then on a PC:
 `python tools/import_subscriptions.py subscriptions.csv > subscriptions.txt`.
 
+## Search
+
+Home → **Search** (the first entry). Type what to look for with the on-screen keyboard (the space key works here) or a real keyboard, then Start / OK. The results are an ordinary video list: A plays, Y saves to Watch Later, and **Load more videos...** at the end fetches the next 20 (up to 200). A search is one yt-dlp run, so expect roughly 15 to 35 seconds on the MiSTer; B cancels. Starting a video from the results works like any other video, including the slow security check for some of them. Searches are not saved.
+
 ## More than the first page
 
 A channel opens with its newest ~15 videos (all YouTube's RSS feed offers) and a playlist with its first 50. At the end

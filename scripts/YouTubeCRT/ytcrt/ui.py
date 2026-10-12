@@ -159,8 +159,9 @@ class TextInput(Screen):
     KW, KH, X0, Y0 = 28, 20, 20, 76
     MAX = 200
 
-    def __init__(self, title, prompt, on_submit, initial=''):
+    def __init__(self, title, prompt, on_submit, initial='', spaces=False):
         self.title, self.prompt, self.on_submit = title, prompt, on_submit
+        self.spaces = spaces                          # the space key types a space (searches); links and handles have none
         self.text, self.error = initial, ''
         self.row, self.col = 1, 0
         self.shift = False
@@ -188,7 +189,7 @@ class TextInput(Screen):
                 self.submit(app)
         else:
             ch = self.ROWS[self.row][self.col]
-            if ch != ' ' and len(self.text) < self.MAX:
+            if (ch != ' ' or self.spaces) and len(self.text) < self.MAX:
                 self.text += self._char(ch)
         self.error = ''
 
@@ -564,7 +565,7 @@ class Home(ListScreen):
     detail = False
     visible = 7
 
-    ENTRIES = ('Subscriptions', 'Channels', 'Playlists', 'My Videos', 'Watch Later', 'History', 'Play URL / ID',
+    ENTRIES = ('Search', 'Subscriptions', 'Channels', 'Playlists', 'My Videos', 'Watch Later', 'History', 'Play URL / ID',
                'Add Channel via @handle', 'Add to Lists', 'Settings')
 
     def items(self, app):

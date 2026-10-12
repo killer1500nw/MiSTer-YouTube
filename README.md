@@ -13,6 +13,7 @@ This is stated up front because it is a fair thing for anyone evaluating the cod
 
 ## What it does
 
+- **Search** YouTube from the menu (type with the on-screen keyboard), with paging through the results.
 - **Subscriptions**: the newest videos of all your channels together; **Channels**: one channel at a time.
 - **Playlists**, **My Videos** (single videos you list), **Watch Later**, **History** with **resume**.
 - **Play URL / ID**, **Add Channel via @handle** and **Add to Lists**: type a link or a handle on an on-screen keyboard or a real keyboard.

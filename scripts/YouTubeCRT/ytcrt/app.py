@@ -213,7 +213,9 @@ class App:
     def open_home_entry(self, name):
         st = self.store
         shorts = lambda a: a.store.settings['shorts'] == 'On'
-        if name == 'Subscriptions':
+        if name == 'Search':
+            self.push(ui.TextInput('Search', 'Search YouTube for...', self._search_typed, spaces=True))
+        elif name == 'Subscriptions':
             self.push(ui.VideoList('Subscriptions', lambda a: a.feeds.feed(a.store.subscriptions(), shorts(a)),
                                    empty=lambda a: a.no_subscriptions_text() if not a.store.subscriptions()
                                    else ['Fetching videos...' if a.feeds_busy() else 'No videos found.'],
@@ -256,6 +258,72 @@ class App:
         self.log('Typed video id ' + vid)
         self.start_video({'id': vid, 'title': '', 'channel': '', 'typed': True})
         return None
+
+    # search -----------------------------------------------------------
+    SEARCH_PAGE = 20
+    SEARCH_MAX = 200
+
+    def _search_typed(self, app, text):
+        """TextInput callback: search YouTube. Returns an error message to show, or None when handled."""
+        query = ' '.join(text.split())
+        if len(query) < 2:
+            return 'Type something to search for.'
+        self.pop()
+        self.start_search(query)
+        return None
+
+    def start_search(self, query):
+        self.feeds.hold.set()                                    # the ARM is the search's until it is done
+        pipeline.pause_background()
+        started = time.monotonic()
+        try:
+            res, err = self.run_job(
+                'Searching',
+                lambda: [ui.clip(query, 33), 'Asking YouTube... %ds' % (time.monotonic() - started),
+                         'This can take a minute. Please be patient.'],
+                lambda check: pipeline.search_entries(self.rt, query, check, self.log, limit=self.SEARCH_PAGE))
+        finally:
+            self.feeds.hold.clear()
+            pipeline.resume_background()
+        if err:
+            if str(err) != 'Cancelled':
+                self.log('Search failed: ' + str(err)[:300])
+                self.push(ui.TextView('Search failed', ['!' + l for l in ui.wrap(str(err), 37, 10)]))
+            return
+        state = {'query': query, 'videos': list(res[1]), 'next': 1 + getattr(res[1], 'raw', len(res[1])),
+                 'more': getattr(res[1], 'raw', len(res[1])) >= self.SEARCH_PAGE, 'loading': False}
+        self.search = state
+        shorts = lambda a: a.store.settings['shorts'] == 'On'
+        self.push(ui.VideoList('Search: ' + ui.clip(query, 22),
+                               lambda a: [v for v in state['videos'] if shorts(a) or not v.get('short')],
+                               empty=lambda a: ['No results for "%s".' % ui.clip(query, 20)],
+                               more=lambda a: self.search_more(state),
+                               can_more=lambda a: state['more'] and len(state['videos']) < self.SEARCH_MAX,
+                               loading=lambda a: state['loading']))
+
+    def search_more(self, state):
+        """"Load more videos": the next page of this search, in the background (frozen while a video plays)."""
+        if state['loading']:
+            return
+        state['loading'] = True
+        self.toast('Loading more results...')
+
+        def run():
+            try:
+                self.feeds.wait_turn()
+                _, vids = pipeline.search_entries(self.rt, state['query'], lambda: None, self.log,
+                                                  limit=self.SEARCH_PAGE, start=state['next'])
+                raw = getattr(vids, 'raw', len(vids))
+                seen = {v['id'] for v in state['videos']}
+                state['videos'].extend(v for v in vids if v['id'] not in seen)
+                state['next'] += raw
+                state['more'] = raw >= self.SEARCH_PAGE
+            except Exception as exc:
+                self.log('Search: could not load more: ' + str(exc)[:200])
+            finally:
+                state['loading'] = False
+                self.dirty = True
+        threading.Thread(target=run, daemon=True).start()
 
     def confirm_remove_channel(self, row_id, name):
         """Y on Channels: the file may list the channel by @handle or by ID; remove whichever line(s) name it."""

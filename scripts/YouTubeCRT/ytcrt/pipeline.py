@@ -221,6 +221,11 @@ def playlist_entries(rt, playlist_id, cancel=lambda: None, log=lambda m: None, l
            '--force-ipv4', '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
            '--print', PRINT_PLAYLIST, '--', 'https://www.youtube.com/playlist?list=' + playlist_id]
     out = capture(niced(cmd), env, cancel, timeout=180, background=True).decode('utf-8', 'replace')
+    return _parse_flat(out)
+
+
+def _parse_flat(out):
+    """yt-dlp --flat-playlist --print output -> (title, Page of video dicts)."""
     title, videos = '', Page()
     for line in out.splitlines():
         line = line.strip()
@@ -235,6 +240,24 @@ def playlist_entries(rt, playlist_id, cancel=lambda: None, log=lambda m: None, l
                        'published': 0, 'approx': True, 'short': '/shorts/' in str(e.get('url', '')),
                        'views': int(e.get('view_count') or 0)})
     return title, videos
+
+
+def search_entries(rt, query, cancel=lambda: None, log=lambda m: None, limit=20, start=1):
+    """Search YouTube: `limit` results from result number `start`, via yt-dlp (listing only, nothing is resolved).
+    -> ('', Page of video dicts); Page.raw counts every result YouTube sent."""
+    query = re.sub(r'[\x00-\x1f]', ' ', str(query)).strip()[:120]
+    if not query:
+        raise ValueError('Nothing to search for.')
+    env = os.environ.copy()
+    env.update(SSL_CERT_FILE=str(rt.ca), REQUESTS_CA_BUNDLE=str(rt.ca), CURL_CA_BUNDLE=str(rt.ca))
+    end = start + limit - 1
+    cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist', '--force-ipv4',
+           '--playlist-start', str(start), '--playlist-end', str(end),
+           '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
+           '--print', PRINT_PLAYLIST, '--', 'ytsearch%d:%s' % (end, query)]
+    log('Searching YouTube for "%s" (results %d-%d)' % (query[:40], start, end))
+    out = capture(cmd, env, cancel, timeout=180).decode('utf-8', 'replace')
+    return _parse_flat(out)
 
 
 def _source(fmt, info):

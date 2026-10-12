@@ -1409,5 +1409,100 @@ class RemoveEntries(unittest.TestCase):
         self.assertEqual(st.subscriptions(), [])
 
 
+class SearchTests(unittest.TestCase):
+    def make_app(self):
+        a, st = ListsInTheGui.make_app(self)
+        a.rt.resolver, a.rt.ca = Path('yt-dlp'), Path('ca')
+        return a, st
+
+    def page(self, start, n, total=45):
+        rows = pipeline.Page(vid(i, title='Result %d' % i) for i in range(start - 1, min(total, start - 1 + n)))
+        rows.raw = len(rows)
+        return rows
+
+    def test_search_is_first_on_home_and_the_keyboard_types_spaces(self):
+        self.assertEqual(ui.Home.ENTRIES[0], 'Search')
+        a, st = self.make_app()
+        a.open_home_entry('Search')
+        s = a.screen
+        for ch in 'power':
+            s.handle(a, 'ch:' + ch)
+        s.row, s.col = 4, 9                                          # the space key
+        s.handle(a, 'ok')
+        self.assertEqual(s.text, 'power ')
+        a.open_home_entry('Add to Lists')                            # elsewhere the space key still types nothing
+        t = a.screen
+        t.row, t.col = 4, 9
+        t.handle(a, 'ok')
+        self.assertEqual(t.text, '')
+
+    def test_results_list_and_load_more(self):
+        a, st = self.make_app()
+        calls = []
+
+        def fake(rt, query, cancel=lambda: None, log=lambda m: None, limit=20, start=1):
+            calls.append((query, start, limit))
+            return '', self.page(start, limit)
+        saved = pipeline.search_entries
+        pipeline.search_entries = fake
+        try:
+            self.assertEqual(a._search_typed(a, 'x'), 'Type something to search for.')      # too short: stays on the screen
+            a.open_home_entry('Search')
+            a.screen.text = '  power   rangers '
+            a.screen.handle(a, 'submit')
+            self.assertEqual(calls[0], ('power rangers', 1, 20))                             # spaces tidied
+            lst = a.screen
+            self.assertIsInstance(lst, ui.VideoList)
+            rows = lst.items(a)
+            self.assertEqual(len(rows), 21)                                                  # 20 results + the "Load more" row
+            self.assertEqual(lst.label(a, rows[-1]).startswith('Load more'), True)
+            lst.activate(a, rows[-1])
+            for _ in range(200):
+                if not a.search['loading']:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(calls[1], ('power rangers', 21, 20))                            # continues after what was sent
+            self.assertEqual(len(a.search['videos']), 40)
+            a.search_more(a.search)
+            for _ in range(200):
+                if not a.search['loading']:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(len(a.search['videos']), 45)                                    # the last, short page
+            self.assertFalse(a.search['more'])
+        finally:
+            pipeline.search_entries = saved
+
+    def test_a_failed_search_says_why(self):
+        a, st = self.make_app()
+
+        def boom(*args, **kw):
+            raise RuntimeError('YouTube resolver failed (1): no network')
+        saved = pipeline.search_entries
+        pipeline.search_entries = boom
+        try:
+            a._search_typed(a, 'anything')
+            self.assertIsInstance(a.screen, ui.TextView)
+            self.assertEqual(a.screen.title, 'Search failed')
+        finally:
+            pipeline.search_entries = saved
+
+    def test_search_command_is_safe_and_windowed(self):
+        rt = type('R', (), {'resolver': Path('yt-dlp'), 'ca': Path('ca')})()
+        seen = []
+        saved = pipeline.capture
+        pipeline.capture = lambda cmd, env, cancel, timeout=300, on_line=None, background=False: (seen.append([str(c) for c in cmd]), b'')[1]
+        try:
+            pipeline.search_entries(rt, '--exec rm -rf /\n evil', start=21, limit=20)
+        finally:
+            pipeline.capture = saved
+        cmd = seen[0]
+        self.assertEqual(cmd[cmd.index('--playlist-start') + 1], '21')
+        self.assertEqual(cmd[cmd.index('--playlist-end') + 1], '40')
+        self.assertEqual(cmd[-2], '--')                                                       # the query can never be an option
+        self.assertTrue(cmd[-1].startswith('ytsearch40:--exec'))
+        self.assertNotIn('\n', cmd[-1])
+
+
 if __name__ == '__main__':
     unittest.main()
