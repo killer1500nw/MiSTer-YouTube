@@ -17,7 +17,7 @@ SEEK_SMALL, SEEK_BIG = 10, 60  # seconds
 SMOOTH_AFTER = 90.0            # seconds of clean playback of a demanding stream before Auto trusts its estimate more
 STARVE_GRACE = 8.0             # seconds after (re)starting before starvation counts
 STARVE_WINDOW = 12.0           # judge starvation over windows of this length
-STARVE_LIMIT = 2.5             # seconds of an empty queue within a window that means 'too slow'
+STARVE_LIMIT = 1.2             # seconds of an empty queue within a window that means 'too slow' (visible glitching starts well below 2.5)
 SEEK_SETTLE = 0.6              # seconds of no seek keys before the seek is actually performed
 OSD_SECONDS = 4.0
 

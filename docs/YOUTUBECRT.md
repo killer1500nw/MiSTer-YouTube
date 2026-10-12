@@ -189,7 +189,7 @@ source **downscaled** to 320×240 is what actually looks cleaner, but it costs t
 
 What the ARM can decode in real time depends on the stream: how many **pixels**, how many **kbps** and how many
 **frames per second**. Auto estimates that load for every stream a video offers and picks the largest picture
-predicted to need at most 87% of the ARM:
+predicted to need at most 80% of the ARM, which leaves room for busy scenes:
 
 * A calm, low-bitrate upload (a 90s sitcom, an old movie) is cheap, so it gets **360p** (or 480×360 for 4:3 shows).
 * Busy footage (game capture, sports) is expensive and stays at **240p**.
@@ -200,7 +200,7 @@ Settings → **Stream quality**:
 
 | Setting | Behaviour |
 | --- | --- |
-| **Auto** (default) | Picks per video by estimated load. If the picture still starves (an empty queue for more than ~2.5 s in 12) it steps down to the next lighter stream from the same spot, without asking YouTube again, and makes the estimate 25% more pessimistic. After 90 s of clean playback of a demanding stream it trusts the estimate 3% more |
+| **Auto** (default) | Picks per video by estimated load. If the picture still starves (an empty queue for more than ~1.2 s in 12) it steps down to the next lighter stream from the same spot, without asking YouTube again, and makes the estimate 25% more pessimistic. After 90 s of clean playback of a demanding stream it trusts the estimate 3% more |
 | **240p / 360p / 480p** | Always the largest stream up to that size, whatever it costs, with no fall-back |
 
 **Speed test** decodes a reference stream with both cheap decoder settings (Fast and Fastest), shows each result in
