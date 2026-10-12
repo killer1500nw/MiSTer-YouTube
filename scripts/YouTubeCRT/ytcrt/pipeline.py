@@ -457,13 +457,14 @@ def decoder_command(rt, profile, source, kind, start_s=0, speed='Normal', limit_
             '-protocol_whitelist', 'http,https,tcp,tls,crypto']
     if source['url'].startswith('https://'):
         args += ['-tls_verify', '1', '-ca_file', str(rt.ca)]
-    if source['url'].startswith(('http://', 'https://')):          # a long video's connection may be dropped midway
+    if kind == 'video' and source['url'].startswith(('http://', 'https://')):   # a dropped video connection: reconnect (audio is reopened instead)
         args += ['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1', '-reconnect_delay_max', '5']
     if source['headers']:
         args += ['-headers', ''.join(k + ': ' + v + '\r\n' for k, v in source['headers'].items())]
     if kind == 'video':
         args += profiles.decode_speed_args(speed)
-    args += ['-probesize', '200000', '-analyzeduration', '500000']      # the mp4 index says all we need: start sooner
+    if kind == 'video':
+        args += ['-probesize', '200000', '-analyzeduration', '500000']      # the mp4 index says all we need: start sooner
     if start_s > 0:
         args += ['-ss', '%.3f' % start_s]
     args += ['-i', source['url']]

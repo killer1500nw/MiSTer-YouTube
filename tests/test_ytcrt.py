@@ -1576,5 +1576,40 @@ class NodeRuntime(unittest.TestCase):
             su.fetch, su.NODE_SHA256, su.node_version = saved
 
 
+class RssBreaker(unittest.TestCase):
+    def test_a_dead_rss_endpoint_is_given_up_on_after_two_channels(self):
+        import urllib.error
+        f = feeds.Feeds(tempfile.mkdtemp())
+        f.log = lambda m: None
+        feeds.RSS_BACKOFF_SAVED = feeds.RSS_BACKOFF
+        feeds.RSS_BACKOFF = 0
+        asked = []
+
+        def dead(url, timeout=15, headers=None):
+            asked.append(url)
+            raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+        f._get = dead
+        f.fallback = lambda cid: [vid(1, channel='C')]
+        try:
+            ids = ['UC' + c * 22 for c in 'abcd']
+            for cid in ids[:2]:
+                f._refresh_one(cid, None, True)
+            tried = len(asked)
+            self.assertEqual(tried, 2 * feeds.RSS_TRIES)                  # the first two channels tried every attempt
+            self.assertGreater(f.rss_down_until, time.time())            # then RSS was declared down
+            for cid in ids[2:]:
+                f._refresh_one(cid, None, True)
+            self.assertEqual(len(asked), tried)                           # the rest went straight to yt-dlp
+            self.assertTrue(all(f.channels[c]['videos'] for c in ids))    # and every channel still got its videos
+            f.rss_down_until = 0                                          # RSS comes back
+            f._get = lambda url, timeout=15, headers=None: (
+                b'<feed xmlns="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015">'
+                b'<title>T</title></feed>')
+            f._refresh_one('UC' + 'e' * 22, None, True)
+            self.assertEqual(f.rss_failed, 0)
+        finally:
+            feeds.RSS_BACKOFF = feeds.RSS_BACKOFF_SAVED
+
+
 if __name__ == '__main__':
     unittest.main()

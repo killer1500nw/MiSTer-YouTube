@@ -19,6 +19,8 @@ TTL = 15 * 60
 MAX_LOADED = 500        # stop offering "Load more" at this many videos in one list
 PAGE = 50               # videos fetched per page of a channel or playlist (yt-dlp, not the 15-video RSS feed)
 RSS_TRIES = 4           # YouTube's RSS endpoint answers 404/500 at random: retry before giving up
+RSS_DOWN_AFTER = 2      # this many channels in a row failing on RSS: treat the endpoint as down
+RSS_DOWN_FOR = 30 * 60  # and do not try it again for this long (seconds)
 RSS_BACKOFF = 1.0       # seconds; waits 1 s, 2 s, 3 s between tries
 UA = 'Mozilla/5.0 (X11; Linux armv7l) YouTubeCRT/1.0'
 THUMB_W, THUMB_H = 80, 45
@@ -89,6 +91,8 @@ class Feeds:
         self.titles = self._load('titles.json', {})         # video id -> {'title', 'channel'} (+ 'err')
         self.fallback = None   # callable(channel_id) -> [video dicts]: used when RSS keeps failing
         self.fallback_lock = threading.Lock()   # one heavy yt-dlp at a time
+        self.rss_failed = 0                     # channels in a row whose RSS feed failed completely
+        self.rss_down_until = 0.0               # while set, RSS is not even tried: YouTube's feed endpoint is down
         self.hold = threading.Event()           # set while a video is starting or playing: background jobs wait their turn
         disk = self._load('feeds.json', {})
         for cid, e in disk.items():
@@ -195,11 +199,15 @@ class Feeds:
             return
         self.wait_turn()
         entry, err = None, None
-        for attempt in range(RSS_TRIES):
+        rss_down = time.time() < self.rss_down_until
+        if rss_down:
+            err = RuntimeError('RSS is down')
+        for attempt in range(0 if rss_down else RSS_TRIES):
             try:
                 name, videos = parse_feed(self._get(FEED + cid))
                 entry = {'name': name_override or name, 'videos': videos, 'at': time.time(), 'ok': True}
                 self.status[ref] = 'ok, %d videos' % len(videos)
+                self.rss_failed, self.rss_down_until = 0, 0.0
                 break
             except Exception as exc:
                 err = exc
@@ -208,6 +216,11 @@ class Feeds:
                     time.sleep(RSS_BACKOFF * (attempt + 1))
                     continue
                 break
+        if entry is None and not rss_down:
+            self.rss_failed += 1
+            if self.rss_failed >= RSS_DOWN_AFTER:           # two channels in a row: stop wasting time and CPU on a dead endpoint
+                self.rss_down_until = time.time() + RSS_DOWN_FOR
+                self.log('YouTube\'s RSS feeds are failing for every channel; using yt-dlp instead for %d min' % (RSS_DOWN_FOR // 60))
         if entry is None and self.fallback:
             self.wait_turn()
             self.log('channel %s: RSS failed (%s); asking yt-dlp instead' % (ref, self._why(err)))

@@ -702,7 +702,8 @@ class App:
                     msg = str(exc)
                     if '403' in msg and state['retries'] < 3:      # YouTube sometimes refuses at random: try again
                         state['retries'] += 1
-                        self.log('YouTube refused the stream (403); retry %d of 3' % state['retries'])
+                        self.log('YouTube refused the stream (403); retry %d of 3' % state['retries'] +
+                                 ((': ' + ' | '.join(msg.splitlines())[-200:]) if state['retries'] == 1 else ''))
                         pipe.close(wait=False)
                         time.sleep(0.6)
                         pipe = open_pipe(pos_ms())
