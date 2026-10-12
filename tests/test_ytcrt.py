@@ -878,7 +878,7 @@ class FlakyRss(unittest.TestCase):
         self.f._get = lambda url, **kw: (_ for _ in ()).throw(self.http(500))
         self.f.fallback = lambda cid: (_ for _ in ()).throw(RuntimeError('yt-dlp broke'))
         self.f._refresh_one(self.uc, None, True)
-        self.assertEqual(self.f.status[self.uc], 'YouTube answered HTTP 500')
+        self.assertEqual(self.f.status[self.uc], 'yt-dlp: Yt-dlp broke')          # what really failed last, not the RSS error
         self.assertEqual(self.f.channel_list([(None, self.uc)])[0][2], -1)
 
     def test_a_cached_channel_survives_a_failed_refresh(self):

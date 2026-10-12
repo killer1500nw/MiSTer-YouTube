@@ -123,12 +123,15 @@ def capture(command, env, cancel, timeout=300, on_line=None, background=False):
     chunks = {proc.stdout.fileno(): bytearray(), proc.stderr.fileno(): bytearray()}
     active = list(chunks)
     deadline = time.monotonic() + timeout
+    last = time.monotonic()
     pending = bytearray()
     try:
         while active:
             cancel()
+            tick = time.monotonic()
             if background and PAUSED.is_set():
-                deadline += 0.25                      # frozen time does not count against the job
+                deadline += tick - last               # frozen time does not count against the job (the real time, not a guess)
+            last = tick
             if time.monotonic() > deadline:
                 raise RuntimeError('YouTube URL resolution timed out.')
             ready, _, _ = select.select(active, [], [], 0.2)

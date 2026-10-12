@@ -233,6 +233,7 @@ class Feeds:
                     self.status[ref] = 'ok, %d videos (no dates)' % len(videos)
             except Exception as exc:
                 self.log('channel %s: yt-dlp fallback failed: %s' % (ref, str(exc)[:100]))
+                err = RuntimeError('yt-dlp: ' + self._clean(exc))        # say what really failed, not the RSS 404
         if entry is None:
             self.status[ref] = self._why(err)
             self.log('channel %s (%s): feed failed: %s' % (ref, cid, self.status[ref]))
