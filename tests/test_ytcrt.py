@@ -1081,6 +1081,8 @@ class SpeedTest(unittest.TestCase):
         self.assertIn('Bulk copy: 1.2 ms (memmove)', a.screen.lines)    # the copy measurements are shown
         self.assertEqual(st.settings['speed_big'], 'Fastest')
         self.assertEqual(st.settings['cal']['cost'], round(1 / 0.9, 4))
+        self.assertEqual(st.settings['speed_clip'], 'EafWURqb2vc')       # the clip used (the fixture's id): the next test reuses it
+        self.assertFalse(a.feeds.hold.is_set())                          # and background work is released again
 
     def test_when_nothing_works_it_says_so(self):
         def resolver(vid, info, fm, prof, quality):

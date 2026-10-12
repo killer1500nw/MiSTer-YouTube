@@ -203,7 +203,7 @@ Settings → **Stream quality**:
 | **Auto** (default) | Picks per video by estimated load. If the picture still starves (an empty queue for more than ~1.2 s in 12) it steps down to the next lighter stream from the same spot, without asking YouTube again, and makes the estimate 25% more pessimistic. After 90 s of clean playback of a demanding stream it trusts the estimate 3% more |
 | **240p / 360p / 480p** | Always the largest stream up to that size, whatever it costs, with no fall-back |
 
-**Speed test** decodes a reference stream with both cheap decoder settings (Fast and Fastest), shows each result in
+**Speed test** (background lookups are paused while it runs, and it reuses the video of the previous test so results are comparable) decodes a reference stream with both cheap decoder settings (Fast and Fastest), shows each result in
 "x real time", and calibrates the estimate to *your* MiSTer. It also records which decoder setting larger pictures use.
 It then runs the best setting once more with only the decoder (no scaling, no RGB565 colour conversion) and reports *Scale+colour: N% of the time*: the share of the ARM's time that scaling and colour conversion take. That is the part a future FPGA scaler could take over.
 The playback bar shows the size in use (`240p`, `360p`...) next to the time, and `YouTube-crt-log.txt` records every

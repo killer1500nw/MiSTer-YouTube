@@ -21,6 +21,7 @@ SETTINGS_DEFAULTS = {
     'thumbnails': 'On',
     'quality': 'Auto',         # Auto | 240p | 360p | 480p: Auto picks the best stream the ARM can decode in time
     'cal': dict(profiles.CAL_DEFAULT),   # measured by the Speed test: cost of one reference stream on this MiSTer
+    'speed_clip': '',          # the video the last Speed test used: reused so repeated tests are comparable
     'cost_mult': 1.0,          # learned: grows when a stream starved, shrinks slowly while streams play cleanly
     'speed_big': 'Fast',       # decoder setting used for larger streams (learned by the Speed test)
     'crop': 'Off',             # Off | 14:9 | Fill : starting crop for each video (More > Crop changes it live)

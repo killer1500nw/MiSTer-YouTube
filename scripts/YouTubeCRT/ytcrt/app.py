@@ -415,13 +415,24 @@ class App:
         return False
 
     def run_benchmark(self):
+        """The Speed test. Background lookups are frozen meanwhile: they would steal the ARM and spoil the numbers."""
+        self.feeds.hold.set()
+        pipeline.pause_background()
+        try:
+            self._run_benchmark()
+        finally:
+            self.feeds.hold.clear()
+            pipeline.resume_background()
+
+    def _run_benchmark(self):
         """Measure decoding on this MiSTer with both cheap decoder settings and calibrate the Auto cost model."""
         if self.missing_tools():
             return
         prof = self.profile()
         # Test clips: your newest videos first (a realistic load), then a known good one. Livestreams and
         # other videos that cannot be decoded are skipped instead of failing the whole test.
-        candidates = [v['id'] for v in self.feeds.feed(self.store.subscriptions(), False, 3)] + [TEST_CLIP]
+        again = self.store.settings.get('speed_clip')
+        candidates = ([again] if again else []) + [v['id'] for v in self.feeds.feed(self.store.subscriptions(), False, 3)] + [TEST_CLIP]
         candidates = list(dict.fromkeys(candidates))
 
         def work(check):
@@ -464,6 +475,7 @@ class App:
         self.store.set('cal', {'px': v['width'] * v['height'], 'tbr': float(v.get('tbr') or 300),
                                'fps': float(v.get('fps') or 30), 'cost': round(1.0 / best, 4)})
         self.store.set('speed_big', best_speed)
+        self.store.set('speed_clip', media.id)
         self.store.set('cost_mult', 1.0)
         self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); copy 160 KB %.1f ms (worst %.1f); bulk copy %s; calibration %s, speed_big=%s' % (
             media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), copy_avg, copy_max, fast, self.store.settings['cal'], best_speed))
