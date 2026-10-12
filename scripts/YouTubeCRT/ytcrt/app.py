@@ -18,6 +18,7 @@ SEEK_SMALL, SEEK_BIG = 10, 60  # seconds
 SMOOTH_AFTER = 90.0            # seconds of clean playback of a demanding stream before Auto trusts its estimate more
 STARVE_GRACE = 8.0             # seconds after (re)starting before starvation counts
 STARVE_WINDOW = 12.0           # judge starvation over windows of this length
+DRY_LIMIT = 4                  # dropouts (the queue running empty) within a window that also mean 'too slow': each one is a gap in the audio
 STARVE_LIMIT = 1.2             # seconds of an empty queue within a window that means 'too slow' (visible glitching starts well below 2.5)
 SEEK_SETTLE = 0.6              # seconds of no seek keys before the seek is actually performed
 OSD_SECONDS = 4.0
@@ -907,20 +908,24 @@ class App:
                 if rs != state.get('restarts', 0):
                     state['restarts'], state['restart_at'] = rs, now
                 settling = (now - state.get('restart_at', -99.0) < 8.0) or bool(dur_ms and pos_ms() > dur_ms - 20000)
-                if (may_fall_back and not state['paused'] and not state['seeking'] and state['pending'] is None
-                        and state['last'] is not None and now - state['opened_at'] > STARVE_GRACE
-                        and link.queued == 0 and not settling):
+                empty = link.queued == 0
+                counting = (may_fall_back and not state['paused'] and not state['seeking'] and state['pending'] is None
+                            and state['last'] is not None and now - state['opened_at'] > STARVE_GRACE and not settling)
+                if counting and empty:
                     state['starved'] += dt
+                    if not state.get('was_empty'):                 # a new dropout: the audio gaps even when the total time is short
+                        state['dry'] = state.get('dry', 0) + 1
+                state['was_empty'] = empty
                 if (may_fall_back and not state['smooth_noted'] and state['starved'] == 0.0
                         and now - state['opened_at'] > SMOOTH_AFTER):
                     state['smooth_noted'] = True
                     self._note_smooth(media)
                 if now - state['win_start'] > STARVE_WINDOW:
-                    if may_fall_back and state['starved'] > STARVE_LIMIT:
-                        self.log('Starved %.1fs of the last %.0fs at %s: stepping down' %
-                                 (state['starved'], now - state['win_start'], media.tier))
+                    if may_fall_back and (state['starved'] > STARVE_LIMIT or state.get('dry', 0) >= DRY_LIMIT):
+                        self.log('Starved %.1fs (%d dropouts) of the last %.0fs at %s: stepping down' %
+                                 (state['starved'], state.get('dry', 0), now - state['win_start'], media.tier))
                         return 'downgrade', pos_ms()
-                    state['starved'], state['win_start'] = 0.0, now
+                    state['starved'], state['dry'], state['win_start'] = 0.0, 0, now
                 if now >= next_save:
                     self.store.record_play(v, pos_ms(), dur_ms, force=False)
                     next_save = now + 10
@@ -989,7 +994,7 @@ class App:
                         state['note'] = ''
                 self._present(rec, v, shown, dur_ms, False, state, prof, False, show_osd, ytarget)
         finally:
-            pipe.close()
+            pipe.close(wait=False)        # kill the decoders at once: a step-down or a stop must not wait for a busy ffmpeg to exit
 
     def _present(self, rec, v, pos, dur, paused, state, prof, silent, osd, target):
         """Publish one decoded picture + PCM to the core, with the playback bar when `osd` (v0.15: as an overlay layer the

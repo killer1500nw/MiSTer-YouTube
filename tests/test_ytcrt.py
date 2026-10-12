@@ -569,6 +569,19 @@ class PlayPolicy(unittest.TestCase):
         self.assertEqual([t for t, _ in self.opened], ['360p'])           # no step down
         self.assertEqual(st.settings['cost_mult'], 1.0)                   # and nothing learned from it
 
+    def test_repeated_short_dropouts_step_down_even_when_the_total_time_is_small(self):
+        st = self.make(cost=0.7)
+        # the queue is empty for 0.1 s out of every 0.3 s: short dropouts, each a gap in the audio
+        flaky = type('Flaky', (core_link.FakeLink,), {'queued': property(lambda s: 0 if (time.monotonic() * 1000) % 300 < 100 else 3)})
+        self.app.link.__class__ = flaky
+        saved = (self.appmod.DRY_LIMIT, self.appmod.STARVE_LIMIT)
+        self.appmod.DRY_LIMIT, self.appmod.STARVE_LIMIT = 2, 50.0       # only the dropout count can trigger it
+        try:
+            self.run_play([FakePipe(), FakePipe()], lambda: len(self.opened) >= 2)
+        finally:
+            self.appmod.DRY_LIMIT, self.appmod.STARVE_LIMIT = saved
+        self.assertEqual([t for t, _ in self.opened], ['360p', '240p'])
+
     def test_clean_playback_trusts_the_estimate_a_little_more(self):
         st = self.make(cost=0.78)                        # 360p@452k predicted ~0.69: allowed, and close to the limit
         self.appmod.SMOOTH_AFTER = 0.5
