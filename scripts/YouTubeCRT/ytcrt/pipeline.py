@@ -160,7 +160,7 @@ def capture(command, env, cancel, timeout=300, on_line=None, background=False):
 # per format, so a full --dump-single-json can exceed 20 MB; listing just these keys per format keeps
 # the output small (about 65 KB for a normal video, 13 KB for a past livestream).
 PRINT_INFO = '%(.{id,title,duration,is_live,live_status,http_headers})j'
-PRINT_FORMATS = '%(formats.:.{format_id,protocol,vcodec,acodec,width,height,fps,tbr,ext,url,http_headers})j'
+PRINT_FORMATS = '%(formats.:.{format_id,protocol,vcodec,acodec,width,height,fps,tbr,ext,url,http_headers,language_preference})j'
 LIVE_MESSAGE = 'This is a live or past livestream; those cannot be played here yet.'
 
 
@@ -303,7 +303,8 @@ def choose_streams(info, formats, profile, quality='Auto', cal=None, mult=1.0, m
     else:
         auds = [f for f in playable if f.get('acodec') not in (None, 'none') and f.get('vcodec') in (None, 'none')]
         if auds:     # AAC in m4a first, and the ~130 kbps "medium" track: light to decode, plenty for this DAC
-            audio = max(auds, key=lambda f: ((f.get('acodec') or '').startswith('mp4a'), f.get('ext') == 'm4a',
+            audio = max(auds, key=lambda f: (f.get('language_preference') or 0,        # the original / default language, not an auto-dub
+                                            (f.get('acodec') or '').startswith('mp4a'), f.get('ext') == 'm4a',
                                             'drc' not in str(f.get('format_id')),      # not the loudness-compressed copy
                                             -abs((f.get('tbr') or 130) - 130)))
     return (_source(video, info), (_source(audio, info) if audio else None),
@@ -346,7 +347,7 @@ def _resolve_file(rt, video_id):
     d = getattr(rt, 'resolve_cache', None)
     if d is None or not re.fullmatch(r'[A-Za-z0-9_-]{11}', str(video_id)):
         return None
-    return Path(d) / (video_id + '.out')
+    return Path(d) / (video_id + '.v2.out')           # v2: the saved details carry the audio language
 
 
 def forget(rt, video_id):

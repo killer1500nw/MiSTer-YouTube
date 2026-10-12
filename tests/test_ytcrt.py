@@ -1343,7 +1343,7 @@ class ResolveCache(unittest.TestCase):
             pipeline.forget(rt, vid)                             # URLs refused: next time is a fresh resolve
             pipeline.resolve(rt, profiles.PROFILE, vid, lambda: None, lambda m: None)
             self.assertEqual(len(calls), 2)
-            os.utime(str(d / (vid + '.out')), (time.time() - 4 * 3600,) * 2)    # too old
+            os.utime(str(d / (vid + '.v2.out')), (time.time() - 4 * 3600,) * 2)    # too old
             pipeline.resolve(rt, profiles.PROFILE, vid, lambda: None, lambda m: None)
             self.assertEqual(len(calls), 3)
         finally:
@@ -1362,6 +1362,22 @@ class FourByThree(unittest.TestCase):
         for q, want in (('240p', '133'), ('360p', '134'), ('480p', '135')):
             v = pipeline.choose_streams(info, fmts, profiles.PROFILE, q)[0]
             self.assertIn('itag=' + want, v['url'], q)
+
+
+class AudioLanguage(unittest.TestCase):
+    def test_the_original_language_is_chosen_not_an_auto_dub(self):
+        info = {'id': 'x', 'title': 't', 'duration': 60}
+        video = {'format_id': '134', 'protocol': 'https', 'vcodec': 'avc1.4d401e', 'acodec': 'none', 'width': 480, 'height': 360,
+                 'fps': 30, 'tbr': 378, 'url': 'https://example.invalid/v?itag=134'}
+
+        def audio(fid, pref):
+            return {'format_id': fid, 'protocol': 'https', 'vcodec': 'none', 'acodec': 'mp4a.40.2', 'ext': 'm4a', 'tbr': 130,
+                    'language_preference': pref, 'url': 'https://example.invalid/a?itag=' + fid}
+        fmts = [video, audio('140-0', -1), audio('140-1', -1), audio('140-7', 10)]      # German first in the list, English is the original
+        a = pipeline.choose_streams(info, fmts, profiles.PROFILE, '360p')[1]
+        self.assertIn('itag=140-7', a['url'])
+        a = pipeline.choose_streams(info, [video, dict(audio('140', None))], profiles.PROFILE, '360p')[1]   # no language data: unchanged
+        self.assertIn('itag=140', a['url'])
 
 
 if __name__ == '__main__':
