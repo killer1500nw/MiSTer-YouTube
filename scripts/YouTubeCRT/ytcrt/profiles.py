@@ -33,7 +33,7 @@ QUALITY_BOX = {'240p': 240, '360p': 360, '480p': 480, 'Auto': 480}      # shorte
 # The Speed test replaces this with a measurement of your own MiSTer.
 CAL_DEFAULT = {'px': 640 * 360, 'tbr': 591.0, 'fps': 30.0, 'cost': 1 / 0.87}
 PIXEL_SHARE = 0.5          # assume half of the decoding cost follows the pixel count and half follows the bitrate
-LIMIT = 0.80              # a stream must be predicted to need at most this much ARM time per second of video (headroom for busy scenes)
+LIMIT = 0.85              # a stream must be predicted to need at most this much ARM time per second of video (headroom for busy scenes)
 BIG_PX = 110000            # above this many pixels (a little more than 426x240) the cheaper decoder settings are used
 
 
