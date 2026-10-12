@@ -712,7 +712,7 @@ class App:
             done = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
             tail = pipeline.safe_text(done.stderr).splitlines()[-14:]
             self.log('Audio probe (exit %s): %s' % (done.returncode, ' | '.join(l.strip()[:110] for l in tail if l.strip())))
-        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        except Exception as exc:                          # a diagnostic must never take playback down with it
             self.log('Audio probe failed: %s' % exc)
 
     def _log_crash_clues(self):
