@@ -1380,5 +1380,34 @@ class AudioLanguage(unittest.TestCase):
         self.assertIn('itag=140', a['url'])
 
 
+nl = chr(10)
+
+
+class RemoveEntries(unittest.TestCase):
+    def make(self, text):
+        d = tempfile.mkdtemp()
+        st = store.Store(d)
+        Path(st.p_subs).write_text(text, encoding='utf-8')
+        return st
+
+    def test_remove_a_typo_and_keep_everything_else(self):
+        st = self.make(nl.join(['# my list', '@GameSAC', 'Jawed | @jawed', 'https://youtu.be/jNQXAC9IVRw', '  # note', '']))
+        self.assertEqual(st.remove_entry('channel', ['@GameSAC']), 1)
+        self.assertEqual(Path(st.p_subs).read_text(), nl.join(['# my list', 'Jawed | @jawed', 'https://youtu.be/jNQXAC9IVRw', '  # note', '']))
+        self.assertEqual(st.remove_entry('channel', ['@GameSAC']), 0)             # already gone
+        self.assertEqual(st.remove_entry('video', ['jNQXAC9IVRw']), 1)            # a video, by id
+        self.assertEqual(st.remove_entry('channel', ['@jawed']), 1)               # a named line
+        self.assertEqual(Path(st.p_subs).read_text(), nl.join(['# my list', '  # note', '']))
+
+    def test_gui_removes_a_channel_listed_by_handle_even_after_it_resolved(self):
+        a, st = ListsInTheGui.make_app(self)
+        st.add_entry('channel', '@GameSAC')
+        a.feeds.handles['@GameSAC'] = 'UC' + 'g' * 22                              # the handle was resolved to an id
+        a.confirm_remove_channel('UC' + 'g' * 22, 'GameSAC')
+        self.assertIsInstance(a.screen, ui.Choice)
+        a.screen.handle(a, 'ok')                                                  # "Remove"
+        self.assertEqual(st.subscriptions(), [])
+
+
 if __name__ == '__main__':
     unittest.main()

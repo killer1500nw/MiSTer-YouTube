@@ -377,11 +377,12 @@ class VideoList(ListScreen):
     """Rows are video dicts. Subclasses supply `videos(app)`."""
 
     def __init__(self, title, source, hints='A:Play  Y:Later  B:Back', empty=None, status=None, refresh=None,
-                 more=None, can_more=None, loading=None):
+                 more=None, can_more=None, loading=None, remove=None):
         super().__init__()
         self.title, self.source, self.hints = title, source, hints
         self._empty, self._status, self.refresh = empty, status, refresh
         self.more, self.can_more, self.loading = more, can_more, loading      # paging: a "Load more" row at the end
+        self.remove = remove                                                  # Y removes the highlighted entry (My Videos)
 
     def items(self, app):
         vids = self.source(app)
@@ -438,6 +439,8 @@ class VideoList(ListScreen):
             bits.append('resume ' + mmss(pos))
         if app.store.in_later(v['id']):
             bits.append('saved')
+        if app.store.is_slow(v['id']):
+            bits.insert(0, 'slow start')                  # needs YouTube's security check
         lines.append('  '.join(bits))
         return {'vid': v['id'], 'title': v.get('title', ''), 'lines': lines}
 
@@ -454,6 +457,9 @@ class VideoList(ListScreen):
             return True
         if v.get('_more'):
             return False
+        if act == 'alt' and self.remove:
+            self.remove(app, v)
+            return True
         if act == 'alt':
             added = app.store.toggle_later(v)
             app.toast('Saved to Watch Later' if added else 'Removed from Watch Later')
@@ -463,7 +469,7 @@ class VideoList(ListScreen):
 
 class ChannelList(ListScreen):
     title = 'Channels'
-    hints = 'A:Open  X:Refresh  B:Back'
+    hints = 'A:Open X:Refresh Y:Remove B:Back'
     detail = False
     visible = 8
 
@@ -498,12 +504,15 @@ class ChannelList(ListScreen):
         if act == 'menu':
             app.refresh_feeds(force=True)
             return True
+        if act == 'alt':
+            app.confirm_remove_channel(ch[0], ch[1])
+            return True
         return False
 
 
 class PlaylistList(ListScreen):
     title = 'Playlists'
-    hints = 'A:Open  X:Refresh  B:Back'
+    hints = 'A:Open X:Refresh Y:Remove B:Back'
     detail = False
     visible = 8
 
@@ -542,6 +551,9 @@ class PlaylistList(ListScreen):
     def extra(self, app, row, act):
         if act == 'menu':
             app.refresh_lists(force=True)
+            return True
+        if act == 'alt':
+            app.confirm_remove('playlist', row[1], [row[0]])
             return True
         return False
 

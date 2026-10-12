@@ -100,6 +100,10 @@ channel's uploads playlist is its channel ID with `UC` swapped for `UU`. A name 
 **In the GUI:** Home → **Add Channel via @handle** (the `@` is already typed; add the handle, for example `@jawed`; the quickest way on a gamepad), or Home → **Add to Lists**, then type or paste a channel, playlist or video link/ID. The player files it in
 the right place for you. (A `watch?v=...&list=PL...` link is filed as the playlist. To add just that video, use its plain `watch?v=` link.) Press **X** (Tab) on Channels, Playlists or My Videos to refresh after editing the file.
 
+**Removing an entry:** highlight it on Channels, Playlists or My Videos and press **Y** (Remove), then confirm. The line is deleted from `subscriptions.txt`; your other lines and comments stay. (Handy for a mistyped handle.)
+
+**Slow videos:** some videos need YouTube's JS security check, which takes minutes on a MiSTer. The Loading screen says so as soon as it sees it, and remembers it: next time the warning shows at once, and the video's details panel says *slow start*. Once a video has loaded, its details are saved for 3 hours, so replays are quick.
+
 A playlist or channel that does not load is listed with a `!`; open it to see why (for example *not found (check the
 spelling)* or *The playlist does not exist*). The same reason is in the log. YouTube's RSS feeds for channels are
 unreliable at times (random 404/500 even for good channels), so the player retries them and then asks yt-dlp for the

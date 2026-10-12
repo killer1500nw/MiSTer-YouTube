@@ -231,8 +231,9 @@ class App:
             self.push(ui.PlaylistList())
         elif name == 'My Videos':
             self.push(ui.VideoList('My Videos', lambda a: a.feeds.listed_videos(a.store.video_list()),
-                                   hints='A:Play  Y:Later  X:Refresh  B:Back', empty=lambda a: a.no_lists_text('video'),
-                                   refresh=lambda a: a.refresh_lists(True)))
+                                   hints='A:Play X:Refresh Y:Remove B:Back', empty=lambda a: a.no_lists_text('video'),
+                                   refresh=lambda a: a.refresh_lists(True),
+                                   remove=lambda a, v: a.confirm_remove('video', v.get('title') or v['id'], [v['id']])))
         elif name == 'Play URL / ID':
             self.push(ui.TextInput('Play URL or ID', 'YouTube video link or 11-character ID', self._play_typed))
         elif name == 'Add Channel via @handle':
@@ -255,6 +256,21 @@ class App:
         self.log('Typed video id ' + vid)
         self.start_video({'id': vid, 'title': '', 'channel': '', 'typed': True})
         return None
+
+    def confirm_remove_channel(self, row_id, name):
+        """Y on Channels: the file may list the channel by @handle or by ID; remove whichever line(s) name it."""
+        refs = [r for _, r in self.store.subscriptions() if r == row_id or self.feeds.handles.get(r) == row_id]
+        self.confirm_remove('channel', name, refs or [row_id])
+
+    def confirm_remove(self, kind, name, refs):
+        self.push(ui.Choice('Remove', 'Remove "%s" from your lists?' % ui.clip(str(name), 26), ['Remove', 'Cancel'],
+                            lambda i: self._remove(kind, name, refs) if i == 0 else None))
+
+    def _remove(self, kind, name, refs):
+        n = self.store.remove_entry(kind, refs)
+        self.log('Removed %s %s (%d line%s)' % (kind, ','.join(refs), n, '' if n == 1 else 's'))
+        self.toast('Removed' if n else 'Not found in the file')
+        self.dirty = True
 
     def _add_handle(self, app, text):
         """TextInput callback for Add Channel: a bare @handle (the @ is optional). Returns an error message, or None."""
@@ -403,20 +419,28 @@ class App:
     def _resolve(self, v, prof, quality):
         """Ask YouTube (via yt-dlp) for the video, showing progress. -> Media, or None if it failed."""
         started, last = time.monotonic(), ['starting yt-dlp']
+        slow = [self.store.is_slow(v['id'])]               # known from an earlier play, or seen during this lookup
         cal, mult = self.calibration()
+
+        def note(text):
+            last[0] = text
+            if re.search(r'UNPLAYABLE|web embedded|Solving JS', text):
+                slow[0] = True
         res, err = self.run_job(
             'Loading',
             lambda: [ui.clip(v.get('title', ''), 33),
                      'Contacting YouTube... %ds' % (time.monotonic() - started), ui.clip(last[0], 33),
-                     ('Security check: can take a few minutes. Please be patient.' if 'Solving JS' in last[0] else
+                     ('This video needs a security check: it can take a few minutes. Please be patient.' if slow[0] else
                       'This can take a minute or two. Please be patient.')],
             lambda check: pipeline.resolve(self.rt, prof, v['id'], check, self.log,
-                                           note=lambda t: last.__setitem__(0, t), quality=quality, cal=cal, mult=mult))
+                                           note=note, quality=quality, cal=cal, mult=mult))
         if err:
             if str(err) != 'Cancelled':
                 self.log('Cannot play: ' + ' | '.join(str(err).splitlines())[:600])
                 self.push(ui.TextView('Cannot play', ['!' + l for l in ui.wrap(str(err), 37, 14)]))
             return None
+        if slow[0] and res is not None:
+            self.store.mark_slow(v['id'])                  # warn about it straight away next time
         return res
 
     def play(self, v, start_ms):
