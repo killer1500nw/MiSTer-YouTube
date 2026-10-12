@@ -151,7 +151,7 @@ refused with a message. A typed video gets its title from YouTube once it starts
 ## Video crop
 
 Most YouTube video is 16:9 but a CRT is 4:3. **Settings → Video crop** sets how each video starts; during
-playback press **X** for the **More** panel and change **Crop** for that video only. With the v0.15 core it takes effect on the very
+playback press **X** for the **More** panel and change **Crop** and **Quality** (Auto, 240p, 360p, 480p) for that video only; a new Quality takes effect about a second after the last press, at the same position, without asking YouTube again. With the v0.15 core it takes effect on the very
 next picture (the FPGA does the crop); with the v0.14 core it restarts the picture at the current position, so allow a few seconds.
 
 | Crop | What you see |

@@ -10,6 +10,7 @@ from .gfx import Canvas, YuvCanvas
 from .store import RESUME_MIN_MS
 
 TEST_CLIP = 'M7kB0lis3xg'
+QUALITY_SETTLE = 1.2        # seconds after the last Quality press in the More panel before the picture restarts
 COPY_BUSY = 3.2            # copying while ffmpeg decodes took about 23 ms against 7 ms on an idle MiSTer (corrected by _learn_copy)
 # The core starts consuming only once 4 records are queued (PROTOCOL.md prefill),
 # so the menu must queue at least 4 or it never appears. ~130 ms of latency.
@@ -54,6 +55,7 @@ class App:
     def __init__(self, link, store, feeds, rt, inputs, log=print):
         self.link, self.store, self.feeds, self.rt, self.inputs, self.log = link, store, feeds, rt, inputs, log
         getattr(link, 'use_copy_method', lambda m: None)(store.settings.get('copy_method'))      # the way the Speed test found fastest
+        self.play_quality = 'Auto'                                    # the quality of the video being played (the More panel can change it)
         self.yuv = getattr(link, 'kind', 'rgb') == 'yuv'              # the v0.15 core: the GUI is an overlay, pictures are YUV
         self.canvas = YuvCanvas(320, 240) if self.yuv else Canvas(320, 240)
         self.stack = []
@@ -560,7 +562,7 @@ class App:
                 try:
                     tgt = pipeline.yuv_target(media, self.link.interlaced) if self.yuv else None    # the pipeline the core really gets
                     runs = [(sp, pipeline.benchmark(self.rt, prof, media, sp, 12, check, target=tgt)) for sp in profiles.SPEEDS]
-                    best_sp, best_x = max(runs, key=lambda r: r[1])
+                    best_sp, best_x = 'Fast', dict(runs)['Fast']      # Auto is sized for Fast: Fastest drops the deblocking filter completely (blocky), so it is never relied on
                     # The same setting again with only the decoder (no scaling, no RGB565 conversion): the difference is the
                     # share of the ARM's time that an FPGA scaler could take over.
                     bare = pipeline.benchmark(self.rt, prof, media, best_sp, 12, check, decode_only=True)
@@ -605,7 +607,7 @@ class App:
         results, media, bare, big, av1 = res
         copy_avg, copy_max = self.link.measure_copy()       # on this thread: nothing else is writing the next slot
         fast = self.link.measure_fast_copy()
-        best_speed, best = max(results, key=lambda r: r[1])
+        best_speed, best = 'Fast', dict(results)['Fast']
         v = media.video
         lines = ['  '.join('%s %.2fx' % (sp, f) for sp, f in results)]
         t_full, t_bare = 1.0 / best, 1.0 / bare
@@ -740,6 +742,7 @@ class App:
             return
         prof, speed = self.profile(), self.store.settings['decode_speed']
         q = self.store.settings.get('quality', 'Auto')
+        self.play_quality = q
         self.log('Play %s "%s" profile=%s quality=%s speed=%s resume=%dms' %
                  (v['id'], v.get('title', '')[:60], prof.key, q, speed, start_ms))
         media = self._resolve(v, prof, q)
@@ -778,6 +781,19 @@ class App:
                     self.toast('Too heavy for %s - using %s' % (media.label, smaller.label))
                     media = smaller
                 continue
+            if outcome == 'quality':                      # the user changed the quality from the More panel
+                q = self.play_quality
+                cal, mult = self.calibration()
+                try:
+                    media = pipeline.media_from(media.catalog[0], media.catalog[1], prof, q, cal, mult, self.log)
+                except (ValueError, TypeError, IndexError):
+                    fresh = self._resolve(v, prof, q)
+                    if fresh is None:
+                        return
+                    media = fresh
+                self.log('Quality set to %s for this video: %s' % (q, media.label))
+                self.toast('Quality: %s (%s)' % (q, media.label))
+                continue
             if outcome == 'refresh':                      # YouTube kept refusing these URLs: ask for fresh ones once
                 refresh_left -= 1
                 self.toast('Refreshing the stream...')
@@ -808,6 +824,7 @@ class App:
                  'osd_until': time.monotonic() + OSD_SECONDS, 'note': '', 'last': None,
                  'pending': None, 'pending_at': 0.0, 'seeking': False,
                  'crop': self.store.settings.get('crop', 'Off'), 'more': None, 'crop_change': False,
+                 'quality': self.play_quality, 'quality_req': None, 'quality_at': 0.0,
                  'opened_at': time.monotonic(), 'starved': 0.0, 'win_start': time.monotonic(),
                  'tick': time.monotonic(), 'tier': media.tier, 'retries': 0, 'smooth_noted': False,
                  'crashes': 0, 'crash_at': 0.0}
@@ -848,15 +865,21 @@ class App:
             if act in ('back', 'menu'):
                 state['more'] = None
             elif act == 'down':
-                m['sel'] = (m['sel'] + 1) % 3
+                m['sel'] = (m['sel'] + 1) % 4
             elif act == 'up':
-                m['sel'] = (m['sel'] - 1) % 3
+                m['sel'] = (m['sel'] - 1) % 4
             elif m['sel'] == 0 and act in ('left', 'right', 'ok'):
                 step = -1 if act == 'left' else 1
                 set_crop(profiles.CROPS[(profiles.CROPS.index(state['crop']) + step) % len(profiles.CROPS)], now)
             elif m['sel'] == 1 and act in ('left', 'right', 'ok'):
+                # Quality for this video only. It applies about a second after the last press (so cycling through the
+                # choices does not restart the picture each time), at the same position.
+                step = -1 if act == 'left' else 1
+                state['quality'] = profiles.QUALITIES[(profiles.QUALITIES.index(state['quality']) + step) % len(profiles.QUALITIES)]
+                state.update(quality_req=state['quality'], quality_at=now, note='Quality: ' + state['quality'])
+            elif m['sel'] == 2 and act in ('left', 'right', 'ok'):
                 state['note'] = 'Saved' if self.store.toggle_later(v) else 'Removed'
-            elif m['sel'] == 2 and act == 'ok':
+            elif m['sel'] == 3 and act == 'ok':
                 state['more'] = None
             state['osd_until'] = now + OSD_SECONDS
             state['pause_pushed'] = False                 # redraw a paused frame so the panel updates
@@ -893,6 +916,12 @@ class App:
                     state.update(more={'sel': 0}, osd_until=now + OSD_SECONDS, pause_pushed=False)
                 elif act:
                     state['osd_until'] = now + OSD_SECONDS
+                if (state['quality_req'] is not None and now - state['quality_at'] > QUALITY_SETTLE
+                        and state['pending'] is None and state['quality_req'] != self.play_quality):
+                    self.play_quality, state['quality_req'] = state['quality_req'], None
+                    return 'quality', pos_ms()
+                if state['quality_req'] == self.play_quality:
+                    state['quality_req'] = None
                 if state['pending'] is not None and now - state['pending_at'] > SEEK_SETTLE:
                     seek_to, state['pending'] = state['pending'], None
                     pipe.close(wait=False)                  # do not wait for the old ffmpeg to exit
@@ -1015,7 +1044,7 @@ class App:
     def _osd_overlay(self, v, pos, dur, paused, state):
         """The overlay buffer holding the playback bar for this moment: drawn again only when what it shows changes."""
         m = state.get('more')
-        sig = (pos // 1000, paused, state['note'], None if m is None else m['sel'], state['crop'], state.get('tier'),
+        sig = (pos // 1000, paused, state['note'], None if m is None else m['sel'], state['crop'], state.get('tier'), state.get('quality'),
                self.store.in_later(v['id']), state.get('flags', 0))
         if sig == self.osd_sig and self.osd_ov is not None:
             return self.osd_ov
@@ -1061,11 +1090,12 @@ class App:
         c.text(x + w - 8 - len(right) * 8, y + 30, right, ui.AMBER if state['note'] else ui.DIM, ui.BLACK)
         m = state.get('more')
         if m is not None:                                   # the More panel, over the picture
-            px, py, pw, ph = 56, 44, 208, 86
+            px, py, pw, ph = 56, 40, 208, 102
             c.rect(px, py, pw, ph, ui.BLACK)
             c.frame(px, py, pw, ph, ui.RED, 2)
             c.text(px + 10, py + 7, 'More', ui.WHITE, ui.BLACK)
             rows = ['Crop: ' + state['crop'],
+                    'Quality: ' + state['quality'],
                     'Watch Later: ' + ('Saved' if self.store.in_later(v['id']) else 'Add'),
                     'Close']
             for i, text in enumerate(rows):
@@ -1073,4 +1103,4 @@ class App:
                 yy = py + 22 + i * 16
                 c.rect(px + 4, yy, pw - 8, 14, bg)
                 c.text(px + 10, yy + 3, text, ui.WHITE if i == m['sel'] else ui.TEXT, bg)
-            c.text(px + 10, py + 74, 'Left/Right   B:Back', ui.DIM, ui.BLACK)
+            c.text(px + 10, py + 90, 'Left/Right   B:Back', ui.DIM, ui.BLACK)

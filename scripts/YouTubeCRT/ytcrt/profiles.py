@@ -97,17 +97,17 @@ def setting_for(stream, cal, mult, speed_x):
     copy costs the same whatever the setting."""
     if not (isinstance(speed_x, dict) and speed_x and cal and cal.get('cost')):
         return None
-    xs = {k: float(v) for k, v in speed_x.items() if k in SPEEDS and v and float(v) > 0}
-    if not xs:
+    xs = {k: float(v) for k, v in speed_x.items() if k in ('Normal', 'Fast') and v and float(v) > 0}
+    if not xs.get('Fast'):
         return None
-    best_x = max(xs.values())
+    best_x = xs['Fast']                              # the calibration describes Fast; Fastest (no deblocking at all) is never chosen automatically
     fps = stream.get('fps') or cal.get('fps') or 30.0
     copy = copy_cost(stream, cal, fps)
     decode = predicted_cost(stream, cal, 1.0) - copy
     for level in SPEEDS:
         if level in xs and (decode * best_x / xs[level] + copy) * mult <= 0.9 * limit_for(cal):
             return level
-    return max(xs, key=xs.get)
+    return 'Fast'
 
 
 def speed_for(px, speed, learned):
@@ -118,6 +118,7 @@ def speed_for(px, speed, learned):
 
 
 CROPS = ('Off', '14:9', 'Fill')
+QUALITIES = ('Auto', '240p', '360p', '480p')
 
 
 def crop_filter(mode):

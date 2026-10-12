@@ -582,6 +582,27 @@ class PlayPolicy(unittest.TestCase):
             self.appmod.DRY_LIMIT, self.appmod.STARVE_LIMIT = saved
         self.assertEqual([t for t, _ in self.opened], ['360p', '240p'])
 
+    def test_quality_can_be_changed_from_the_more_panel_while_playing(self):
+        st = self.make(cost=0.3)
+        saved = self.appmod.QUALITY_SETTLE
+        self.appmod.QUALITY_SETTLE = 0.2
+
+        def drive():
+            time.sleep(1.0)
+            for act in ('menu', 'down', 'right'):                     # X, down to Quality, right: Auto -> 240p
+                self.inp.push(act)
+                time.sleep(0.1)
+        import threading
+        threading.Thread(target=drive, daemon=True).start()
+        try:
+            self.run_play([FakePipe(), FakePipe()], lambda: len(self.opened) >= 2)
+        finally:
+            self.appmod.QUALITY_SETTLE = saved
+        self.assertNotEqual(self.opened[0][0], '240p')                 # Auto chose something bigger first
+        self.assertEqual(self.opened[1][0], '240p')                    # same video, new stream
+        self.assertEqual(len(self.resolved), 1)                        # from the catalogue: no second yt-dlp run
+        self.assertEqual(st.settings['quality'], 'Auto')               # for this video only: the setting is unchanged
+
     def test_clean_playback_trusts_the_estimate_a_little_more(self):
         st = self.make(cost=0.78)                        # 360p@452k predicted ~0.69: allowed, and close to the limit
         self.appmod.SMOOTH_AFTER = 0.5
@@ -1108,8 +1129,8 @@ class SpeedTest(unittest.TestCase):
         self.assertEqual(len([t for t in tried if t.startswith('live')]), 2)
         self.assertEqual(a.screen.title, 'Speed test')                  # success, not "Speed test failed"
         self.assertIn('Bulk copy: 1.2 ms (memmove)', a.screen.lines)    # the copy measurements are shown
-        self.assertEqual(st.settings['speed_big'], 'Fastest')
-        self.assertEqual(st.settings['cal']['cost'], round(1 / 0.9, 4))
+        self.assertEqual(st.settings['speed_big'], 'Fast')                # Auto is sized for Fast: Fastest (no deblocking) is never relied on
+        self.assertEqual(st.settings['cal']['cost'], round(1 / 0.7, 4))
         self.assertEqual(st.settings['speed_clip'], 'EafWURqb2vc')       # the clip used (the fixture's id): the next test reuses it
         self.assertFalse(a.feeds.hold.is_set())                          # and background work is released again
 
@@ -2078,7 +2099,7 @@ class GentlestSetting(unittest.TestCase):
 
     def test_a_heavy_stream_gets_the_faster_settings(self):
         heavy = stream(854, 480, 900)
-        self.assertEqual(profiles.setting_for(heavy, self.CAL, 1.0, self.X), 'Fastest')
+        self.assertEqual(profiles.setting_for(heavy, self.CAL, 1.0, self.X), 'Fast')        # never Fastest on its own
 
     def test_nothing_known_means_no_opinion(self):
         self.assertIsNone(profiles.setting_for(stream(640, 360, 300), self.CAL, 1.0, None))
