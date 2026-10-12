@@ -49,7 +49,8 @@ say "yt-dlp: $YTDLP"
 
 # ---------------------------------------------------------------- 1. download
 TARBALL="$DIR/node.tar.gz"
-if [ ! -x "$DIR/node" ]; then
+if [ ! -x "$DIR/node" ] || [ "$("$DIR/node" --version 2>/dev/null)" != "$NODE_VER" ]; then      # also replaces an older test download
+  rm -f "$DIR/node"
   say ""
   say "--- 1. downloading Node.js $NODE_VER (about 49 MB) ---"
   # The same way the installer downloads yt-dlp: Python with the certificate bundle shipped next to this script
