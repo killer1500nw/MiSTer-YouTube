@@ -445,11 +445,11 @@ class App:
                     self.log('Speed test: skipping %s (%s)' % (vid, exc))
             if media is None:
                 raise RuntimeError('No video in your lists could be used as a test clip.')
-            runs = [(sp, pipeline.benchmark(self.rt, prof, media, sp, 8, check)) for sp in ('Fast', 'Fastest')]
+            runs = [(sp, pipeline.benchmark(self.rt, prof, media, sp, 12, check)) for sp in ('Fast', 'Fastest')]
             best_sp, best_x = max(runs, key=lambda r: r[1])
             # The same setting again with only the decoder (no scaling, no RGB565 conversion): the difference is the
             # share of the ARM's time that an FPGA scaler could take over.
-            bare = pipeline.benchmark(self.rt, prof, media, best_sp, 8, check, decode_only=True)
+            bare = pipeline.benchmark(self.rt, prof, media, best_sp, 12, check, decode_only=True)
             return runs, media, bare
         res, err = self.run_job('Speed test', ['Decoding a test stream (three runs)...', 'B: cancel'], work)
         if err:

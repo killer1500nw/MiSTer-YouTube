@@ -690,11 +690,8 @@ def open_pipeline(rt, profile, media, start_s, speed, cancel, crop='Off'):
                           cancel)
 
 
-def benchmark(rt, profile, media, speed, seconds=10, cancel=lambda: None, decode_only=False):
-    """Decode `seconds` of video into the void; returns achieved/real-time fps.
-
-    >= 1.0x means the ARM keeps up at this profile and speed setting. decode_only skips the scaling and colour
-    conversion, to show how much of the time they take."""
+def _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only):
+    """Wall-clock seconds ffmpeg needs to decode `seconds` of the video into the void."""
     cmd = decoder_command(rt, profile, media.video, 'video', start_s=min(30, max(0, media.duration // 3)),
                           speed=speed, limit_s=seconds, to_null=True, decode_only=decode_only)
     started = time.monotonic()
@@ -711,4 +708,19 @@ def benchmark(rt, profile, media, speed, seconds=10, cancel=lambda: None, decode
             raise RuntimeError('ffmpeg failed: ' + safe_text(proc.stderr.read().decode(errors='replace'))[-120:])
     finally:
         stop_process(proc)
-    return seconds / wall
+    return wall
+
+
+def benchmark(rt, profile, media, speed, seconds=10, cancel=lambda: None, decode_only=False):
+    """How many times faster than real time the ARM decodes this stream (>= 1.0x keeps up).
+
+    ffmpeg needs a few seconds just to start and open the stream, which made short tests read about 25% too slow.
+    Two runs of different lengths cancel that out: the rate is the extra video divided by the extra time.
+    decode_only skips the scaling and colour conversion, to show how much of the time they take."""
+    short = max(3.0, seconds * 0.4)
+    wall_short = _bench_wall(rt, profile, media, speed, short, cancel, decode_only)
+    wall_long = _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only)
+    extra = wall_long - wall_short
+    if extra > 0.25:                                    # a sane difference: use the slope
+        return min(10.0, (seconds - short) / extra)
+    return seconds / wall_long                          # too close to call (e.g. network noise): the plain figure

@@ -1628,5 +1628,18 @@ class DecodeOnlyCommand(unittest.TestCase):
         self.assertEqual(bare[bare.index('-pix_fmt') + 1], 'yuv420p')
 
 
+class BenchmarkSlope(unittest.TestCase):
+    def test_start_up_time_is_cancelled_out(self):
+        saved = pipeline._bench_wall
+        try:
+            # 3 s of start-up overhead plus 1/1.5 s of decoding per video second
+            pipeline._bench_wall = lambda rt, prof, media, speed, seconds, cancel, decode_only: 3.0 + seconds / 1.5
+            self.assertAlmostEqual(pipeline.benchmark(None, None, None, 'Fast', 12), 1.5, places=2)   # the plain figure would be 12/11 = 1.09
+            pipeline._bench_wall = lambda rt, prof, media, speed, seconds, cancel, decode_only: 5.0     # no difference: falls back
+            self.assertAlmostEqual(pipeline.benchmark(None, None, None, 'Fast', 12), 12 / 5.0, places=2)
+        finally:
+            pipeline._bench_wall = saved
+
+
 if __name__ == '__main__':
     unittest.main()
