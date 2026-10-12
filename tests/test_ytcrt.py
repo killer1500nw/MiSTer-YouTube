@@ -2286,5 +2286,23 @@ class CpuLog(unittest.TestCase):
         self.assertIn('idle 10% of all cores', text)
 
 
+class PlaylistCooldown(unittest.TestCase):
+    def test_a_failed_playlist_is_not_retried_straight_away(self):
+        tmp = tempfile.mkdtemp()
+        fd = offline_feeds(tmp + '/cache')
+        calls = []
+
+        def fetch(pid):
+            calls.append(pid)
+            raise RuntimeError('YouTube URL resolution timed out.')
+        fd.playlist_fetch = fetch
+        lists = [('Retro', 'PLabcdefghijklmn')]
+        fd.refresh_lists(lists, []).join(10)
+        fd.refresh_lists(lists, []).join(10)                    # a background refresh soon after: skipped
+        self.assertEqual(len(calls), 1)
+        fd.refresh_lists(lists, [], force=True).join(10)        # X on the Playlists screen: tries again
+        self.assertEqual(len(calls), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

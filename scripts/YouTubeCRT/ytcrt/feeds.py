@@ -17,6 +17,7 @@ NS = {'a': 'http://www.w3.org/2005/Atom', 'yt': 'http://www.youtube.com/xml/sche
 FEED = 'https://www.youtube.com/feeds/videos.xml?channel_id='
 TTL = 15 * 60
 MAX_LOADED = 500        # stop offering "Load more" at this many videos in one list
+FAIL_COOLDOWN = 1800    # seconds before a playlist that failed is tried again in the background
 PAGE = 50               # videos fetched per page of a channel or playlist (yt-dlp, not the 15-video RSS feed)
 RSS_TRIES = 4           # YouTube's RSS endpoint answers 404/500 at random: retry before giving up
 RSS_DOWN_AFTER = 2      # this many channels in a row failing on RSS: treat the endpoint as down
@@ -87,6 +88,7 @@ class Feeds:
         self.generation = 0    # bumped whenever data changes, UI polls it
         self.log = lambda msg: None   # set by the player so problems reach the log file
         self.status = {}       # subscription ref -> 'ok, 15 videos' or the reason it failed
+        self.failed_at = {}          # playlist id -> when its last fetch failed (not retried for FAIL_COOLDOWN unless forced)
         self.playlist_fetch = None   # callable(playlist_id) -> (title, [videos]), set by the player
         self.page_fetch = None       # callable(playlist_id, start, count) -> (title, [videos]): later pages
         self.loading = set()         # ('channel' | 'playlist', id) pages being fetched right now
@@ -385,6 +387,8 @@ class Feeds:
                 if not self.playlist_fetch:
                     self.status[pid] = 'yt-dlp is not installed'
                     continue
+                if not force and time.time() - self.failed_at.get(pid, 0) < FAIL_COOLDOWN:
+                    continue                                     # it failed a moment ago: do not tie up the ARM retrying (X retries)
                 self.wait_turn()
                 try:
                     with self.fallback_lock:
@@ -397,8 +401,10 @@ class Feeds:
                                                'next': getattr(vids, 'raw', len(vids)) + 1}
                         self.generation += 1
                     self.status[pid] = 'ok, %d videos' % len(vids)
+                    self.failed_at.pop(pid, None)
                 except Exception as exc:
                     self.status[pid] = self._clean(exc)
+                    self.failed_at[pid] = time.time()
                     self.log('playlist %s: %s' % (pid, self.status[pid]))
             for name, vid in videos:
                 if vid in self.titles and not force and not self.titles[vid].get('err'):

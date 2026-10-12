@@ -229,11 +229,17 @@ def playlist_entries(rt, playlist_id, cancel=lambda: None, log=lambda m: None, l
     `background=False` for a fetch the user is waiting for: it must not be frozen by pause_background()."""
     env = os.environ.copy()
     env.update(SSL_CERT_FILE=str(rt.ca), REQUESTS_CA_BUNDLE=str(rt.ca), CURL_CA_BUNDLE=str(rt.ca))
-    cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist',
+    cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist', '--verbose',
            '--playlist-start', str(start), '--playlist-end', str(start + limit - 1),
            '--force-ipv4', '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
            '--print', PRINT_PLAYLIST, '--', 'https://www.youtube.com/playlist?list=' + playlist_id]
-    out = capture(niced(cmd), env, cancel, timeout=180, background=background).decode('utf-8', 'replace')
+    shown = [0]
+
+    def note(text):                            # what yt-dlp is doing, for the log: shows where a slow playlist waits
+        if shown[0] < 30 and not text.startswith(('[debug] Command-line', '[debug] Encodings', '[debug] Python')):
+            shown[0] += 1
+            log('yt-dlp playlist %s: %s' % (playlist_id[-6:], text[:140]))
+    out = capture(niced(cmd), env, cancel, timeout=120, on_line=note, background=background).decode('utf-8', 'replace')
     return _parse_flat(out)
 
 
