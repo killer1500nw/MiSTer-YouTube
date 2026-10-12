@@ -464,12 +464,22 @@ class App:
                     self.log('Speed test: skipping %s (%s)' % (vid, exc))
             if media is None:
                 raise RuntimeError('No video in your lists could be used as a test clip.')
-            tgt = pipeline.yuv_target(media, self.link.interlaced) if self.yuv else None    # the pipeline the core really gets
-            runs = [(sp, pipeline.benchmark(self.rt, prof, media, sp, 12, check, target=tgt)) for sp in ('Fast', 'Fastest')]
-            best_sp, best_x = max(runs, key=lambda r: r[1])
-            # The same setting again with only the decoder (no scaling, no RGB565 conversion): the difference is the
-            # share of the ARM's time that an FPGA scaler could take over.
-            bare = pipeline.benchmark(self.rt, prof, media, best_sp, 12, check, decode_only=True)
+            for attempt in range(3):
+                try:
+                    tgt = pipeline.yuv_target(media, self.link.interlaced) if self.yuv else None    # the pipeline the core really gets
+                    runs = [(sp, pipeline.benchmark(self.rt, prof, media, sp, 12, check, target=tgt)) for sp in ('Fast', 'Fastest')]
+                    best_sp, best_x = max(runs, key=lambda r: r[1])
+                    # The same setting again with only the decoder (no scaling, no RGB565 conversion): the difference is the
+                    # share of the ARM's time that an FPGA scaler could take over.
+                    bare = pipeline.benchmark(self.rt, prof, media, best_sp, 12, check, decode_only=True)
+                    break
+                except RuntimeError as exc:
+                    # YouTube sometimes refuses the saved stream URLs (403) on the first try: ask for fresh ones, like playback does.
+                    if attempt == 2 or not re.search(r'403|forbidden|access denied|ffmpeg failed', str(exc), re.I):
+                        raise
+                    self.log('Speed test: the stream was refused (%s); getting fresh stream details' % ' '.join(str(exc).split())[:100])
+                    pipeline.forget(self.rt, media.id)
+                    media = pipeline.resolve(self.rt, prof, media.id, check, self.log, quality='360p')
             # How far the decoder alone gets with the next size up (the core now does the scaling): tells whether a
             # bigger source is worth offering. Optional: a video without a bigger H.264 stream just skips it.
             big = None

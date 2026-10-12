@@ -1040,7 +1040,7 @@ class ListsInTheGui(unittest.TestCase):
 
 
 class SpeedTest(unittest.TestCase):
-    def run_test(self, resolver):
+    def run_test(self, resolver, bench=None):
         import threading
         from ytcrt import app as appmod
         tmp = tempfile.mkdtemp()
@@ -1062,8 +1062,8 @@ class SpeedTest(unittest.TestCase):
             tried.append(vid)
             return resolver(vid, info, fm, prof, quality)
         pipeline.resolve = fake_resolve
-        pipeline.benchmark = lambda rt, prof, media, speed, seconds=10, cancel=None, decode_only=False, target=None: (
-            1.2 if decode_only else {'Fast': 0.7, 'Fastest': 0.9}[speed])
+        pipeline.benchmark = bench or (lambda rt, prof, media, speed, seconds=10, cancel=None, decode_only=False, target=None: (
+            1.2 if decode_only else {'Fast': 0.7, 'Fastest': 0.9}[speed]))
         done = []
         threading.Thread(target=lambda: (a.run_benchmark(), done.append(1)), daemon=True).start()
         end = time.time() + 15
@@ -1088,6 +1088,24 @@ class SpeedTest(unittest.TestCase):
         self.assertEqual(st.settings['cal']['cost'], round(1 / 0.9, 4))
         self.assertEqual(st.settings['speed_clip'], 'EafWURqb2vc')       # the clip used (the fixture's id): the next test reuses it
         self.assertFalse(a.feeds.hold.is_set())                          # and background work is released again
+
+    def test_a_refused_stream_is_retried_with_fresh_details(self):
+        calls = []
+
+        def bench(rt, prof, media, speed, seconds=10, cancel=None, decode_only=False, target=None):
+            calls.append(speed)
+            if len(calls) == 1:
+                raise RuntimeError('ffmpeg failed: Server returned 403 Forbidden (access denied)')
+            return 1.2 if decode_only else {'Fast': 0.7, 'Fastest': 0.9}[speed]
+        forgot = []
+        saved = pipeline.forget
+        pipeline.forget = lambda rt, vid: forgot.append(vid)
+        try:
+            a, st, tried = self.run_test(lambda vid, info, fm, prof, quality: pipeline.media_from(info, fm, prof, quality), bench)
+        finally:
+            pipeline.forget = saved
+        self.assertEqual(a.screen.title, 'Speed test')                  # it recovered instead of failing
+        self.assertEqual(forgot, ['EafWURqb2vc'])
 
     def test_when_nothing_works_it_says_so(self):
         def resolver(vid, info, fm, prof, quality):
