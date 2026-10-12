@@ -49,6 +49,7 @@ Header (little-endian 64-bit words):
 | 3 | 31:0 / 63:32 | `hstep`, `vstep`: source samples per destination pixel / line, unsigned 16.16 (vstep <= 2.0) |
 | 4 | 31:0 / 63:32 | `sx0`, `sy0`: source coordinate of the first destination pixel / line, unsigned 16.16 |
 | 5 | 0 / 2:1 | overlay enable, overlay buffer index (0..2) |
+| 5 | 4 / 7:5 | repeat: when bit 4 is set the Y/U/V planes are read from slot `7:5` instead of this record's slot (the record carries only its header and audio) |
 
 The player computes the steps and start offsets (crop, aspect, letterbox) so the RTL stays simple. Pixel centres:
 `sx0 = max(0, (0.5 * hstep - 0.5 + crop_x)) * 65536`, likewise `sy0`.
@@ -63,6 +64,10 @@ and the letterbox bars: **luma 0 is transparent**, every other luma value is opa
 dither as the picture apply. In the menu the "picture" is a 16 x 16 black one, so a static menu costs the ARM no copying; during
 playback the bar costs nothing per frame and is redrawn only when it changes. The player never rewrites an overlay buffer that
 a queued or displayed record still names.
+
+A record that repeats the previous picture (a repeat frame of a 24/25 fps video, a paused video, a still scene) is sent as a
+header plus audio only and names the slot that already holds the planes (word 5 above). The player does this only for the record
+right after a full one, so with 8 slots and at most 6 queued the referenced slot is never rewritten while the repeat is on screen.
 
 The ARM must not overwrite the slot being displayed, so the acknowledged `consumed` count lags one record behind the
 commit count (the displayed record is released only when the next one is committed). With 8 slots the player keeps at
@@ -89,6 +94,18 @@ colour: C = Y - 16 (limited) or Y,  D = U - 128,  E = V - 128
         saturate 0..255
 dither: out = min(255, v + M[d&3][x&3]) & 0xFC, M = 0 2 0 2 / 3 1 3 1 / 0 2 0 2 / 3 1 3 1   (flag bit2)
 ```
+
+## Picture options (core menu)
+
+* **Analog dither**: ordered dither to 6 bits (bit 2 of the header flags is set by the core).
+* **480i flicker filter** (status bits 10:9, levels 1..3): in 480i the sampling position of every line moves toward the other field's lines by
+  1/8, 1/4 or 3/8 of a frame line (`sy +/- vstep >> 3, >> 2, (>> 2) + (>> 3)`, saturating at 0), so thin lines twitter less.
+* **Composite blur** (status bits 12:11, levels 1..3): a causal low-pass along the output pixel stream, applied after the overlay and before
+  dither. 480i: `[1 2 1]/4`, `[1 2 2 2 1]/8`, `[1 2 3 4 3 2 1]/16`; 240p (every pixel twice as wide): `[1 6 1]/8`, `[1 2 1]/4`, `[1 2 2 2 1]/8`.
+  Being causal it needs no extra latency; the picture sits 1 to 3 pixels to the right.
+* **240p output** uses the v0.14 pixel timing (6.67 MHz, 320 active pixels, accepted by the MiSTer's HDMI scaler). The core keeps every second
+  pixel and line of the 640 x 480 frame; the player starts sampling at the centre of each 2 x 2 cell (`sx0 += hstep / 2`, `sy0 += vstep / 2`) so
+  bilinear sampling averages what would be dropped.
 
 ## Verification
 

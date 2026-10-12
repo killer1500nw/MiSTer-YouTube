@@ -16,6 +16,9 @@ module yuv_scaler #(
     input  wire [9:0]  px,                 // pixel x of the current line, valid at ce_pix
     input  wire [8:0]  ny,                 // coordinates of the NEXT line (wrap aware)
     input  wire        nfield, nil,
+    input  wire [1:0]  blur,               // composite-style blur along the line: 0 off, 1..3 stronger (gentler in 240p, see `prog`)
+    input  wire        prog,               // the running frame is progressive (240p)
+    input  wire [1:0]  flicker,            // 480i flicker filter: 0 off, 1..3 move each field's sampling toward the other's by 1/8, 1/4, 3/8 line
     // frame configuration, latched when a new picture is committed
     input  wire        cfg_load,
     input  wire [2:0]  cfg_slot,
@@ -101,6 +104,7 @@ module yuv_scaler #(
                      S_PICK=8, S_CHK=9, S_MUL=10, S_ADDR=11, S_WAIT=12, S_DONE=13, S_FIN=14;
     reg [3:0]  st = S_IDLE;
     reg [8:0]  d9 = 0, dyl = 0;
+    reg        nil_d = 0;
     reg        jv = 0, nact = 0;
     reg [31:0] prod = 0, sy = 0, csy = 0;
     reg [9:0]  r0 = 0, r1 = 0, c0 = 0, c1 = 0;
@@ -151,6 +155,9 @@ module yuv_scaler #(
     wire [9:0] y_last = {1'b0, src_h} - 10'd1;
     wire [9:0] c_last = {1'b0, chh} - 10'd1;
     wire [31:0] csy_full = {1'b0, sy[31:1]};
+    wire [31:0] sy_base = sy0 + prod;
+    wire [31:0] flk_step = (flicker == 2'd1) ? (vstep >> 3) : (flicker == 2'd2) ? (vstep >> 2) : (vstep >> 2) + (vstep >> 3);
+    wire use_flk = nil_d && flicker != 2'd0;
     wire [6:0] row_stride8 = (fplane == 3'd0) ? ystride8 : (fplane == 3'd3) ? 7'd40 : (fplane >= 3'd4) ? 7'd20 : cstride8;
 
     always @(posedge clk) begin
@@ -162,6 +169,7 @@ module yuv_scaler #(
             end
             S_D: begin
                 d9 <= dnext;
+                nil_d <= nil;
                 nact <= have_frame && ny < 9'd240;
                 jv <= have_frame && ny < 9'd240 && dnext >= dy0 && dnext < ({1'b0, dy0} + {1'b0, dh});
                 st <= S_DY;
@@ -175,7 +183,7 @@ module yuv_scaler #(
                 st <= S_SY;
             end
             S_SY: begin
-                sy <= sy0 + prod;
+                sy <= !use_flk ? sy_base : d9[0] ? ((sy_base < flk_step) ? 32'd0 : sy_base - flk_step) : sy_base + flk_step;
                 st <= S_R0;
             end
             S_R0: begin
@@ -503,11 +511,33 @@ module yuv_scaler #(
     reg [LAT-2:0] ce_sh = 0;
     always @(posedge clk) ce_sh <= {ce_sh[LAT-3:0], ce_pix};
     wire ce_s11 = ce_sh[LAT-2];
+    // composite-style blur: a causal low-pass over the current and previous pixels of the line (no extra latency; the
+    // picture just sits 1 to 3 pixels to the right). Pixels outside the picture count as black, so edges bleed softly.
+    reg [23:0] hp1 = 0, hp2 = 0, hp3 = 0, hp4 = 0, hp5 = 0, hp6 = 0;
+    wire [23:0] cur24 = s11_valid ? {s11_r, s11_g, s11_b} : 24'd0;
+    wire [2:0] fsel = (blur == 2'd0) ? 3'd0 : prog ? {1'b0, blur} : {1'b0, blur} + 3'd1;      // 1: [1 6 1]/8, 2: [1 2 1]/4, 3: 5 taps, 4: 7 taps
+    function [7:0] blur8(input [2:0] sel, input [7:0] a0, a1, a2, a3, a4, a5, a6);
+        reg [11:0] sm;
+        begin
+            case (sel)
+                3'd1: sm = ({4'd0, a0} + {1'd0, a1, 3'd0} - {3'd0, a1, 1'd0} + {4'd0, a2}) >> 3;                          // a0 + 6 a1 + a2
+                3'd2: sm = ({4'd0, a0} + {3'd0, a1, 1'd0} + {4'd0, a2}) >> 2;
+                3'd3: sm = ({4'd0, a0} + {3'd0, a1, 1'd0} + {3'd0, a2, 1'd0} + {3'd0, a3, 1'd0} + {4'd0, a4}) >> 3;
+                default: sm = ({4'd0, a0} + {3'd0, a1, 1'd0} + {4'd0, a2} + {3'd0, a2, 1'd0} + {2'd0, a3, 2'd0} +
+                               {4'd0, a4} + {3'd0, a4, 1'd0} + {3'd0, a5, 1'd0} + {4'd0, a6}) >> 4;                        // 1 2 3 4 3 2 1
+            endcase
+            blur8 = sm[7:0];
+        end
+    endfunction
+    wire [23:0] soft24 = (fsel == 3'd0) ? cur24 :
+        {blur8(fsel, cur24[23:16], hp1[23:16], hp2[23:16], hp3[23:16], hp4[23:16], hp5[23:16], hp6[23:16]),
+         blur8(fsel, cur24[15:8],  hp1[15:8],  hp2[15:8],  hp3[15:8],  hp4[15:8],  hp5[15:8],  hp6[15:8]),
+         blur8(fsel, cur24[7:0],   hp1[7:0],   hp2[7:0],   hp3[7:0],   hp4[7:0],   hp5[7:0],   hp6[7:0])};
     always @(posedge clk) begin
         if (ce_s11) begin
-            if (!s11_valid) rgb <= 24'd0;
-            else if (dither) rgb <= {dith(s11_r, t), dith(s11_g, t), dith(s11_b, t)};
-            else rgb <= {s11_r, s11_g, s11_b};
+            hp1 <= cur24; hp2 <= hp1; hp3 <= hp2; hp4 <= hp3; hp5 <= hp4; hp6 <= hp5;
+            if (dither) rgb <= {dith(soft24[23:16], t), dith(soft24[15:8], t), dith(soft24[7:0], t)};
+            else rgb <= soft24;
         end
     end
 endmodule

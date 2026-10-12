@@ -78,6 +78,30 @@ def predicted_cost(stream, cal=None, mult=1.0):
     return (cal['cost'] * shape * fps / cal['fps'] + copy_cost(stream, cal, fps)) * mult
 
 
+SPEEDS = ('Normal', 'Fast', 'Fastest')      # gentlest first: Fast skips the deblocking filter on non-reference frames, Fastest on all
+
+
+def setting_for(stream, cal, mult, speed_x):
+    """The gentlest decoder setting (full deblocking filter = best picture) predicted to keep this stream within the ARM's
+    limit, from the Speed test's measurement of every setting (`speed_x`: {setting: times real time}). None if unknown.
+
+    The calibration describes the fastest setting; a gentler one takes best_x / x of the decoding time, and the picture
+    copy costs the same whatever the setting."""
+    if not (isinstance(speed_x, dict) and speed_x and cal and cal.get('cost')):
+        return None
+    xs = {k: float(v) for k, v in speed_x.items() if k in SPEEDS and v and float(v) > 0}
+    if not xs:
+        return None
+    best_x = max(xs.values())
+    fps = stream.get('fps') or cal.get('fps') or 30.0
+    copy = copy_cost(stream, cal, fps)
+    decode = predicted_cost(stream, cal, 1.0) - copy
+    for level in SPEEDS:
+        if level in xs and (decode * best_x / xs[level] + copy) * mult <= 0.9 * limit_for(cal):
+            return level
+    return max(xs, key=xs.get)
+
+
 def speed_for(px, speed, learned):
     """Decoder setting for a stream: big pictures use what the Speed test found (never the slow default)."""
     if px > BIG_PX:

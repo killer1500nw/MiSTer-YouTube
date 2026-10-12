@@ -234,6 +234,8 @@ class App:
         shorts = lambda a: a.store.settings['shorts'] == 'On'
         if name == 'Search':
             self.push(ui.TextInput('Search', 'Search YouTube for...', self._search_typed, spaces=True))
+        elif name == 'Search Playlists':
+            self.push(ui.TextInput('Search Playlists', 'Search YouTube playlists for...', self._playlist_search_typed, spaces=True))
         elif name == 'Subscriptions':
             self.push(ui.VideoList('Subscriptions', lambda a: a.feeds.feed(a.store.subscriptions(), shorts(a)),
                                    empty=lambda a: a.no_subscriptions_text() if not a.store.subscriptions()
@@ -319,6 +321,95 @@ class App:
                                more=lambda a: self.search_more(state),
                                can_more=lambda a: state['more'] and len(state['videos']) < self.SEARCH_MAX,
                                loading=lambda a: state['loading']))
+
+    # playlist search ---------------------------------------------------
+    def _playlist_search_typed(self, app, text):
+        query = ' '.join(text.split())
+        if len(query) < 2:
+            return 'Type something to search for.'
+        self.pop()
+        self.start_playlist_search(query)
+        return None
+
+    def start_playlist_search(self, query):
+        self.feeds.hold.set()
+        pipeline.pause_background()
+        started = time.monotonic()
+        try:
+            res, err = self.run_job(
+                'Searching playlists',
+                lambda: [ui.clip(query, 33), 'Asking YouTube... %ds' % (time.monotonic() - started),
+                         'This can take a minute. Please be patient.'],
+                lambda check: pipeline.search_playlists(self.rt, query, check, self.log, limit=self.SEARCH_PAGE))
+        finally:
+            self.feeds.hold.clear()
+            pipeline.resume_background()
+        if err:
+            if str(err) != 'Cancelled':
+                self.log('Playlist search failed: ' + str(err)[:300])
+                self.push(ui.TextView('Search failed', ['!' + l for l in ui.wrap(str(err), 37, 10)]))
+            return
+        self.log('Playlist search "%s": %d playlists' % (query[:40], len(res)))
+        self.push(ui.FoundPlaylists(query, list(res)))
+
+    def open_found_playlist(self, row):
+        """Load the first videos of a found playlist and show them like any other list (paged, up to a few hundred)."""
+        pid, name = row['id'], row['title']
+        started = time.monotonic()
+        self.feeds.hold.set()
+        pipeline.pause_background()
+        try:
+            res, err = self.run_job(
+                'Opening playlist',
+                lambda: [ui.clip(name, 33), 'Asking YouTube... %ds' % (time.monotonic() - started)],
+                lambda check: pipeline.playlist_entries(self.rt, pid, check, self.log, limit=self.SEARCH_PAGE))
+        finally:
+            self.feeds.hold.clear()
+            pipeline.resume_background()
+        if err:
+            if str(err) != 'Cancelled':
+                self.log('Playlist %s failed: %s' % (pid, str(err)[:300]))
+                self.push(ui.TextView('Could not open playlist', ['!' + l for l in ui.wrap(str(err), 37, 10)]))
+            return
+        vids = res[1]
+        raw = getattr(vids, 'raw', len(vids))
+        state = {'id': pid, 'videos': list(vids), 'next': 1 + raw, 'more': raw >= self.SEARCH_PAGE, 'loading': False}
+        shorts = lambda a: a.store.settings['shorts'] == 'On'
+        self.push(ui.VideoList(ui.clip(name, 30), lambda a: [v for v in state['videos'] if shorts(a) or not v.get('short')],
+                               hints='A:Play  Y:Later  B:Back', empty=lambda a: ['This playlist has no videos.'],
+                               more=lambda a: self._found_playlist_more(state),
+                               can_more=lambda a: state['more'] and len(state['videos']) < self.SEARCH_MAX,
+                               loading=lambda a: state['loading']))
+
+    def _found_playlist_more(self, state):
+        if state['loading']:
+            return
+        state['loading'] = True
+        self.toast('Loading more videos...')
+
+        def run():
+            try:
+                self.feeds.wait_turn()
+                _, vids = pipeline.playlist_entries(self.rt, state['id'], lambda: None, self.log,
+                                                    limit=self.SEARCH_PAGE, start=state['next'])
+                raw = getattr(vids, 'raw', len(vids))
+                seen = {v['id'] for v in state['videos']}
+                state['videos'].extend(v for v in vids if v['id'] not in seen)
+                state['next'] += raw
+                state['more'] = raw >= self.SEARCH_PAGE
+            except Exception as exc:
+                self.log('Playlist: could not load more: ' + str(exc)[:200])
+            finally:
+                state['loading'] = False
+                self.dirty = True
+        threading.Thread(target=run, daemon=True).start()
+
+    def save_found_playlist(self, row):
+        added = self.store.add_entry('playlist', row['id'])
+        self.log('Playlist %s %s' % (row['id'], 'saved' if added else 'already saved'))
+        self.toast('Saved to Playlists' if added else 'Already in Playlists')
+        if added:
+            self.refresh_lists(force=True)
 
     def search_more(self, state):
         """"Load more videos": the next page of this search, in the background (frozen while a video plays)."""
@@ -467,7 +558,7 @@ class App:
             for attempt in range(3):
                 try:
                     tgt = pipeline.yuv_target(media, self.link.interlaced) if self.yuv else None    # the pipeline the core really gets
-                    runs = [(sp, pipeline.benchmark(self.rt, prof, media, sp, 12, check, target=tgt)) for sp in ('Fast', 'Fastest')]
+                    runs = [(sp, pipeline.benchmark(self.rt, prof, media, sp, 12, check, target=tgt)) for sp in profiles.SPEEDS]
                     best_sp, best_x = max(runs, key=lambda r: r[1])
                     # The same setting again with only the decoder (no scaling, no RGB565 conversion): the difference is the
                     # share of the ARM's time that an FPGA scaler could take over.
@@ -496,14 +587,15 @@ class App:
                     big = (bigger, pipeline.benchmark(self.rt, prof, bigger, best_sp, 8, limited, decode_only=True))
             except (ValueError, RuntimeError, OSError) as exc:
                 self.log('Speed test: no larger stream measured (%s)' % exc)
-            # AV1 at the same size (YouTube's AV1 carries more picture per kilobit; is the ARM able to decode it?).
+            # VP9 at the same size (it looks cleaner than H.264 at the same bitrate; can the ARM decode it in time?). AV1 was
+            # tried and is far too slow on this ARM, so it is no longer measured.
             av1 = None
             deadline[0] = time.monotonic() + 75
             try:
-                a = pipeline.media_from(media.catalog[0], media.catalog[1], prof, '360p', log=self.log, codec='av01')
+                a = pipeline.media_from(media.catalog[0], media.catalog[1], prof, '360p', log=self.log, codec='vp09')
                 av1 = (a, pipeline.benchmark(self.rt, prof, a, best_sp, 8, limited, decode_only=True))
             except (ValueError, RuntimeError, OSError, TypeError) as exc:
-                self.log('Speed test: AV1 not measured (%s)' % exc)
+                self.log('Speed test: VP9 not measured (%s)' % exc)
             return runs, media, bare, big, av1
         res, err = self.run_job('Speed test', ['Decoding a test stream (three runs)...', 'B: cancel'], work)
         if err:
@@ -522,7 +614,7 @@ class App:
         if big:
             lines.append('Decode only at %s (%d kbps): %.2fx' % (big[0].label, round(big[0].tbr), big[1]))
         if av1:
-            lines.append('AV1 %s (%d kbps), decode only: %.2fx (H.264 %.2fx)' % (av1[0].label, round(av1[0].tbr), av1[1], bare))
+            lines.append('VP9 %s (%d kbps), decode only: %.2fx (H.264 %.2fx)' % (av1[0].label, round(av1[0].tbr), av1[1], bare))
         kb = max(1, round(self.link.copy_bytes / 1000.0))
         lines.append('Copy %d KB: %.1f ms (max %.1f)%s' % (kb, copy_avg, copy_max, (', ' + ', '.join(
             '%s %.1f ms' % (m, r[0]) for m, r in sorted(self.link.copy_report.items()))) if len(self.link.copy_report) > 1 else ''))
@@ -542,6 +634,7 @@ class App:
         self.store.set('cal', cal)
         self.store.set('copy_method', getattr(self.link.box, 'method', None) if self.link.kind == 'yuv' else None)
         self.store.set('speed_big', best_speed)
+        self.store.set('speed_x', {sp: round(x, 3) for sp, x in results})
         self.store.set('speed_clip', media.id)
         self.store.set('cost_mult', 1.0)
         extra = ''
@@ -549,8 +642,8 @@ class App:
             extra += '; %s %dx%d %d kbps %d fps decode only %.2fx' % (
                 big[0].label, big[0].video['width'], big[0].video['height'], round(big[0].tbr), round(big[0].video.get('fps') or 30), big[1])
         if av1:
-            extra += '; AV1 %dx%d %d kbps %d fps decode only %.2fx' % (
-                av1[0].video['width'], av1[0].video['height'], round(av1[0].tbr), round(av1[0].video.get('fps') or 30), av1[1])
+            extra += '; VP9 %dx%d %d kbps %d fps decode only %.2fx (H.264 %.2fx at %d kbps)' % (
+                av1[0].video['width'], av1[0].video['height'], round(av1[0].tbr), round(av1[0].video.get('fps') or 30), av1[1], bare, round(media.tbr))
         self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); copy %d KB %.1f ms (worst %.1f) %s; bulk copy %s; calibration %s, speed_big=%s%s' % (
             media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), kb, copy_avg, copy_max,
             {m: round(r[0], 1) for m, r in self.link.copy_report.items()}, fast, self.store.settings['cal'], best_speed, extra))
@@ -567,6 +660,11 @@ class App:
     def effective_speed(self, media, speed):
         """Decoder setting for this stream: big pictures use what the Speed test learned."""
         v = media.video or {}
+        if speed == 'Normal':                          # automatic: the gentlest setting that keeps up (best picture)
+            cal, mult = self.calibration()
+            pick = profiles.setting_for(v, cal, mult, self.store.settings.get('speed_x')) if v else None
+            if pick:
+                return pick
         return profiles.speed_for((v.get('width') or 0) * (v.get('height') or 0), speed,
                                   self.store.settings.get('speed_big'))
 
@@ -649,13 +747,18 @@ class App:
         if not v.get('title'):
             v['title'] = media.title                      # a typed link has no title until YouTube tells us
         refresh_left, pos_ms, outcome = 1, start_ms, 'stop'
-        copy0 = (self.link.copy_total, self.link.copy_count)
+        copy0 = (self.link.copy_total, self.link.copy_count, getattr(self.link, 'full_total', 0.0),
+                 getattr(self.link, 'full_count', 0), getattr(self.link, 'repeats', 0))
         self.link.copy_max = 0.0
         while True:
             cal, mult = self.calibration()
             can_step = q == 'Auto' and pipeline.step_down(media, prof, cal, mult) is not None
+            level = self.effective_speed(media, speed)
+            self.log('Decoder setting %s for %s (estimated load %d%%, copy %.1f ms per picture, copy method %s)' % (
+                level, media.label, round(media.cost * 100), (cal.get('copy_ms') or 0.0),
+                getattr(getattr(self.link, 'box', None), 'method', '-')))
             try:
-                outcome, pos_ms = self._play_loop(v, media, prof, self.effective_speed(media, speed), pos_ms,
+                outcome, pos_ms = self._play_loop(v, media, prof, level, pos_ms,
                                                   can_step, refresh_left > 0)
             except Quit:
                 raise
@@ -687,9 +790,13 @@ class App:
         if self.link.copy_count > copy0[1]:
             n = self.link.copy_count - copy0[1]
             avg_ms = 1000.0 * (self.link.copy_total - copy0[0]) / n
-            self.log('Record copy to the core: average %.1f ms, worst %.1f ms (%d records)' % (
-                avg_ms, 1000.0 * self.link.copy_max, n))
-            self._learn_copy(media, avg_ms, n)
+            nfull = getattr(self.link, 'full_count', n) - copy0[3]
+            full_ms = 1000.0 * (getattr(self.link, 'full_total', self.link.copy_total) - copy0[2]) / nfull if nfull else avg_ms
+            again = getattr(self.link, 'repeats', 0) - copy0[4]
+            self.log('Record copy to the core: average %.1f ms, worst %.1f ms (%d records%s)' % (
+                avg_ms, 1000.0 * self.link.copy_max, n,
+                '; %d repeated pictures not copied, %.1f ms per full picture' % (again, full_ms) if again else ''))
+            self._learn_copy(media, full_ms, nfull)
         self.log('Playback %s at %s of %s' % ('finished' if outcome == 'eof' else 'stopped', ui.mmss(pos_ms), ui.mmss(media.duration * 1000)))
         self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))
         self.dirty = True

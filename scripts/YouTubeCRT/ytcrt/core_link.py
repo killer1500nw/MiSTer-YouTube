@@ -54,6 +54,8 @@ class Link:
         self.copy_count = 0
         self.copy_bytes = 0
         self.copy_report = {}
+        self._last_frame, self._last_at, self._last_size, self.repeats = None, -1, None, 0
+        self.full_total, self.full_count = 0.0, 0         # copy time of the records that carried a whole picture
 
     # lifecycle --------------------------------------------------------
     def open(self):
@@ -143,6 +145,7 @@ class Link:
         box.write(8, 0)
         box.write(12, 0)
         self.sent = self.consumed = self.released = 0
+        self._last_frame, self._last_at = None, -1
         self.ov_ref = [-1] * yuv.OVERLAYS
         self.session = secrets.randbelow(0xfffffffe) + 1
         box.command(self.session)
@@ -216,10 +219,13 @@ class Link:
         self.health()
         return self.queued < (self.slots if depth is None else depth)
 
-    def _published(self, started):
+    def _published(self, started, full=True):
         took = time.monotonic() - started
         self.copy_total += took
         self.copy_count += 1
+        if full:
+            self.full_total += took
+            self.full_count += 1
         self.copy_max = max(self.copy_max, took)
         if self.sent - self.consumed == 3:
             self.last_progress = time.monotonic()
@@ -240,11 +246,22 @@ class Link:
         if self.sent >= 0xffffff00:
             raise RuntimeError('Session record limit reached.')
         started = time.monotonic()
-        header = yuv.header_for(w, h, crop, self.interlaced, flags, overlay)
+        # An identical picture (a repeat frame from a 24/25 fps video, a paused video, a still scene) is not copied again: the
+        # record names the slot that already holds it. Only the record right after a full one may do this, so the slot is
+        # never rewritten while the repeat is on screen (8 slots, at most 6 queued).
+        again = (self._last_frame is not None and self._last_at == self.sent - 1 and self._last_size == (w, h)
+                 and (frame is self._last_frame or frame == self._last_frame))
+        header = yuv.header_for(w, h, crop, self.interlaced, flags, overlay, (self.sent - 1) % 8 if again else None)
         if overlay is not None:
             self.ov_ref[overlay] = self.sent
-        self.box.picture(self.sent, header, frame, w * h, audio)
-        self._published(started)
+        if again:
+            self.box.picture_again(self.sent, header, audio)
+            self.repeats += 1
+            self._last_at = -1                                     # the next record must carry its own picture
+        else:
+            self.box.picture(self.sent, header, frame, w * h, audio)
+            self._last_frame, self._last_at, self._last_size = frame, self.sent, (w, h)
+        self._published(started, not again)
 
     def upload_overlay(self, index, y, u, v):
         """Write a finished overlay (320x240 planes, luma 0 = transparent) into buffer `index`, which must be free."""

@@ -117,6 +117,8 @@ To import your real subscriptions, export them with Google Takeout (YouTube → 
 
 Home → **Search** (the first entry). Type what to look for with the on-screen keyboard (the space key works here) or a real keyboard, then Start / OK. The results are an ordinary video list: A plays, Y saves to Watch Later, and **Load more videos...** at the end fetches the next 20 (up to 200). A search is one yt-dlp run, so expect roughly 15 to 35 seconds on the MiSTer; B cancels. Starting a video from the results works like any other video, including the slow security check for some of them. Searches are not saved.
 
+**Search Playlists** (the second Home entry) does the same for public playlists: type what to look for, then A opens a playlist (its videos are listed like any other list, with **Load more videos...**) and Y saves it to your Playlists so it appears under Home → Playlists. Mixes that YouTube makes automatically are left out.
+
 ## More than the first page
 
 A channel opens with its newest ~15 videos (all YouTube's RSS feed offers) and a playlist with its first 50. At the end
@@ -168,12 +170,16 @@ arrows, Enter, Space, Esc, Backspace, Tab, PgUp/PgDn, W and Q work too.
 
 ## Output modes and performance
 
-The core menu (F12) is deliberately short: **Output: 240p / 480i** (default 240p), **480i field order**, **Analog dither** and **Reset**.
+The core menu (F12) is deliberately short: **Output: 240p / 480i** (default 240p), **480i field order**, **Analog dither**, **480i flicker filter**, **Composite blur** and **Reset**.
 Everything else (streaming, test pattern, test tone, loading a frame) used to be there for development and is gone.
 With the v0.15 core the picture is drawn at 640 pixels per line (a 13.3 MHz pixel clock, the same 15.7 kHz line rate). In **480i**
 it is a real interlaced picture: the two fields show alternate lines of one 640×480 frame, so a 360p video really has three times
 the pixels it had at 320×240. **240p** shows 640×240. **Analog dither** adds a little ordered dither before the picture is cut to
-the analog output's 6 bits, which hides colour banding in smooth gradients on a CRT (leave it Off for HDMI). The player needs no
+the analog output's 6 bits, which hides colour banding in smooth gradients on a CRT (leave it Off for HDMI). **Composite blur** (Low / Medium / High) softens the picture along each line the way a cable-box composite signal did, which
+many 1980s and 1990s programmes were made to look good with; it is gentler in 240p, where each pixel is twice as wide. **480i flicker filter**
+(Low / Medium / High) moves what the two fields show closer together, so thin horizontal lines twitter less on an interlaced TV, at the cost of a
+little vertical sharpness. In 240p the picture is sampled from the centre of each pair of pixels and lines, which averages what would otherwise
+be dropped. The player needs no
 setting for any of this: it reads the core's mode and sends pictures that fit it. (With the v0.14 core the same 320×240 picture is
 sent as 525-line video: it adds compatibility, not detail.) 60 fps is not offered: no core supports 60 fps
 records, and the ARM cannot decode 60 fps H.264 at useful sizes anyway (see

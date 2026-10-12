@@ -44,7 +44,7 @@ def split(coord, size):
     return min(i, size - 1), min(i + 1, size - 1), (coord >> 8) & 255
 
 
-def render_frame(y, u, v, hdr, interlaced=True, overlay=None):
+def render_frame(y, u, v, hdr, interlaced=True, overlay=None, flicker=0, soft=0):
     """The 640 x 480 frame the core draws from a decoded picture: list of 480 lines, each 640 (r, g, b) tuples.
 
     y/u/v are the plane bytes exactly as stored (strides from the header). In 480i field `f` shows lines f::2; in 240p
@@ -68,10 +68,14 @@ def render_frame(y, u, v, hdr, interlaced=True, overlay=None):
         if not hdr['dy0'] <= d < hdr['dy0'] + hdr['dh']:
             line = [black] * yuv.FRAME_W
             if use_ov:
-                _overlay_line(line, overlay, d, flags, dither)
-            frame.append(line)
+                _overlay_line(line, overlay, d, flags)
+            frame.append(_post(line, d, dither, soft, interlaced))
             continue
         sy = (hdr['sy0'] + (d - hdr['dy0']) * hdr['vstep']) & 0xFFFFFFFF
+        if interlaced and flicker:              # 480i flicker filter: each field's sampling moves toward the other field's lines
+            vs = hdr['vstep']
+            step = (vs >> 3, vs >> 2, (vs >> 2) + (vs >> 3))[flicker - 1]
+            sy = max(0, sy - step) if d & 1 else (sy + step) & 0xFFFFFFFF
         r0, r1, fy = split(sy, h)
         csy = max(0, (sy >> 1) - 0x4000)
         c0, c1, fcy = split(csy, chh)
@@ -90,19 +94,51 @@ def render_frame(y, u, v, hdr, interlaced=True, overlay=None):
             va = lerp(v[c0 * cs + cx0], v[c0 * cs + cx1], fcx)
             vb = lerp(v[c1 * cs + cx0], v[c1 * cs + cx1], fcx)
             vv = lerp(va, vb, fcy)
-            r, g, b = colour(yy, uu, vv, flags)
-            if dither:
-                t = BAYER[d & 3][x & 3]
-                r, g, b = min(255, r + t) & 0xFC, min(255, g + t) & 0xFC, min(255, b + t) & 0xFC
-            line.append((r, g, b))
+            line.append(colour(yy, uu, vv, flags))
         if use_ov:
-            _overlay_line(line, overlay, d, flags, dither)
-        frame.append(line)
+            _overlay_line(line, overlay, d, flags)
+        frame.append(_post(line, d, dither, soft, interlaced))
     return frame
 
 
-def _overlay_line(line, overlay, d, flags, dither):
-    """Draw the overlay over one finished frame line (same colour matrix and dither as the picture)."""
+# composite-style blur along the line (causal, so it needs no extra latency in the core): weights over the current and the
+# previous pixels, divided by 2**shift. Level 1..3 is gentler in 240p, where every output pixel is twice as wide.
+SOFT = {'f1': ((1, 6, 1), 3), 'f3': ((1, 2, 1), 2), 'f5': ((1, 2, 2, 2, 1), 3), 'f7': ((1, 2, 3, 4, 3, 2, 1), 4)}
+
+
+def soft_filter(seq, level, progressive):
+    name = ('f1', 'f3', 'f5')[level - 1] if progressive else ('f3', 'f5', 'f7')[level - 1]
+    weights, shift = SOFT[name]
+    out = []
+    for n in range(len(seq)):
+        acc = [0, 0, 0]
+        for k, wt in enumerate(weights):
+            if n - k >= 0:
+                p = seq[n - k]
+                acc[0] += wt * p[0]
+                acc[1] += wt * p[1]
+                acc[2] += wt * p[2]
+        out.append((acc[0] >> shift, acc[1] >> shift, acc[2] >> shift))
+    return out
+
+
+def _post(line, d, dither, soft, interlaced):
+    """Blur (on the pixels the core really outputs: all of them in 480i, every second one in 240p), then dither."""
+    if soft:
+        step = 1 if interlaced else 2
+        idx = list(range(0, yuv.FRAME_W, step))
+        for x, p in zip(idx, soft_filter([line[i] for i in idx], soft, not interlaced)):
+            line[x] = p
+    if dither:
+        for x in range(yuv.FRAME_W):
+            t = BAYER[d & 3][x & 3]
+            r, g, b = line[x]
+            line[x] = (min(255, r + t) & 0xFC, min(255, g + t) & 0xFC, min(255, b + t) & 0xFC)
+    return line
+
+
+def _overlay_line(line, overlay, d, flags):
+    """Draw the overlay over one frame line (same colour matrix as the picture; blur and dither come afterwards)."""
     oy, ou, ov = overlay
     row = d >> 1
     for x in range(yuv.FRAME_W):
@@ -110,11 +146,7 @@ def _overlay_line(line, overlay, d, flags, dither):
         if yy == 0:
             continue
         ci = (row >> 1) * (yuv.OV_W // 2) + (x >> 2)
-        r, g, b = colour(yy, ou[ci], ov[ci], flags)
-        if dither:
-            t = BAYER[d & 3][x & 3]
-            r, g, b = min(255, r + t) & 0xFC, min(255, g + t) & 0xFC, min(255, b + t) & 0xFC
-        line[x] = (r, g, b)
+        line[x] = colour(yy, ou[ci], ov[ci], flags)
 
 
 def planes_from_function(w, h, fn):

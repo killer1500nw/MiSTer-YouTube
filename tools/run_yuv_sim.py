@@ -38,6 +38,17 @@ CASES = {
     'ov360':     (640, 360, 'Off', True, 0, 'noise', 2),
     'ov43':      (480, 360, 'Off', True, yuv.FLAG_601, 'noise', 0),
     'ovp240':    (640, 360, 'Fill', False, yuv.FLAG_DITHER, 'noise', 1),
+    # the 480i flicker filter (8th item: its level 1..3)
+    'flk1':      (640, 360, 'Off', True, 0, 'noise', None, 1),
+    'flk2':      (480, 360, 'Off', True, 0, 'noise', None, 2),
+    'flk3':      (640, 360, 'Off', True, yuv.FLAG_601, 'noise', 0, 3),
+    # composite-style blur (9th item: level 1..3), here together with an overlay, dither and colour options
+    'soft1':     (640, 360, 'Off', True, 0, 'noise', None, 0, 1),
+    'soft2':     (480, 360, 'Off', True, yuv.FLAG_DITHER, 'noise', 1, 0, 2),
+    'soft3':     (640, 360, 'Off', True, yuv.FLAG_601, 'bars', 0, 2, 3),
+    'soft1p':    (640, 360, 'Fill', False, 0, 'noise', 2, 0, 1),
+    'soft2p':    (640, 360, 'Off', False, yuv.FLAG_DITHER, 'noise', None, 0, 2),
+    'soft3p':    (480, 360, 'Off', False, yuv.FLAG_FULL_RANGE, 'bars', 0, 0, 3),
 }
 
 
@@ -95,6 +106,8 @@ def slot_image(header, y, u, v):
 def run_case(name, work):
     w, h, crop, interlaced, flags, kind = CASES[name][:6]
     ov_index = CASES[name][6] if len(CASES[name]) > 6 else None
+    flicker = CASES[name][7] if len(CASES[name]) > 7 else 0
+    soft = CASES[name][8] if len(CASES[name]) > 8 else 0
     y, u, v = make_picture(kind, w, h)
     header = yuv.header_for(w, h, crop, interlaced, flags, ov_index)
     hdr = yuv.parse_header(header)
@@ -114,14 +127,14 @@ def run_case(name, work):
     r = subprocess.run(cmd, cwd=work, capture_output=True, text=True, env=env)
     if r.returncode or 'Error' in r.stdout:
         return 'FAIL compile: ' + (r.stdout + r.stderr)[-1500:]
-    r = subprocess.run(['vsim', '-c', '-work', 'w', '+IL=%d' % interlaced, '-do', 'run -all; quit -f', 'tb_yuv_scaler'],
+    r = subprocess.run(['vsim', '-c', '-work', 'w', '+IL=%d' % interlaced, '+FLK=%d' % flicker, '+SOFT=%d' % soft, '-do', 'run -all; quit -f', 'tb_yuv_scaler'],
                        cwd=work, capture_output=True, text=True, env=env, timeout=1800)
     if 'DONE' not in r.stdout:
         return 'FAIL sim: ' + r.stdout[-1500:]
     m = re.search(r'hold_bad=(\d+)', r.stdout)
     if m and int(m.group(1)):
         return 'FAIL %s: the output changed within a pixel period %s times (the analogue output needs it held)' % (name, m.group(1))
-    expected = yuv_ref.render_frame(y, u, v, hdr, interlaced, overlay)
+    expected = yuv_ref.render_frame(y, u, v, hdr, interlaced, overlay, flicker, soft)
     seen = bad = 0
     first = None
     for line in (work / 'out.txt').read_text().splitlines():

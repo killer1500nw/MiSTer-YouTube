@@ -1063,7 +1063,7 @@ class SpeedTest(unittest.TestCase):
             return resolver(vid, info, fm, prof, quality)
         pipeline.resolve = fake_resolve
         pipeline.benchmark = bench or (lambda rt, prof, media, speed, seconds=10, cancel=None, decode_only=False, target=None: (
-            1.2 if decode_only else {'Fast': 0.7, 'Fastest': 0.9}[speed]))
+            1.2 if decode_only else {'Normal': 0.6, 'Fast': 0.7, 'Fastest': 0.9}[speed]))
         done = []
         threading.Thread(target=lambda: (a.run_benchmark(), done.append(1)), daemon=True).start()
         end = time.time() + 15
@@ -1096,7 +1096,7 @@ class SpeedTest(unittest.TestCase):
             calls.append(speed)
             if len(calls) == 1:
                 raise RuntimeError('ffmpeg failed: Server returned 403 Forbidden (access denied)')
-            return 1.2 if decode_only else {'Fast': 0.7, 'Fastest': 0.9}[speed]
+            return 1.2 if decode_only else {'Normal': 0.6, 'Fast': 0.7, 'Fastest': 0.9}[speed]
         forgot = []
         saved = pipeline.forget
         pipeline.forget = lambda rt, vid: forgot.append(vid)
@@ -2041,6 +2041,157 @@ class Av1Probe(unittest.TestCase):
         self.assertEqual(v['format_id'] if isinstance(v, dict) and 'format_id' in v else v.get('format_id'), 'b')
         with self.assertRaises(ValueError):
             pipeline.choose_streams(info, fm[:1], profiles.PROFILE, '360p', codec='av01')
+
+
+class GentlestSetting(unittest.TestCase):
+    CAL = {'px': 640 * 360, 'tbr': 307.0, 'fps': 30.0, 'cost': 1 / 2.77, 'copy_ms': 14.0, 'copy_bytes': 345600}
+    X = {'Normal': 2.48, 'Fast': 2.6, 'Fastest': 2.77}
+
+    def test_a_light_stream_keeps_the_full_deblocking_filter(self):
+        self.assertEqual(profiles.setting_for(stream(640, 360, 200), self.CAL, 1.0, self.X), 'Normal')
+
+    def test_a_heavy_stream_gets_the_faster_settings(self):
+        heavy = stream(854, 480, 900)
+        self.assertEqual(profiles.setting_for(heavy, self.CAL, 1.0, self.X), 'Fastest')
+
+    def test_nothing_known_means_no_opinion(self):
+        self.assertIsNone(profiles.setting_for(stream(640, 360, 300), self.CAL, 1.0, None))
+        self.assertIsNone(profiles.setting_for(stream(640, 360, 300), None, 1.0, self.X))
+
+    def test_a_pessimistic_multiplier_pushes_toward_faster_settings(self):
+        s = stream(640, 360, 300)
+        gentle = profiles.setting_for(s, self.CAL, 1.0, self.X)
+        cautious = profiles.setting_for(s, self.CAL, 1.4, self.X)
+        self.assertLessEqual(profiles.SPEEDS.index(gentle), profiles.SPEEDS.index(cautious))
+
+
+class RepeatedPictures(unittest.TestCase):
+    def make_link(self):
+        from ytcrt import core_link, transport, yuv
+        link = core_link.Link.__new__(core_link.Link)
+        link.kind, link.sent, link.consumed = 'yuv', 0, 0
+        link.copy_total = link.copy_max = 0.0
+        link.copy_count = 0
+        link.full_total, link.full_count, link.repeats = 0.0, 0, 0
+        link._last_frame, link._last_at, link._last_size = None, -1, None
+        link.last_progress = 0
+        link.ov_ref = [-1] * yuv.OVERLAYS
+        mem = bytearray(yuv.MAP_BYTES)
+        link.box = transport.Mailbox(mem)
+        link.box.write = lambda off, value: None            # the mailbox counters are not needed here
+        return link, mem
+
+    def test_an_identical_picture_is_sent_as_a_repeat_once_then_in_full(self):
+        from ytcrt import yuv
+        link, mem = self.make_link()
+        a = bytearray(bytes(range(256)) * 90)                # 640x... a 16x? small picture: use 128x120 samples
+        w, h = 128, 120
+        frame = bytearray(w * h * 3 // 2)
+        frame[:256] = bytes(range(256))
+        audio = bytes(6400)
+        link.push_picture(frame, audio, w, h)
+        link.push_picture(frame, audio, w, h)                # same picture: a repeat of slot 0
+        link.push_picture(bytearray(frame), audio, w, h)     # equal contents, different object: but follows a repeat, so full
+        link.push_picture(bytearray(frame), audio, w, h)     # and the next one may repeat it again
+        self.assertEqual(link.repeats, 2)
+        heads = [yuv.parse_header(mem[yuv.slot_offset(n):yuv.slot_offset(n) + 64]) for n in range(4)]
+        self.assertEqual([x['ref'] for x in heads], [None, 0, None, 2])
+        # a repeat does not copy the planes: slot 1's Y area is still untouched
+        self.assertEqual(bytes(mem[yuv.slot_offset(1) + yuv.Y_OFF:yuv.slot_offset(1) + yuv.Y_OFF + 256]), bytes(256))
+        self.assertEqual(bytes(mem[yuv.slot_offset(2) + yuv.Y_OFF:yuv.slot_offset(2) + yuv.Y_OFF + 256]), bytes(range(256)))
+        link.box.close()
+
+    def test_a_changed_picture_or_size_is_always_sent_in_full(self):
+        from ytcrt import yuv
+        link, mem = self.make_link()
+        audio = bytes(6400)
+        f1 = bytearray(128 * 120 * 3 // 2)
+        f2 = bytearray(f1)
+        f2[5] = 9
+        link.push_picture(f1, audio, 128, 120)
+        link.push_picture(f2, audio, 128, 120)
+        link.push_picture(bytearray(64 * 60 * 3 // 2), audio, 64, 60)
+        self.assertEqual(link.repeats, 0)
+        link.box.close()
+
+
+class Progressive240(unittest.TestCase):
+    def test_240p_samples_the_centre_of_each_two_by_two_cell(self):
+        from ytcrt import yuv
+        i = yuv.layout(640, 360, 'Off', True)
+        p = yuv.layout(640, 360, 'Off', False)
+        self.assertEqual(p['hstep'], i['hstep'])
+        self.assertEqual(p['sx0'] - i['sx0'], i['hstep'] // 2)           # half a step further right
+        self.assertEqual(p['sy0'] - i['sy0'], round(i['vstep'] / 2))      # and half a step further down
+
+
+class PlaylistSearch(unittest.TestCase):
+    OUT = "\n".join([
+        '{"id": "PLabcdefghijklmn", "title": "He-Man Cartoons", "channel": "Retro TV", "playlist_count": 65}',
+        '{"id": "RDabcdefghijklmn12", "title": "Mix - something", "channel": "YouTube"}',
+        '{"id": "PLabcdefghijklmn", "title": "duplicate", "channel": "x"}',
+        '{"id": null, "title": "From the link", "url": "https://www.youtube.com/playlist?list=PLzyxwvutsrqponm", "uploader": "Someone"}',
+        '{"id": "UCnotaplaylistxxxxxxxxxx", "title": "A channel"}',
+        'not json'])
+
+    def test_parsing_keeps_real_playlists_once_and_drops_mixes_and_channels(self):
+        found = pipeline.parse_found_playlists(self.OUT)
+        self.assertEqual([f['id'] for f in found], ['PLabcdefghijklmn', 'PLzyxwvutsrqponm'])
+        self.assertEqual(found[0], {'id': 'PLabcdefghijklmn', 'title': 'He-Man Cartoons', 'channel': 'Retro TV', 'count': 65})
+        self.assertEqual(found[1]['channel'], 'Someone')
+
+    def test_second_search_filter_is_tried_when_the_first_finds_nothing(self):
+        calls = []
+        saved = pipeline.capture
+        rt = type('Rt', (), {'resolver': Path('yt-dlp'), 'ca': Path('ca')})()
+
+        def fake(cmd, env, cancel, timeout=0, **kw):
+            calls.append(cmd[-1])
+            return (b'' if len(calls) == 1 else self.OUT.encode())
+        pipeline.capture = fake
+        try:
+            found = pipeline.search_playlists(rt, 'he man', limit=5)
+        finally:
+            pipeline.capture = saved
+        self.assertEqual(len(calls), 2)
+        self.assertIn('search_query=he+man', calls[0])
+        self.assertIn('sp=EgIQAw%253D%253D', calls[0])
+        self.assertIn('sp=EgIQAw%3D%3D', calls[1])
+        self.assertEqual(len(found), 2)
+        with self.assertRaises(ValueError):
+            pipeline.search_playlists(rt, '   ')
+
+    def make_app(self):
+        a, st = ListsInTheGui.make_app(self)
+        a.rt.resolver, a.rt.ca = Path('yt-dlp'), Path('ca')
+        return a, st
+
+    def test_search_open_save_flow(self):
+        self.assertEqual(ui.Home.ENTRIES[:2], ('Search', 'Search Playlists'))
+        a, st = self.make_app()
+        found = [{'id': 'PLabcdefghijklmn', 'title': 'He-Man Cartoons', 'channel': 'Retro TV', 'count': 65}]
+        page = pipeline.Page(vid(i, title='Episode %d' % i) for i in range(3))
+        page.raw = 3
+        saved = (pipeline.search_playlists, pipeline.playlist_entries)
+        pipeline.search_playlists = lambda rt, query, cancel=None, log=None, limit=20: found
+        pipeline.playlist_entries = lambda rt, pid, cancel=None, log=None, limit=200, start=1: ('He-Man', page)
+        try:
+            self.assertEqual(a._playlist_search_typed(a, 'x'), 'Type something to search for.')
+            a.open_home_entry('Search Playlists')
+            a.screen.text = ' he   man '
+            a.screen.handle(a, 'submit')
+            lst = a.screen
+            self.assertIsInstance(lst, ui.FoundPlaylists)
+            self.assertEqual(lst.label(a, found[0]), 'He-Man Cartoons')
+            self.assertEqual(lst.right(a, found[0]), '65')
+            lst.handle(a, 'alt')                                              # Y: save it
+            self.assertIn('PLabcdefghijklmn', open(st.p_subs, encoding='utf-8').read())
+            lst.handle(a, 'ok')                                               # A: open it
+            videos = a.screen
+            self.assertIsInstance(videos, ui.VideoList)
+            self.assertEqual([v['title'] for v in videos.items(a)], ['Episode 0', 'Episode 1', 'Episode 2'])
+        finally:
+            pipeline.search_playlists, pipeline.playlist_entries = saved
 
 
 if __name__ == '__main__':

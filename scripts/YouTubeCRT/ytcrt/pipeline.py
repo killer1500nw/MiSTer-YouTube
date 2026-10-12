@@ -272,6 +272,58 @@ def search_entries(rt, query, cancel=lambda: None, log=lambda m: None, limit=20,
     return _parse_flat(out)
 
 
+PRINT_FOUND_PLAYLIST = '%(.{id,title,channel,uploader,playlist_count,n_entries,url})j'
+FOUND_PLAYLIST_ID = re.compile(r'(?:PL|OL)[A-Za-z0-9_-]{10,40}')       # real playlists; the auto-made "mixes" (RD...) are not kept
+# YouTube search filter "Playlist" (the sp parameter), tried in the forms yt-dlp has accepted
+PLAYLIST_FILTERS = ('EgIQAw%253D%253D', 'EgIQAw%3D%3D')
+
+
+def parse_found_playlists(out):
+    """yt-dlp --flat-playlist --print output of a playlist search -> [{'id', 'title', 'channel', 'count'}], no duplicates."""
+    found, seen = [], set()
+    for line in out.splitlines():
+        line = line.strip()
+        if not line.startswith('{'):
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        pid = str(e.get('id') or '')
+        if not pid:                                                          # fall back to the list= part of the link
+            m = re.search(r'[?&]list=([A-Za-z0-9_-]+)', str(e.get('url') or ''))
+            pid = m.group(1) if m else ''
+        if not FOUND_PLAYLIST_ID.fullmatch(pid) or pid in seen:
+            continue
+        seen.add(pid)
+        count = e.get('playlist_count') or e.get('n_entries') or 0
+        found.append({'id': pid, 'title': safe_text(str(e.get('title') or pid)),
+                      'channel': safe_text(str(e.get('channel') or e.get('uploader') or '')),
+                      'count': int(count) if str(count).isdigit() else 0})
+    return found
+
+
+def search_playlists(rt, query, cancel=lambda: None, log=lambda m: None, limit=20):
+    """Search YouTube for public playlists: up to `limit` of them, via yt-dlp (listing only). -> [dict]"""
+    query = re.sub(r'[\x00-\x1f]', ' ', str(query)).strip()[:120]
+    if not query:
+        raise ValueError('Nothing to search for.')
+    from urllib.parse import quote_plus
+    env = os.environ.copy()
+    env.update(SSL_CERT_FILE=str(rt.ca), REQUESTS_CA_BUNDLE=str(rt.ca), CURL_CA_BUNDLE=str(rt.ca))
+    found = []
+    for sp in PLAYLIST_FILTERS:
+        cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist', '--force-ipv4',
+               '--playlist-end', str(limit * 2), '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
+               '--print', PRINT_FOUND_PLAYLIST, '--', 'https://www.youtube.com/results?search_query=%s&sp=%s' % (quote_plus(query), sp)]
+        log('Searching YouTube playlists for "%s"' % query[:40])
+        found = parse_found_playlists(capture(cmd, env, cancel, timeout=180).decode('utf-8', 'replace'))
+        if found:
+            break
+        log('Playlist search: no results with filter %s' % sp)
+    return found[:limit]
+
+
 def _source(fmt, info):
     """A stream description for ffmpeg, with the URL and headers validated."""
     url = fmt.get('url', '')

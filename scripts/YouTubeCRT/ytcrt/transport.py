@@ -135,6 +135,15 @@ class Mailbox:
         self.copy_in(base + yuv.AUDIO_OFF, ctypes.create_string_buffer(bytes(audio), yuv.AUDIO_BYTES))
         self.copy_in(base, ctypes.create_string_buffer(bytes(header), yuv.HEADER_BYTES))     # the header last
 
+    def picture_again(self, number, header, audio):
+        """v0.15 core: a record that shows the picture of the slot named in `header` again: only the audio and the header
+        are written (the planes are not copied)."""
+        if len(audio) != yuv.AUDIO_BYTES or number < 0:
+            raise ValueError('Incorrect audio length or index.')
+        base = yuv.slot_offset(number)
+        self.copy_in(base + yuv.AUDIO_OFF, ctypes.create_string_buffer(bytes(audio), yuv.AUDIO_BYTES))
+        self.copy_in(base, ctypes.create_string_buffer(bytes(header), yuv.HEADER_BYTES))     # the header last
+
     def overlay(self, index, y, u, v):
         base = yuv.overlay_offset(index)
         self.copy_in(base + yuv.OV_Y_OFF, y)

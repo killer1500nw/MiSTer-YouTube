@@ -559,13 +559,49 @@ class PlaylistList(ListScreen):
         return False
 
 
+class FoundPlaylists(ListScreen):
+    """The result of a YouTube playlist search: A opens one, Y saves it to your playlists."""
+    hints = 'A:Open  Y:Save  B:Back'
+    detail = False
+    visible = 7
+
+    def __init__(self, query, results):
+        super().__init__()
+        self.title = 'Playlists: ' + clip(query, 20)
+        self.results = results
+
+    def items(self, app):
+        return self.results
+
+    def label(self, app, row):
+        return clip(row['title'], 29)
+
+    def right(self, app, row):
+        return str(row['count']) if row.get('count') else ''
+
+    def empty_text(self, app):
+        return ['No playlists found.']
+
+    def info(self, app, row):
+        return clip(row.get('channel') or '', 36)
+
+    def activate(self, app, row):
+        app.open_found_playlist(row)
+
+    def extra(self, app, row, act):
+        if act == 'alt':
+            app.save_found_playlist(row)
+            return True
+        return False
+
+
 class Home(ListScreen):
     title = 'YouTube'
     hints = 'A:Select  Start:Home  F12:MiSTer menu'
     detail = False
     visible = 7
 
-    ENTRIES = ('Search', 'Subscriptions', 'Channels', 'Playlists', 'My Videos', 'Watch Later', 'History', 'Play URL / ID',
+    ENTRIES = ('Search', 'Search Playlists', 'Subscriptions', 'Channels', 'Playlists', 'My Videos', 'Watch Later', 'History', 'Play URL / ID',
                'Add Channel via @handle', 'Add to Lists', 'Settings')
 
     def items(self, app):

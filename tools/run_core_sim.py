@@ -40,8 +40,20 @@ def audio_for(index):
     return bytes(out)
 
 
-def make_record(index, interlaced):
+REPEATS = {3: 2, 5: 4}          # record -> the earlier record whose picture it shows again (header and audio only, other overlay)
+
+
+def make_record(index, interlaced, again=None):
     w, h, crop, flags, ov = GEOMETRIES[index % len(GEOMETRIES)]
+    if again is not None:                                    # a repeat: the referenced slot's planes, this record's own header
+        w, h, crop, flags, _ = GEOMETRIES[again % len(GEOMETRIES)]
+        ov = (GEOMETRIES[again % len(GEOMETRIES)][4] or 0) + 1 if (GEOMETRIES[again % len(GEOMETRIES)][4] or 0) < 2 else 0
+        y, u, v = run_yuv_sim.make_picture('noise', w, h, seed=100 + again)
+        header = yuv.header_for(w, h, crop, interlaced, flags, ov, again % 8)
+        img = bytearray(yuv.SLOT_BYTES)
+        img[0:64] = header
+        img[yuv.AUDIO_OFF:yuv.AUDIO_OFF + yuv.AUDIO_BYTES] = audio_for(index)
+        return bytes(img), (y, u, v, yuv.parse_header(header), OVERLAYS[ov])
     y, u, v = run_yuv_sim.make_picture('noise', w, h, seed=100 + index)
     header = yuv.header_for(w, h, crop, interlaced, flags, ov)
     img = bytearray(yuv.SLOT_BYTES)
@@ -66,7 +78,7 @@ def write_hex(path, regions):
 
 def run(mode, nrec, nlate, work):
     interlaced = mode == '480i'
-    records = [make_record(i, interlaced) for i in range(nrec + nlate)]
+    records = [make_record(i, interlaced, REPEATS.get(i) if i < nrec else None) for i in range(nrec + nlate)]
     regions = [(512 + i * 65536, records[i][0]) for i in range(nrec)]
     for idx, planes in OVERLAYS.items():                 # the three overlay buffers sit after the eight slots
         regions.append((0x80200 + idx * 16384, run_yuv_sim.overlay_image(*planes)))

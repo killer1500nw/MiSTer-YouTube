@@ -33,9 +33,10 @@ def slot_offset(number):
     return SLOT_BASE + (number % SLOTS) * SLOT_BYTES
 
 
-def pack_header(src_w, src_h, ystride, cstride, dx0, dw, dy0, dh, hstep, vstep, sx0, sy0, flags=0, overlay=None):
+def pack_header(src_w, src_h, ystride, cstride, dx0, dw, dy0, dh, hstep, vstep, sx0, sy0, flags=0, overlay=None, ref_slot=None):
     """64-byte slot header. hstep/vstep/sx0/sy0 are unsigned 16.16 fixed point. `overlay` = None or the index (0..2)
-    of the overlay buffer to draw over this picture."""
+    of the overlay buffer to draw over this picture. `ref_slot` = None, or the slot whose Y/U/V planes this record shows again
+    (header word 5 bit 4 + slot in bits 7:5): the record then carries only a header and its audio."""
     for name, v, hi in (('src_w', src_w, MAX_W), ('src_h', src_h, MAX_H)):
         if not 2 <= v <= hi or v % 2:
             raise ValueError('%s %d is outside 2..%d or odd' % (name, v, hi))
@@ -48,7 +49,7 @@ def pack_header(src_w, src_h, ystride, cstride, dx0, dw, dy0, dh, hstep, vstep, 
              dx0 | (dw << 16) | (dy0 << 32) | (dh << 48),
              hstep | (vstep << 32),
              sx0 | (sy0 << 32),
-             0 if overlay is None else (1 | ((overlay % OVERLAYS) << 1)), 0, 0]
+             (0 if overlay is None else (1 | ((overlay % OVERLAYS) << 1))) | (0 if ref_slot is None else (16 | ((ref_slot % 8) << 5))), 0, 0]
     return struct.pack('<8Q', *words)
 
 
@@ -61,7 +62,8 @@ def parse_header(data):
             'dx0': w[2] & 0xFFFF, 'dw': (w[2] >> 16) & 0xFFFF, 'dy0': (w[2] >> 32) & 0xFFFF, 'dh': (w[2] >> 48) & 0xFFFF,
             'hstep': w[3] & 0xFFFFFFFF, 'vstep': (w[3] >> 32) & 0xFFFFFFFF,
             'sx0': w[4] & 0xFFFFFFFF, 'sy0': (w[4] >> 32) & 0xFFFFFFFF,
-            'ov_en': bool(w[5] & 1), 'ov_idx': (w[5] >> 1) & 3}
+            'ov_en': bool(w[5] & 1), 'ov_idx': (w[5] >> 1) & 3,
+            'ref': (w[5] >> 5) & 7 if w[5] & 16 else None}
 
 
 def aligned_size(width, height):
@@ -94,6 +96,12 @@ def layout(src_w, src_h, crop='Off', interlaced=True):
     hstep, vstep = cw / dw, src_h / float(dh)
     sx0 = max(0.0, cx + 0.5 * hstep - 0.5)
     sy0 = max(0.0, 0.5 * vstep - 0.5)
+    if not interlaced:
+        # 240p: each output pixel and line stands for a 2x2 cell of the 640x480 frame (the core keeps every second pixel and line),
+        # so sample at the centre of that cell. Bilinear sampling there averages the neighbours that would be skipped, and the
+        # picture sits where it belongs instead of a quarter of an output line too high.
+        sx0 += 0.5 * hstep
+        sy0 += 0.5 * vstep
     limit = 2.0 if interlaced else 1.0
     prescale = None
     if vstep > limit:
@@ -104,11 +112,11 @@ def layout(src_w, src_h, crop='Off', interlaced=True):
             'sx0': int(round(sx0 * 65536)), 'sy0': int(round(sy0 * 65536)), 'prescale': prescale}
 
 
-def header_for(src_w, src_h, crop='Off', interlaced=True, flags=0, overlay=None):
+def header_for(src_w, src_h, crop='Off', interlaced=True, flags=0, overlay=None, ref_slot=None):
     """Header for a frame of src_w x src_h samples (already aligned with aligned_size)."""
     g = layout(src_w, src_h, crop, interlaced)
     return pack_header(src_w, src_h, src_w, src_w // 2, g['dx0'], g['dw'], g['dy0'], g['dh'],
-                       g['hstep'], g['vstep'], g['sx0'], g['sy0'], flags, overlay)
+                       g['hstep'], g['vstep'], g['sx0'], g['sy0'], flags, overlay, ref_slot)
 
 
 def pieces(header, y, u, v, audio, number):

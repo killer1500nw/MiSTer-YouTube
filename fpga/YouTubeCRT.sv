@@ -35,12 +35,14 @@ localparam CONF_STR = {
     "O[6],Output,240p,480i;",
     "O[7],480i field order,Normal,Swapped;",
     "O[8],Analog dither,Off,On;",
+    "O[10:9],480i flicker filter,Off,Low,Medium,High;",
+    "O[12:11],Composite blur,Off,Low,Medium,High;",
     "-;",
     "T[0],Reset;",
     "J1,A,B,X,Y,L,R,Select,Start;",
     "jn,A,B,X,Y,L,R,Select,Start;",
     "v,6;",
-    "V,v0.15-yuv-",`BUILD_DATE
+    "V,v0.15b-yuv-",`BUILD_DATE
 };
 wire [127:0] status;
 wire [1:0] buttons;
@@ -168,8 +170,8 @@ wire have_frame;
 wire [23:0] scaled_rgb;
 yuv_scaler scaler (
     .clk(clk_sys), .reset(reset | movie_clear), .ce_pix(raw_ce), .px(px),
-    .ny(next_y), .nfield(next_field), .nil(next_il),
-    .cfg_load(movie_commit), .cfg_slot(h_slot), .cfg_flags(h0[34:32] | {status[8],2'b00}),
+    .ny(next_y), .nfield(next_field), .nil(next_il), .flicker(status[10:9]), .blur(status[12:11]), .prog(~raw_il),
+    .cfg_load(movie_commit), .cfg_slot(h5[4] ? h5[7:5] : h_slot), .cfg_flags(h0[34:32] | {status[8],2'b00}),
     .cfg_w1(h1), .cfg_w2(h2), .cfg_w3(h3), .cfg_w4(h4), .cfg_w5(h5),
     .have_frame(have_frame),
     .want(c_want), .grant(c_grant), .busy(c_busy), .valid(c_valid), .dout(DDRAM_DOUT),
