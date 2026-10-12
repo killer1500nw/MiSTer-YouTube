@@ -2174,7 +2174,12 @@ class PlaylistSearch(unittest.TestCase):
         page.raw = 3
         saved = (pipeline.search_playlists, pipeline.playlist_entries)
         pipeline.search_playlists = lambda rt, query, cancel=None, log=None, limit=20: found
-        pipeline.playlist_entries = lambda rt, pid, cancel=None, log=None, limit=200, start=1: ('He-Man', page)
+        seen_bg = []
+
+        def fake_entries(rt, pid, cancel=None, log=None, limit=200, start=1, background=True):
+            seen_bg.append(background)
+            return 'He-Man', page
+        pipeline.playlist_entries = fake_entries
         try:
             self.assertEqual(a._playlist_search_typed(a, 'x'), 'Type something to search for.')
             a.open_home_entry('Search Playlists')
@@ -2190,6 +2195,7 @@ class PlaylistSearch(unittest.TestCase):
             videos = a.screen
             self.assertIsInstance(videos, ui.VideoList)
             self.assertEqual([v['title'] for v in videos.items(a)], ['Episode 0', 'Episode 1', 'Episode 2'])
+            self.assertEqual(seen_bg, [False])                              # a fetch the user waits for must not be frozen by pause_background()
         finally:
             pipeline.search_playlists, pipeline.playlist_entries = saved
 

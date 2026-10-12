@@ -362,7 +362,7 @@ class App:
             res, err = self.run_job(
                 'Opening playlist',
                 lambda: [ui.clip(name, 33), 'Asking YouTube... %ds' % (time.monotonic() - started)],
-                lambda check: pipeline.playlist_entries(self.rt, pid, check, self.log, limit=self.SEARCH_PAGE))
+                lambda check: pipeline.playlist_entries(self.rt, pid, check, self.log, limit=self.SEARCH_PAGE, background=False))
         finally:
             self.feeds.hold.clear()
             pipeline.resume_background()
@@ -391,7 +391,7 @@ class App:
             try:
                 self.feeds.wait_turn()
                 _, vids = pipeline.playlist_entries(self.rt, state['id'], lambda: None, self.log,
-                                                    limit=self.SEARCH_PAGE, start=state['next'])
+                                                    limit=self.SEARCH_PAGE, start=state['next'], background=False)
                 raw = getattr(vids, 'raw', len(vids))
                 seen = {v['id'] for v in state['videos']}
                 state['videos'].extend(v for v in vids if v['id'] not in seen)

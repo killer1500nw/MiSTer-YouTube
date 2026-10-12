@@ -223,16 +223,17 @@ class Page(list):
     raw = 0
 
 
-def playlist_entries(rt, playlist_id, cancel=lambda: None, log=lambda m: None, limit=200, start=1):
+def playlist_entries(rt, playlist_id, cancel=lambda: None, log=lambda m: None, limit=200, start=1, background=True):
     """Up to `limit` videos of a playlist from position `start` (1 = the first), in playlist order, via yt-dlp.
-    -> (playlist title, [video dicts]). A channel's uploads are the playlist 'UU' + channel id without 'UC'."""
+    -> (playlist title, [video dicts]). A channel's uploads are the playlist 'UU' + channel id without 'UC'.
+    `background=False` for a fetch the user is waiting for: it must not be frozen by pause_background()."""
     env = os.environ.copy()
     env.update(SSL_CERT_FILE=str(rt.ca), REQUESTS_CA_BUNDLE=str(rt.ca), CURL_CA_BUNDLE=str(rt.ca))
     cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist',
            '--playlist-start', str(start), '--playlist-end', str(start + limit - 1),
            '--force-ipv4', '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
            '--print', PRINT_PLAYLIST, '--', 'https://www.youtube.com/playlist?list=' + playlist_id]
-    out = capture(niced(cmd), env, cancel, timeout=180, background=True).decode('utf-8', 'replace')
+    out = capture(niced(cmd), env, cancel, timeout=180, background=background).decode('utf-8', 'replace')
     return _parse_flat(out)
 
 
@@ -313,11 +314,17 @@ def search_playlists(rt, query, cancel=lambda: None, log=lambda m: None, limit=2
     env.update(SSL_CERT_FILE=str(rt.ca), REQUESTS_CA_BUNDLE=str(rt.ca), CURL_CA_BUNDLE=str(rt.ca))
     found = []
     for sp in PLAYLIST_FILTERS:
-        cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist', '--force-ipv4',
+        cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist', '--force-ipv4', '--verbose',
                '--playlist-end', str(limit * 2), '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
                '--print', PRINT_FOUND_PLAYLIST, '--', 'https://www.youtube.com/results?search_query=%s&sp=%s' % (quote_plus(query), sp)]
         log('Searching YouTube playlists for "%s"' % query[:40])
-        found = parse_found_playlists(capture(cmd, env, cancel, timeout=180).decode('utf-8', 'replace'))
+        seen_lines = [0]
+
+        def note(text):                            # what yt-dlp is doing, for the log (the first lines only)
+            if seen_lines[0] < 40 and not text.startswith(('[debug] Command-line', '[debug] Encodings', '[debug] Python')):
+                seen_lines[0] += 1
+                log('yt-dlp: ' + text[:160])
+        found = parse_found_playlists(capture(cmd, env, cancel, timeout=100, on_line=note).decode('utf-8', 'replace'))
         if found:
             break
         log('Playlist search: no results with filter %s' % sp)
