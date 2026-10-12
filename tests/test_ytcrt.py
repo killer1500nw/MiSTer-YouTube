@@ -536,6 +536,7 @@ class PlayPolicy(unittest.TestCase):
     def run_play(self, pipes, stop_when):
         import threading
         pipes = list(pipes)
+        self.t0 = time.monotonic()
 
         def fake_open(rt, prof, media, start_s, speed, cancel, crop='Off', target=None):
             self.opened.append((media.label, round(start_s)))
@@ -557,6 +558,16 @@ class PlayPolicy(unittest.TestCase):
         self.assertEqual([t for t, _ in self.opened], ['360p', '240p'])   # it really starved, so it stepped down
         self.assertEqual(len(self.resolved), 1)          # the catalogue was reused: no second yt-dlp run
         self.assertGreater(st.settings['cost_mult'], 1.0)                 # and the estimate was corrected upwards
+
+    def test_an_empty_queue_while_audio_is_being_reopened_is_not_starvation(self):
+        class Reopening(FakePipe):
+            @property
+            def restarts(self):                          # the audio stream is reopened over and over: the picture waits for it
+                return int(time.monotonic() * 20)
+        st = self.make(cost=0.7)
+        self.run_play([Reopening(rate=4)], lambda: self.app.link.sent > 5 and time.monotonic() > self.t0 + 3)
+        self.assertEqual([t for t, _ in self.opened], ['360p'])           # no step down
+        self.assertEqual(st.settings['cost_mult'], 1.0)                   # and nothing learned from it
 
     def test_clean_playback_trusts_the_estimate_a_little_more(self):
         st = self.make(cost=0.78)                        # 360p@452k predicted ~0.69: allowed, and close to the limit
@@ -2020,7 +2031,9 @@ class CopyInTheCostModel(unittest.TestCase):
         c480 = profiles.copy_cost(stream(854, 480, 500), cal, 30)       # scaled down to 640x360 before it is copied
         c43 = profiles.copy_cost(stream(640, 480, 500), cal, 30)
         self.assertAlmostEqual(c480, c360, places=2)
-        self.assertAlmostEqual(c43 / c360, 640 * 480 / (640 * 360.0), places=2)
+        self.assertAlmostEqual(c43 / c360, 0.5 + 0.5 * 640 * 480 / (640 * 360.0), places=2)     # half of the copy time is a fixed cost
+        c240 = profiles.copy_cost(stream(426, 240, 200), cal, 30)
+        self.assertGreater(c240 / c360, 0.6)                                                   # a small picture is not nearly free
 
     def test_the_rgb_core_copies_a_fixed_record(self):
         cal = dict(self.CAL, copy_ms=7.0, copy_bytes=160000, copy_fixed=True)

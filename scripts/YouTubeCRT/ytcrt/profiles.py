@@ -34,7 +34,7 @@ QUALITY_BOX = {'240p': 240, '360p': 360, '480p': 480, 'Auto': 480}      # shorte
 CAL_DEFAULT = {'px': 640 * 360, 'tbr': 307.0, 'fps': 30.0, 'cost': 0.67}
 PIXEL_SHARE = 0.5          # assume half of the decoding cost follows the pixel count and half follows the bitrate
 LIMIT = 0.72              # the decoder may use at most this much of the ARM: the rest is the player's own pipe reading and record copying (about a quarter)
-LIMIT_TOTAL = 0.95         # used instead of LIMIT once the Speed test has measured the picture copy: decoding plus copying may use this much
+LIMIT_TOTAL = 1.10         # used instead of LIMIT once the Speed test has measured the picture copy: decoding plus copying may use this much
 PICTURE_BOX = (640, 480)   # the v0.15 core takes pictures up to this size; a bigger stream is scaled down by ffmpeg first
 BIG_PX = 110000            # above this many pixels (a little more than 426x240) the cheaper decoder settings are used
 
@@ -56,13 +56,21 @@ def picture_bytes(stream):
     return int(w * f) * int(h * f) * 3 // 2
 
 
+def copy_scale(stream, cal):
+    """How the copy time of this stream's pictures compares with the reference picture's. Measured copies are not proportional
+    to the size (a 240p picture took 10 to 24 ms, a 360p one about 23 ms during playback), so a fixed part is assumed."""
+    base = cal.get('copy_bytes')
+    if cal.get('copy_fixed') or not base:
+        return 1.0
+    return 0.5 + 0.5 * picture_bytes(stream) / float(base)
+
+
 def copy_cost(stream, cal, fps):
     """Share of the ARM spent copying this stream's pictures to the core (0 until the Speed test measured it)."""
     ms, base = cal.get('copy_ms'), cal.get('copy_bytes')
     if not ms or not base:
         return 0.0
-    ratio = 1.0 if cal.get('copy_fixed') else picture_bytes(stream) / float(base)
-    return ms / 1000.0 * ratio * fps
+    return ms / 1000.0 * copy_scale(stream, cal) * fps
 
 
 def predicted_cost(stream, cal=None, mult=1.0):

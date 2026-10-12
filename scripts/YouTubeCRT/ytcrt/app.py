@@ -682,7 +682,7 @@ class App:
         cal = self.store.settings.get('cal')
         if n < 300 or not (isinstance(cal, dict) and cal.get('copy_ms') and cal.get('copy_bytes')) or not media.video:
             return
-        per_base = avg_ms if cal.get('copy_fixed') else avg_ms * cal['copy_bytes'] / float(profiles.picture_bytes(media.video))
+        per_base = avg_ms if cal.get('copy_fixed') else avg_ms / profiles.copy_scale(media.video, cal)
         new = round(0.7 * cal['copy_ms'] + 0.3 * min(per_base, 4.0 * cal['copy_ms']), 2)
         if abs(new - cal['copy_ms']) >= 0.1:
             self.store.set('cal', dict(cal, copy_ms=new))
@@ -903,9 +903,13 @@ class App:
                         self._present(state['last'], v, seek_to, dur_ms, False, state, prof, True, True, ytarget)
                 # Is the ARM keeping up? The FPGA queue only runs dry when the decoder falls behind.
                 dt, state['tick'] = now - state['tick'], now
+                rs = getattr(pipe, 'restarts', 0)                 # an audio stream reopened: the picture waits for it, not for the ARM
+                if rs != state.get('restarts', 0):
+                    state['restarts'], state['restart_at'] = rs, now
+                settling = (now - state.get('restart_at', -99.0) < 20.0) or bool(dur_ms and pos_ms() > dur_ms - 20000)
                 if (may_fall_back and not state['paused'] and not state['seeking'] and state['pending'] is None
                         and state['last'] is not None and now - state['opened_at'] > STARVE_GRACE
-                        and link.queued == 0):
+                        and link.queued == 0 and not settling):
                     state['starved'] += dt
                 if (may_fall_back and not state['smooth_noted'] and state['starved'] == 0.0
                         and now - state['opened_at'] > SMOOTH_AFTER):
