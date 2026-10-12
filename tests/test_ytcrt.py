@@ -651,21 +651,31 @@ class PlayPolicy(unittest.TestCase):
         self.assertEqual(len(self.opened), 2)            # opened, crashed, reopened: playback went on
         self.assertEqual(len(self.resolved), 1)          # without asking yt-dlp again
 
-    def test_repeated_decoder_crashes_give_up_after_five_reconnects(self):
+    def test_repeated_decoder_crashes_give_up_after_the_nudges(self):
         self.make(quality='240p')
         always = FakePipe(failures=['video decoder failed (-11): '] * 40)
         self.run_play([always], lambda: type(self.app.screen).__name__ == 'TextView')
-        self.assertEqual(len(self.opened), 2)            # it crashes before any picture: one more try, then a clear error screen
+        self.assertEqual(len(self.opened), 5)            # the first open + 4 tries at nearby positions, then a clear error screen
         self.assertEqual(type(self.app.screen).__name__, 'TextView')
         self.assertIn('Try a lower quality', ' '.join(self.app.screen.lines))
 
-    def test_auto_steps_down_when_the_decoder_crashes_as_soon_as_it_starts(self):
+    def test_a_crash_at_one_position_is_tried_again_a_little_later(self):
+        self.make(quality='240p')
+        crash = 'audio decoder failed (-11): '
+        self.run_play([FakePipe(failures=[crash] * 5), FakePipe(failures=[crash] * 5), FakePipe()], lambda: self.app.link.sent > 15)
+        self.assertEqual(len(self.opened), 3)
+        self.assertEqual(self.opened[0][1], 0)           # the first try, at the resume position
+        self.assertEqual(self.opened[1][1], 1)           # then 1.2 s later
+        self.assertEqual(self.opened[2][1], 3)           # then 3 s later, where it works
+
+    def test_auto_steps_down_when_every_try_crashes(self):
         st = self.make(cost=0.3)                          # Auto picks something big first
         crash = 'audio decoder failed (-11): '
-        self.run_play([FakePipe(failures=[crash] * 5), FakePipe(failures=[crash] * 5), FakePipe()], lambda: len(self.opened) >= 3)
-        self.assertEqual(len(self.opened), 3)                             # opened, crashed, tried again, crashed again: then lighter
-        self.assertEqual(self.opened[0][0], self.opened[1][0])
-        self.assertNotEqual(self.opened[1][0], self.opened[2][0])        # a lighter stream the third time
+        self.run_play([FakePipe(failures=[crash] * 5)] * 0 + [FakePipe(failures=[crash] * 5) for _ in range(5)] + [FakePipe()],
+                      lambda: len(self.opened) >= 6)
+        self.assertEqual(len(self.opened), 6)
+        self.assertEqual(self.opened[0][0], self.opened[4][0])
+        self.assertNotEqual(self.opened[4][0], self.opened[5][0])        # a lighter stream after the nudges all failed
         self.assertEqual(st.settings['cost_mult'], 1.0)                  # and nothing learned about the ARM's speed from a crash
 
     def test_a_starting_screen_shows_until_the_first_picture(self):

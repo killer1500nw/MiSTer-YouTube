@@ -12,6 +12,7 @@ from .store import RESUME_MIN_MS
 
 TEST_CLIP = 'M7kB0lis3xg'
 CPU_LOG_SECONDS = 30.0         # how often playback logs the CPU split between the player and the decoders
+EARLY_NUDGES_MS = (1200, 3000, -2000, 6000)   # where to try again, relative to the start, when the decoder crashes before the first picture
 QUALITY_SETTLE = 1.2        # seconds after the last Quality press in the More panel before the picture restarts
 COPY_BUSY_PARALLEL = 2.2      # the two-core copy slows down less under load than the single-core one, but still does
 COPY_BUSY_CACHED = 1.5        # the same for the cached copy, which does not stall the CPU on every store
@@ -1066,10 +1067,22 @@ class App:
                             # It crashed before showing a single picture: starting again the same way will crash again.
                             state['early'] = state.get('early', 0) + 1
                             if state['early'] == 1:
+                                state['early_base'] = pos_ms()
                                 self._log_crash_clues()
                                 if msg.startswith('audio'):
                                     self._probe_audio(media, prof, pos_ms())
-                            if state['early'] >= 2:
+                            if state['early'] <= len(EARLY_NUDGES_MS):
+                                # ffmpeg's seek crashes at certain positions of some streams (the same position crashes every time,
+                                # a second further on works): start a little before or after instead of at the same place.
+                                at = max(0, state['early_base'] + EARLY_NUDGES_MS[state['early'] - 1])
+                                self.log('The decoder crashes as soon as it starts at %s; trying %s (%d of %d)' % (
+                                    ui.mmss(state['early_base']), ui.mmss(at), state['early'], len(EARLY_NUDGES_MS)))
+                                pipe.close(wait=False)
+                                time.sleep(0.3)
+                                pipe = open_pipe(at)
+                                state.update(seeking=True, note='Reconnecting...', osd_until=now + OSD_SECONDS + 3)
+                                continue
+                            if state['early'] > len(EARLY_NUDGES_MS):
                                 if may_fall_back:
                                     self.log('The decoder crashes as soon as it starts at %s: stepping down' % media.tier)
                                     return 'crashstep', pos_ms()
