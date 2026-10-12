@@ -6,7 +6,7 @@
 # it in seconds, if it runs on the MiSTer's Linux at all. This script finds out.
 #
 # What it does (nothing outside /media/fat/YouTubeNative is touched, and the player is not changed):
-#   1. downloads Node.js v20 for 32-bit ARM from nodejs.org (about 43 MB, checksum verified)
+#   1. downloads Node.js v22 for 32-bit ARM from nodejs.org (about 49 MB, checksum verified; yt-dlp needs 22+)
 #   2. unpacks just the "node" program into /media/fat/YouTubeNative/node-test
 #   3. checks that it starts, then times one yt-dlp lookup of a security-check video using it
 # The result is shown and saved to /media/fat/YouTubeNative/YouTube-node-test.txt: send that file back.
@@ -20,8 +20,8 @@ DIR=$RT/node-test
 REPORT=$RT/YouTube-node-test.txt
 BASE="$(cd -- "$(dirname -- "$0")" && pwd)"
 VID="${1:-eqVnhWeYq94}"            # a Power Rangers episode that needs the security check
-NODE_VER=v20.20.2
-NODE_SHA=8e15f121e721c9354132053188d4c1a18ea9e345c019ee440fb256e3dda7df15
+NODE_VER=v22.23.3
+NODE_SHA=8b99058ec6f4e372b9887f8ecb577a292adb132d59e5104356428a758fdb126c
 NODE_URL=https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-armv7l.tar.gz
 
 mkdir -p "$DIR"
@@ -51,7 +51,7 @@ say "yt-dlp: $YTDLP"
 TARBALL="$DIR/node.tar.gz"
 if [ ! -x "$DIR/node" ]; then
   say ""
-  say "--- 1. downloading Node.js $NODE_VER (about 43 MB) ---"
+  say "--- 1. downloading Node.js $NODE_VER (about 49 MB) ---"
   # The same way the installer downloads yt-dlp: Python with the certificate bundle shipped next to this script
   # (the MiSTer's own curl may not trust nodejs.org). Errors are shown, not hidden.
   python3 - "$NODE_URL" "$TARBALL" "$BASE/cacert.pem" <<'PY' 2>&1 | while read -r l; do say "$l"; done
