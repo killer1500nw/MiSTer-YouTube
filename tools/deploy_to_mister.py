@@ -22,7 +22,7 @@ _KEYS = [Path.home() / '.ssh' / 'mister_ed25519']
 KEY = next((k for k in _KEYS if k.exists()), _KEYS[0])
 REMOTE_SCRIPTS = '/media/fat/Scripts'
 REMOTE_LOG = '/media/fat/YouTubeNative/YouTube-crt-log.txt'
-CORE = 'YouTubeCRT_v0.14-auto.rbf'
+CORE = 'YouTubeCRT_v0.16-fb.rbf'
 
 
 def host_name(arg):
@@ -81,9 +81,9 @@ def deploy(host, core):
 
 def install(host):
     """Send release/Install_YouTube_CRT_Test.sh to /media/fat/Scripts and run it there (what you would do from the Scripts menu)."""
-    f = ROOT / 'release' / 'Install_YouTube_CRT_Test.sh'
+    f = ROOT / 'release' / 'Install_YouTube_CRT.sh'
     if not f.is_file():
-        sys.exit('release/Install_YouTube_CRT_Test.sh not found')
+        sys.exit('release/Install_YouTube_CRT.sh not found')
     dest = REMOTE_SCRIPTS + '/' + f.name
     print('Sending %s (%.1f MB) ...' % (f.name, f.stat().st_size / 1e6))
     with open(f, 'rb') as fh:
@@ -112,7 +112,7 @@ def main():
     ap.add_argument('--setup', action='store_true')
     ap.add_argument('--core', action='store_true')
     ap.add_argument('--log', action='store_true')
-    ap.add_argument('--install', action='store_true', help='send and run release/Install_YouTube_CRT_Test.sh')
+    ap.add_argument('--install', action='store_true', help='send and run release/Install_YouTube_CRT.sh')
     a = ap.parse_args()
     host = host_name(a.host)
     if a.setup:

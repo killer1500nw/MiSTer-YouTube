@@ -10,8 +10,8 @@ LOG=/media/fat/YouTubeNative/YouTube-crt-log.txt
 RT=/media/fat/YouTubeNative
 VER="$(grep -o "__version__ = '[^']*'" "$BASE/ytcrt/__init__.py" 2>/dev/null | cut -d"'" -f2)"
 echo "YouTube CRT installer - files are version ${VER:-unknown}"
-# The current core (v0.16-fb) and the older v0.15-yuv and v0.14-auto ones, which the same player still drives.
-for CORE in YouTubeCRT_v0.16-fb.rbf YouTubeCRT_v0.15-yuv.rbf YouTubeCRT_v0.14-auto.rbf; do
+# Only the current core is installed (older cores already on the card are left alone; the player still drives them).
+for CORE in YouTubeCRT_v0.16-fb.rbf; do
   if [ -f "$BASE/$CORE" ]; then
     mkdir -p /media/fat/_Other
     cp -f "$BASE/$CORE" /media/fat/_Other/"$CORE"

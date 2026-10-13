@@ -1,4 +1,4 @@
-"""Build release/Install_YouTube_CRT_Test.sh: ONE self-contained script (the small installer zip is embedded in it).
+"""Build release/Install_YouTube_CRT.sh: ONE self-contained script (the small installer zip is embedded in it).
 
 Copy that single file to /media/fat/Scripts/ and run it from the MiSTer Scripts menu. Run make_sd_package.py first.
 """
@@ -8,10 +8,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ZIP = ROOT / 'release' / 'YouTubeCRT-installer.zip'
-OUT = ROOT / 'release' / 'Install_YouTube_CRT_Test.sh'
+OUT = ROOT / 'release' / 'Install_YouTube_CRT.sh'
 
 HEAD = r'''#!/bin/bash
-# Self-contained YouTube CRT installer: the player and both cores are inside this one file.
+# Self-contained YouTube CRT installer: the player and the core are inside this one file.
 # Copy it to /media/fat/Scripts/ and run it from the MiSTer Scripts menu. Your videos list and settings are left alone.
 set -Eeuo pipefail
 echo "Unpacking the YouTube CRT files..."

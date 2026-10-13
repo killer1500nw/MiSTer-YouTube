@@ -29,14 +29,13 @@ Not supported: live streams and past livestreams (YouTube serves those in segmen
 
 1. Download [`Install_YouTube_CRT.sh`](https://github.com/killer1500nw/MiSTer-YouTube/releases/latest/download/Install_YouTube_CRT.sh)
    and put that one file in `/media/fat/Scripts/` on the MiSTer's SD card.
-2. On the MiSTer, run **Scripts → Install_YouTube_CRT**. It downloads the latest release, installs the core into
+2. On the MiSTer, run **Scripts → Install_YouTube_CRT**. The player and the core are inside that one file: it installs the core into
    `_Other`, downloads the video tools (yt-dlp, QuickJS, ffmpeg and Node.js) and makes the player start at boot. It needs internet
    access and a roughly correct clock, and it takes a couple of minutes.
-3. Load **YouTubeCRT_v0.14-auto** from `_Other`. The menu appears. Nothing is run per session.
+3. Load **YouTubeCRT_v0.16-fb** from `_Other`. The menu appears. Nothing is run per session.
 
-Run the same script again at any time to update; your lists and settings are kept. Prefer a manual copy, or no
-internet on the MiSTer? Use the full offline package `MiSTer-YouTube-SD.zip` from the
-[releases page](https://github.com/killer1500nw/MiSTer-YouTube/releases) (see [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md)).
+Run the same script again at any time to update; your lists and settings are kept. YouTube needs the internet anyway,
+so there is no separate offline package.
 
 Full instructions, controls and every setting: [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md).
 

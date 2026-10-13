@@ -39,15 +39,11 @@ Not included (yet): search, playlists, live streams, account login, on-screen ke
 
 **One script.** Download `Install_YouTube_CRT.sh` from the
 [latest release](https://github.com/killer1500nw/MiSTer-YouTube/releases/latest), put that single file in
-`/media/fat/Scripts/`, and run **Scripts → Install_YouTube_CRT** on the MiSTer. It downloads the installer package
-(about 1 MB), installs the core into `_Other`, downloads the ARM builds of yt-dlp, QuickJS, ffmpeg and Node.js
+`/media/fat/Scripts/`, and run **Scripts → Install_YouTube_CRT** on the MiSTer. The player and the core are inside that
+file (about 3 MB). It installs the core into `_Other`, downloads the ARM builds of yt-dlp, QuickJS, ffmpeg and Node.js
 (checksum-verified), adds the boot entry, starts the player and shows its log
 (*Waiting for the YouTubeCRT core to be loaded...*). It needs internet access and a roughly correct clock. Run it
-again to update. Then load **YouTubeCRT_v0.15-yuv** from `_Other` (the older YouTubeCRT_v0.14-auto is installed beside it as a fallback).
-
-**Offline instead.** `MiSTer-YouTube-SD.zip` (release asset; rebuild with `python tools/make_sd_package.py`) holds
-the core, the player and the tools (see its `TOOLS.txt`): unzip it to the **root of the SD card** (it merges with your
-`_Other`, `Scripts` and `YouTubeNative` folders), then run **Scripts → YouTubeCRT → Install_YouTube_CRT** once.
+again to update. Then load **YouTubeCRT_v0.16-fb** from `_Other`. Only this core is installed; cores from earlier versions already on the card are left alone.
 
 That is the last script you run. From then on: **load the YouTubeCRT core from the MiSTer menu
 and the GUI appears.** The player starts the streaming session itself. There is no RAM-streaming
