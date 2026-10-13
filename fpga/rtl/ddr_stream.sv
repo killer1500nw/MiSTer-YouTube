@@ -21,7 +21,7 @@ module ddr_stream #(
  input wire commit,
  output reg clear_frame=0,error=0,done=0,
  // header of the record that is waiting to be committed (stable until the commit)
- output reg [63:0] hdr0=0,hdr1=0,hdr2=0,hdr3=0,hdr4=0,hdr5=0,hdr6=0,
+ output reg [63:0] hdr0=0,hdr1=0,hdr2=0,hdr3=0,hdr4=0,hdr5=0,hdr6=0,hdr7=0,
  output wire [2:0] hdr_slot,
  output wire record_ready,
  // Controller/keyboard state, published every poll at BASE+5 / BASE+6 (see PROTOCOL.md).
@@ -30,7 +30,7 @@ module ddr_stream #(
  localparam [28:0] BASE=29'h06000000;
  localparam [28:0] AUDIO_BEATS=29'h0000E800;      // 0x74000 bytes / 8
  localparam [31:0] MAGIC=32'h35565559;            // "YUV5"
- localparam [31:0] IDENT=32'h36445459;            // v0.16 identity (v0.15: 35445459, v0.14: 34445459)
+ localparam [31:0] IDENT=32'h37445459;            // v0.16b identity: header words 6 and 7 (v0.16: 36445459 had word 6 only, v0.15: 35445459, v0.14: 34445459)
  localparam OFF=0,IDLE=1,HEART=2,ACK=3,STATS=4,RHEAD=5,WHEAD=6,
   CHEAD=7,RPROD=8,WPROD=9,CPROD=10,BEGIN_FRAME=11,
   RDATA=12,WDATA=13,EMIT=14,END_FRAME=15,WAIT_COMMIT=16,WIN0=17,WIN1=18,
@@ -123,7 +123,7 @@ module ddr_stream #(
      state<=IDLE;
     end
    end
-   // Header words 0..6 of the slot: geometry, flags and the picture's base address for the scaler.
+   // Header words 0..7 of the slot: geometry, flags, the picture's base address and plane offsets for the scaler.
    HRD: if(!busy) begin
     if(valid) begin
      case(hi)
@@ -133,9 +133,10 @@ module ddr_stream #(
       3: hdr3<=dout;
       4: hdr4<=dout;
       5: hdr5<=dout;
-      default: hdr6<=dout;
+      6: hdr6<=dout;
+      default: hdr7<=dout;
      endcase
-     if(hi==3'd6) state<=HCHK;
+     if(hi==3'd7) state<=HCHK;
      else begin hi<=hi+1'b1; state<=HRD; end
     end else state<=HWAIT;
    end
@@ -147,9 +148,10 @@ module ddr_stream #(
      3: hdr3<=dout;
      4: hdr4<=dout;
      5: hdr5<=dout;
-     default: hdr6<=dout;
+     6: hdr6<=dout;
+     default: hdr7<=dout;
     endcase
-    if(hi==3'd6) state<=HCHK;
+    if(hi==3'd7) state<=HCHK;
     else begin hi<=hi+1'b1; state<=HRD; end
    end
    HCHK: begin

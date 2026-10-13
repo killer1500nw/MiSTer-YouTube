@@ -579,7 +579,7 @@ class App:
                 raise RuntimeError('No video in your lists could be used as a test clip.')
             for attempt in range(3):
                 try:
-                    tgt = pipeline.yuv_target(media, self.link.interlaced) if self.yuv else None    # the pipeline the core really gets
+                    tgt = pipeline.yuv_target(media, self.link.interlaced, self.big_pictures()) if self.yuv else None    # the pipeline the core really gets
                     runs = [(sp, pipeline.benchmark(self.rt, prof, media, sp, 12, check, target=tgt)) for sp in profiles.SPEEDS]
                     best_sp, best_x = 'Fast', dict(runs)['Fast']      # Auto is sized for Fast: Fastest drops the deblocking filter completely (blocky), so it is never relied on
                     # The same setting again with only the decoder (no scaling, no RGB565 conversion): the difference is the
@@ -625,7 +625,7 @@ class App:
                 # wider, the pipe format): if that is much slower than decode only, the filter chain is the limit, not the decoder.
                 try:
                     deadline[0] = time.monotonic() + 60
-                    tgt_big = pipeline.yuv_target(big[0], self.link.interlaced)
+                    tgt_big = pipeline.yuv_target(big[0], self.link.interlaced, self.big_pictures())
                     full_big = pipeline.benchmark(self.rt, prof, big[0], best_sp, 8, limited, target=tgt_big)
                     self.log('Full playback pipeline on the bigger stream (%dx%d, pre-scale %s): %.2fx against %.2fx decode only' % (
                         big[0].video['width'], big[0].video['height'], tgt_big.get('prescale') or 'none', full_big, big[1]))
@@ -711,11 +711,17 @@ class App:
         self.push(ui.Message('Speed test', lines, ui.GREEN if best >= 1.15 else ui.AMBER))
 
     # playback ---------------------------------------------------------
+    def big_pictures(self):
+        """Can pictures wider than 640 go to the core as they are (v0.16 core reading from the framebuffer)? The FPGA then shrinks them."""
+        return bool(getattr(getattr(self.link, 'box', None), 'fb_active', False) and getattr(self.link, 'big_core', False))
+
     def calibration(self):
         """(cal, mult): the measured reference stream and the learned correction."""
         cal = self.store.settings.get('cal')
         if not (isinstance(cal, dict) and cal.get('cost') and cal.get('px')):
             cal = profiles.CAL_DEFAULT
+        if self.big_pictures():
+            cal = dict(cal, big=True)                  # copy costs follow the real picture size, and no pre-scale is needed
         return cal, float(self.store.settings.get('cost_mult', 1.0))
 
     def effective_speed(self, media, speed):
@@ -772,7 +778,7 @@ class App:
         cal = self.store.settings.get('cal')
         if n < 90 or not (isinstance(cal, dict) and cal.get('copy_ms') and cal.get('copy_bytes')) or not media.video:
             return
-        per_base = avg_ms if cal.get('copy_fixed') else avg_ms / profiles.copy_scale(media.video, cal)
+        per_base = avg_ms if cal.get('copy_fixed') else avg_ms / profiles.copy_scale(media.video, dict(cal, big=self.big_pictures()))
         new = round(0.7 * cal['copy_ms'] + 0.3 * min(per_base, 4.0 * cal['copy_ms']), 2)
         if abs(new - cal['copy_ms']) >= 0.1:
             self.store.set('cal', dict(cal, copy_ms=new))
@@ -917,7 +923,7 @@ class App:
                  'tick': time.monotonic(), 'tier': media.tier, 'retries': 0, 'smooth_noted': False,
                  'crashes': 0, 'crash_at': 0.0}
         dur_ms = media.duration * 1000
-        ytarget = pipeline.yuv_target(media, link.interlaced) if self.yuv else None
+        ytarget = pipeline.yuv_target(media, link.interlaced, self.big_pictures()) if self.yuv else None
         state['flags'] = 0
 
         def pos_ms():

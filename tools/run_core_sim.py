@@ -112,7 +112,7 @@ def run(mode, nrec, nlate, work):
         problems.append('ack %s != %d (one behind the commit count)' % (stat['ack'], total - 1))
     if int(stat['played']) != total:
         problems.append('played %s != %d' % (stat['played'], total))
-    if int(stat['session']) != 77 or stat['ident'] != '36445459' or int(stat['error']) != 0:
+    if int(stat['session']) != 77 or stat['ident'] != '37445459' or int(stat['error']) != 0:
         problems.append('session/identity/error: %s' % stat)
     # video: every record's 480 (or 240) lines must be right
     expected = {}

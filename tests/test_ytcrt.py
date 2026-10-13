@@ -1798,9 +1798,11 @@ class YuvFormat(unittest.TestCase):
 
     def test_pictures_too_tall_for_the_line_step_are_prescaled(self):
         yuv = self.yuv
-        self.assertIsNone(yuv.layout(848, 480, 'Off', True)['prescale'])   # 480 rows into 360 lines: 1.33 rows per line, fine in 480i
-        p = yuv.layout(848, 480, 'Off', False)['prescale']                 # but 240p can step at most 1 row per line
-        self.assertEqual(p[1], yuv.layout(848, 480)['dh'])               # no more rows than the destination has lines
+        self.assertIsNone(yuv.layout(848, 480, 'Off', True)['prescale'])   # 480 rows into 362 lines: 1.33 rows per frame line, fine
+        self.assertIsNone(yuv.layout(848, 480, 'Off', False)['prescale'])  # and in 240p too: the core's eight row buffers cope with up to 2
+        p = yuv.layout(400, 1000, 'Off', True)['prescale']                 # a very tall picture steps more than 2 rows per line
+        self.assertIsNotNone(p)
+        self.assertEqual(p[1], int(480 * 2.0) & ~1)                        # shrunk to twice the destination lines, no more
         self.assertEqual(p[0] % 16, 0)
         self.assertEqual(yuv.aligned_size(426, 240), (416, 240))
         self.assertEqual(yuv.aligned_size(854, 480), (848, 480))
@@ -2533,9 +2535,18 @@ class KnownCores(unittest.TestCase):
         link._adopt(transport.IDENT_FB)
         self.assertEqual(link.kind, 'yuv')
         self.assertIsNotNone(link.box.fb)
+        self.assertTrue(link.big_core)                                  # the v0.16b core takes pictures wider than 640
         link2 = core_link.Link.__new__(core_link.Link)
         link2.box = transport.Mailbox(bytearray(yuv.MAP_BYTES))
         link2.fb_candidate = object()
+        link3 = core_link.Link.__new__(core_link.Link)
+        link3.box = transport.Mailbox(bytearray(yuv.MAP_BYTES))
+        link3.fb_candidate = object()
+        link3._adopt(transport.IDENT_FB6)                               # the first v0.16 core: framebuffer yes, big pictures no
+        self.assertIsNotNone(link3.box.fb)
+        self.assertFalse(link3.big_core)
+        link3.box.fb = None
+        link3.box.close()
         link2._adopt(transport.IDENT_YUV)                               # the v0.15 core never gets the framebuffer
         self.assertIsNone(link2.box.fb)
         link.box.fb = link2.box.fb = None
@@ -2590,6 +2601,72 @@ class DecoderThreads(unittest.TestCase):
         fb.write_planes(40, [(yuv.Y_OFF, bytes(range(256)) * 20)])           # picture 41 of 41: not a checked one (41 % 16 != 0)
         fb.close()
         tmp.close()
+
+
+class BigPictures(unittest.TestCase):
+    """v0.16 core with the framebuffer: pictures up to 864 x 480 go in as they are and the FPGA shrinks them."""
+
+    def test_plane_offsets(self):
+        from ytcrt import yuv
+        self.assertEqual(yuv.plane_offsets(640, 480), (yuv.U_OFF, yuv.V_OFF))                # classic sizes keep the fixed positions
+        u, v = yuv.plane_offsets(848, 480)
+        self.assertEqual(u % 4096, 0)
+        self.assertEqual(v % 4096, 0)
+        self.assertGreaterEqual(u, yuv.Y_OFF + 848 * 480)                                   # no overlap with Y
+        self.assertGreaterEqual(v, u + 424 * 240)                                           # nor between U and V
+        self.assertLessEqual(v + 424 * 240, yuv.FB_SLOT_STRIDE)                             # and it fits a framebuffer slot
+        with self.assertRaises(ValueError):
+            yuv.plane_offsets(864, 486 * 2)
+
+    def test_header_carries_the_offsets_only_for_big_pictures(self):
+        from ytcrt import yuv
+        big = yuv.parse_header(yuv.header_for(848, 480, 'Off', True, 0, None, None, 0x22101000))
+        self.assertEqual((big['u_off'], big['v_off']), yuv.plane_offsets(848, 480))
+        self.assertEqual(big['pic_base'], 0x22101000)
+        small = yuv.header_for(640, 360, 'Off', True, 0, None, None, 0x22101000)
+        self.assertEqual(yuv.parse_header(small)['u_off'], yuv.U_OFF)                       # word 7 stays 0: the core's defaults
+        with self.assertRaises(ValueError):
+            yuv.header_for(848, 480, 'Off', True)                                           # a big picture needs the framebuffer address
+
+    def test_big_stream_goes_in_unscaled_with_the_framebuffer_and_scaled_without(self):
+        media = type('M', (), {'video': {'width': 854, 'height': 480}})()
+        self.assertEqual(pipeline.yuv_target(media, True, big=True), {'w': 848, 'h': 480, 'prescale': None})
+        scaled = pipeline.yuv_target(media, True, big=False)
+        self.assertLessEqual(scaled['w'], 640)
+        self.assertIsNotNone(scaled['prescale'])
+        wide = type('M', (), {'video': {'width': 1280, 'height': 720}})()
+        self.assertLessEqual(pipeline.yuv_target(wide, True, big=True)['w'], 864)           # something bigger is still scaled down first
+
+    def test_a_big_picture_is_written_where_its_header_says(self):
+        from ytcrt import yuv
+        t = FramebufferPictures()
+        tmp, fb = t.make()
+        import mmap
+        from ytcrt import transport
+        plain = mmap.mmap(-1, yuv.MAP_BYTES)
+        box = transport.Mailbox(plain)
+        box.fb = fb
+        box.use_method('fb')
+        w, h = 848, 480
+        frame = bytes((i * 3) & 255 for i in range(w * h * 3 // 2))
+        header = yuv.header_for(w, h, 'Off', True, 0, None, None, fb.pic_base(1))
+        box.picture(1, header, frame, w * h, bytes(6400), in_fb=True)
+        head = yuv.parse_header(header)
+        slot = yuv.FB_SLOTS_OFFSET + 1 * yuv.FB_SLOT_STRIDE
+        self.assertEqual(bytes(fb.fb_map[slot + yuv.Y_OFF:slot + yuv.Y_OFF + 100]), frame[:100])
+        self.assertEqual(bytes(fb.fb_map[slot + head['u_off']:slot + head['u_off'] + 100]), frame[w * h:w * h + 100])
+        self.assertEqual(bytes(fb.fb_map[slot + head['v_off']:slot + head['v_off'] + 100]), frame[w * h + w * h // 4:w * h + w * h // 4 + 100])
+        box.fb = None
+        box.close()
+        fb.close()
+        tmp.close()
+
+    def test_copy_cost_follows_the_real_picture_size_in_big_mode(self):
+        s = stream(854, 480, 500)
+        cal = {'px': 640 * 360, 'tbr': 307.0, 'fps': 30.0, 'cost': 0.4, 'copy_ms': 8.0, 'copy_bytes': 345600}
+        plain = profiles.copy_cost(s, cal, 30)
+        big = profiles.copy_cost(s, dict(cal, big=True), 30)
+        self.assertGreater(big, plain)                                                      # 848 x 480 is bigger than the 640 x 360 it was shrunk to
 
 
 if __name__ == '__main__':

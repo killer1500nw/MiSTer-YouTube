@@ -24,6 +24,7 @@ module yuv_scaler #(
     input  wire [2:0]  cfg_slot,
     input  wire [2:0]  cfg_flags,
     input  wire [63:0] cfg_w1, cfg_w2, cfg_w3, cfg_w4, cfg_w5,
+    input  wire [63:0] cfg_w7,             // bits 31:0 / 63:32: byte offsets of the U and V planes from the picture base (0: the fixed 0x4C000 / 0x60000)
     input  wire [63:0] cfg_w6,             // bit 63: the picture planes start at the physical byte address in bits 31:0 (else in this record's slot)
     output reg         have_frame = 0,
     // shared DDR master (single outstanding burst read)
@@ -46,6 +47,7 @@ module yuv_scaler #(
     reg [31:0] hstep = 0, vstep = 0, sx0 = 0, sy0 = 0;
     reg [2:0]  flags = 0;
     reg [28:0] slot_beats = 0;
+    reg [28:0] u_beats = 29'h9800, v_beats = 29'hC000;
     reg        ov_en = 0;
     reg [28:0] ov_beats = 0;
     reg        invalidate = 0;
@@ -64,6 +66,8 @@ module yuv_scaler #(
             sx0 <= cfg_w4[31:0];   sy0 <= cfg_w4[63:32];
             flags <= cfg_flags;
             slot_beats <= cfg_w6[63] ? cfg_w6[31:3] : (BASE + 29'd512 + {10'd0, cfg_slot, 16'd0});
+            u_beats <= (cfg_w7[31:0] != 0) ? cfg_w7[31:3] : 29'h9800;
+            v_beats <= (cfg_w7[63:32] != 0) ? cfg_w7[63:35] : 29'hC000;
             ov_en <= cfg_w5[0];
             ov_beats <= BASE + 29'h80200 + {13'd0, cfg_w5[2:1], 14'd0};     // overlay buffers: 3 x 128 KiB after the slots
             have_frame <= 1;
@@ -73,19 +77,19 @@ module yuv_scaler #(
     end
 
     // ------------------------------------------------------------------ row buffers
-    // plane 0 = Y, 1 = U, 2 = V ; buffer 0..3 ; bank 0 = even pixels, 1 = odd pixels
+    // plane 0 = Y, 1 = U, 2 = V ; buffer 0..7 (row r lives in buffer r mod 8: a displayed line may advance up to 4 source rows) ; bank 0 = even pixels, 1 = odd pixels
     reg  [6:0]  wa_r = 0;
     reg  [31:0] wd_e, wd_o;
     reg  [63:0] wd_raw;
-    reg  [3:0]  we_y = 0, we_u = 0, we_v = 0;
+    reg  [7:0]  we_y = 0, we_u = 0, we_v = 0;
     reg  [1:0]  we_oy = 0, we_ou = 0, we_ov = 0;
     reg  [6:0]  ra_ye = 0, ra_yo = 0, ra_ce = 0, ra_co = 0;     // read addresses (pipeline stage 4)
     reg  [5:0]  ra_oy = 0, ra_oc = 0;
-    wire [31:0] q_ye [0:3], q_yo [0:3], q_ue [0:3], q_uo [0:3], q_ve [0:3], q_vo [0:3];
+    wire [31:0] q_ye [0:7], q_yo [0:7], q_ue [0:7], q_uo [0:7], q_ve [0:7], q_vo [0:7];
     wire [63:0] q_oy [0:1], q_ou [0:1], q_ov [0:1];
     genvar gi;
     generate
-        for (gi = 0; gi < 4; gi = gi + 1) begin : bufs
+        for (gi = 0; gi < 8; gi = gi + 1) begin : bufs
             linebuf ye (.clk(clk), .we(we_y[gi]), .wa(wa_r), .wd(wd_e), .ra(ra_ye), .rq(q_ye[gi]));
             linebuf yo (.clk(clk), .we(we_y[gi]), .wa(wa_r), .wd(wd_o), .ra(ra_yo), .rq(q_yo[gi]));
             linebuf ue (.clk(clk), .we(we_u[gi]), .wa(wa_r), .wd(wd_e), .ra(ra_ce), .rq(q_ue[gi]));
@@ -117,18 +121,18 @@ module yuv_scaler #(
     reg [20:0] ofs = 0;
     reg [6:0]  beat = 0;
     reg [6:0]  nbeats = 0;
-    reg [9:0]  yid [0:3];  reg [3:0] yv = 0;
-    reg [9:0]  cid [0:3];  reg [3:0] cv = 0;
+    reg [9:0]  yid [0:7];  reg [7:0] yv = 0;
+    reg [9:0]  cid [0:7];  reg [7:0] cv = 0;
     reg [7:0]  oyid [0:1]; reg [1:0] oyv = 0;
     reg [6:0]  ocid [0:1]; reg [1:0] ocv = 0;
     // job promoted at the start of a line
     reg        nxt_ready = 0, nxt_valid = 0, nxt_act = 0;
-    reg [1:0]  nxt_y0 = 0, nxt_y1 = 0, nxt_c0 = 0, nxt_c1 = 0;
+    reg [2:0]  nxt_y0 = 0, nxt_y1 = 0, nxt_c0 = 0, nxt_c1 = 0;
     reg        nxt_ovy = 0, nxt_ovc = 0;
     reg [7:0]  nxt_fy = 0, nxt_fcy = 0;
     reg [8:0]  nxt_d = 0;
     reg        cur_valid = 0, cur_act = 0;
-    reg [1:0]  cur_y0 = 0, cur_y1 = 0, cur_c0 = 0, cur_c1 = 0;
+    reg [2:0]  cur_y0 = 0, cur_y1 = 0, cur_c0 = 0, cur_c1 = 0;
     reg        cur_ovy = 0, cur_ovc = 0;
     reg [7:0]  cur_fy = 0, cur_fcy = 0;
     reg [8:0]  cur_d = 0;
@@ -147,8 +151,8 @@ module yuv_scaler #(
     end
 
     wire [8:0] dnext = nil ? {ny[7:0], nfield} : {ny[7:0], 1'b0};
-    wire need_y  = !(yv[frow[1:0]] && yid[frow[1:0]] == frow);
-    wire need_c  = !(cv[frow[1:0]] && cid[frow[1:0]] == frow);
+    wire need_y  = !(yv[frow[2:0]] && yid[frow[2:0]] == frow);
+    wire need_c  = !(cv[frow[2:0]] && cid[frow[2:0]] == frow);
     wire need_oy = !(oyv[frow[0]] && oyid[frow[0]] == frow[7:0]);
     wire need_oc = !(ocv[frow[0]] && ocid[frow[0]] == frow[6:0]);
     wire need_row = (fkind == 2'd0) ? need_y : (fkind == 2'd1) ? need_c : (fkind == 2'd2) ? need_oy : need_oc;
@@ -233,8 +237,8 @@ module yuv_scaler #(
                 // overlay Y at +0, U at +0x13000, V at +0x18000 bytes of the overlay buffer
                 case (fplane)
                     3'd0: addr <= slot_beats + 29'h20 + {8'd0, ofs};
-                    3'd1: addr <= slot_beats + 29'h9800 + {8'd0, ofs};
-                    3'd2: addr <= slot_beats + 29'hC000 + {8'd0, ofs};
+                    3'd1: addr <= slot_beats + u_beats + {8'd0, ofs};
+                    3'd2: addr <= slot_beats + v_beats + {8'd0, ofs};
                     3'd3: addr <= ov_beats + {8'd0, ofs};
                     3'd4: addr <= ov_beats + 29'h2600 + {8'd0, ofs};
                     default: addr <= ov_beats + 29'h3000 + {8'd0, ofs};
@@ -256,8 +260,8 @@ module yuv_scaler #(
                             3'd1: begin fplane <= 3'd2; st <= S_MUL; end             // U done: V of the same row next
                             3'd4: begin fplane <= 3'd5; st <= S_MUL; end
                             default: begin
-                                if (fplane == 3'd0) begin yv[frow[1:0]] <= 1; yid[frow[1:0]] <= frow; end
-                                if (fplane == 3'd2) begin cv[frow[1:0]] <= 1; cid[frow[1:0]] <= frow; end
+                                if (fplane == 3'd0) begin yv[frow[2:0]] <= 1; yid[frow[2:0]] <= frow; end
+                                if (fplane == 3'd2) begin cv[frow[2:0]] <= 1; cid[frow[2:0]] <= frow; end
                                 if (fplane == 3'd3) begin oyv[frow[0]] <= 1; oyid[frow[0]] <= frow[7:0]; end
                                 if (fplane == 3'd5) begin ocv[frow[0]] <= 1; ocid[frow[0]] <= frow[6:0]; end
                                 want <= 0;
@@ -269,7 +273,7 @@ module yuv_scaler #(
                 end
             end
             S_DONE: begin
-                nxt_y0 <= r0[1:0]; nxt_y1 <= r1[1:0]; nxt_c0 <= c0[1:0]; nxt_c1 <= c1[1:0];
+                nxt_y0 <= r0[2:0]; nxt_y1 <= r1[2:0]; nxt_c0 <= c0[2:0]; nxt_c1 <= c1[2:0];
                 nxt_ovy <= d9[1]; nxt_ovc <= d9[2];
                 nxt_fy <= fy; nxt_fcy <= fcy; nxt_d <= d9; nxt_valid <= jv; nxt_act <= 1;
                 st <= S_FIN;
@@ -297,9 +301,9 @@ module yuv_scaler #(
             wd_e <= {dout[55:48], dout[39:32], dout[23:16], dout[7:0]};
             wd_o <= {dout[63:56], dout[47:40], dout[31:24], dout[15:8]};
             case (fplane)
-                3'd0: we_y[frow[1:0]] <= 1;
-                3'd1: we_u[frow[1:0]] <= 1;
-                3'd2: we_v[frow[1:0]] <= 1;
+                3'd0: we_y[frow[2:0]] <= 1;
+                3'd1: we_u[frow[2:0]] <= 1;
+                3'd2: we_v[frow[2:0]] <= 1;
                 3'd3: we_oy[frow[0]] <= 1;
                 3'd4: we_ou[frow[0]] <= 1;
                 default: we_ov[frow[0]] <= 1;
@@ -345,7 +349,7 @@ module yuv_scaler #(
     reg [2:0] s4_oly = 0, s4_olc = 0; reg s4_ovy = 0, s4_ovc = 0;
     reg s4_lodd = 0, s4_codd = 0, s4_lclamp = 0, s4_cclamp = 0, s4_v = 0, s4_act = 0;
     reg [7:0] s4_fx = 0, s4_fcx = 0, s4_fy = 0, s4_fcy = 0;
-    reg [1:0] s4_by0 = 0, s4_by1 = 0, s4_bc0 = 0, s4_bc1 = 0;
+    reg [2:0] s4_by0 = 0, s4_by1 = 0, s4_bc0 = 0, s4_bc1 = 0;
     reg [9:0] s4_x = 0;
     reg [8:0] s4_d = 0;
     wire [9:0] lx1 = s3_lx0 + 10'd1;
@@ -373,7 +377,7 @@ module yuv_scaler #(
     reg [2:0] b_oly = 0, b_olc = 0; reg b_ovy = 0, b_ovc = 0;
     reg b_lodd = 0, b_codd = 0, b_lclamp = 0, b_cclamp = 0, b_v = 0, b_act = 0;
     reg [7:0] b_fx = 0, b_fcx = 0, b_fy = 0, b_fcy = 0;
-    reg [1:0] b_by0 = 0, b_by1 = 0, b_bc0 = 0, b_bc1 = 0;
+    reg [2:0] b_by0 = 0, b_by1 = 0, b_bc0 = 0, b_bc1 = 0;
     reg [9:0] b_x = 0; reg [8:0] b_d = 0;
     always @(posedge clk) begin
         b_lane_ye <= s4_lane_ye; b_lane_yo <= s4_lane_yo; b_lane_ce <= s4_lane_ce; b_lane_co <= s4_lane_co;

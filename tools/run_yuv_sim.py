@@ -52,6 +52,11 @@ CASES = {
     # the picture planes found by the physical address in header word 6 (10th item): a slot other than the record's own
     'pic360':    (640, 360, 'Off', True, 0, 'noise', 1, 0, 0, True),
     'pic240p':   (480, 360, 'Fill', False, yuv.FLAG_601, 'noise', None, 0, 0, True),
+    # a picture wider than 640 (v0.16 core, framebuffer path): the FPGA shrinks it, the chroma planes are where word 7 says
+    'big848':    (848, 480, 'Off', True, 0, 'noise', None, 0, 0, True),
+    'big848ov':  (848, 480, 'Fill', True, yuv.FLAG_601, 'noise', 1, 0, 0, True),
+    'big240p':   (848, 480, 'Off', False, 0, 'noise', None, 0, 0, True),      # 240p: 2.65 source rows per displayed line
+    'steep480':  (640, 480, 'Off', True, 0, 'noise', None, 0, 0, True),
 }
 
 
@@ -98,11 +103,12 @@ def make_picture(kind, w, h, seed=1):
 
 
 def slot_image(header, y, u, v):
-    img = bytearray(yuv.SLOT_BYTES)
+    head = yuv.parse_header(header)                     # a big picture says in word 7 where its chroma planes are
+    img = bytearray(max(yuv.SLOT_BYTES, (head['v_off'] + len(v) + 7) & ~7))
     img[0:64] = header
     img[yuv.Y_OFF:yuv.Y_OFF + len(y)] = y
-    img[yuv.U_OFF:yuv.U_OFF + len(u)] = u
-    img[yuv.V_OFF:yuv.V_OFF + len(v)] = v
+    img[head['u_off']:head['u_off'] + len(u)] = u
+    img[head['v_off']:head['v_off'] + len(v)] = v
     return bytes(img)
 
 

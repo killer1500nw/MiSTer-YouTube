@@ -797,14 +797,17 @@ class RecordPipeline:
             raise RuntimeError('Pipe reader did not stop within five seconds.')
 
 
-def yuv_target(media, interlaced=True):
+def yuv_target(media, interlaced=True, big=False):
     """Size of the YUV pictures for this video: its own size trimmed to a multiple of 16 x 2, or a pre-scaled size when it
     is larger than the core's row buffers (640 x 480) or the core could not step through it fast enough.
+    `big` = the v0.16 core is reading pictures from the framebuffer: pictures up to 864 x 480 go in unscaled (the FPGA does the shrinking,
+    which ffmpeg needs half its time for on this ARM).
     -> {'w', 'h', 'prescale'}"""
     w, h = yuv.aligned_size(int(media.video['width']), int(media.video['height']))
     pre = None
-    if w > yuv.MAX_W or h > yuv.MAX_H:
-        k = min(yuv.MAX_W / float(w), yuv.MAX_H / float(h))
+    max_w = yuv.BIG_MAX_W if big else yuv.MAX_W
+    if w > max_w or h > yuv.MAX_H:
+        k = min(max_w / float(w), yuv.MAX_H / float(h))
         pre = yuv.aligned_size(int(w * k), int(h * k))
         w, h = pre
     steep = yuv.layout(w, h, 'Off', interlaced)['prescale']      # 'Off' has the smallest destination: the strictest case

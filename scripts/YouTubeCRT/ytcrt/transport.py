@@ -15,9 +15,11 @@ from . import yuv
 
 IDENT_RGB = 0x34445459   # v0.14-auto core; v0.13 used 0x33445459
 IDENT_YUV = 0x35445459   # v0.15-yuv core
-IDENT_FB = 0x36445459    # v0.16-fb core: the same plus header word 6 (the picture planes can be read from the Linux framebuffer)
+IDENT_FB6 = 0x36445459   # first v0.16 core: header word 6 (the picture planes can be read from the Linux framebuffer)
+IDENT_FB = 0x37445459    # v0.16b core: the same plus word 7 (plane offsets), so pictures up to 864 x 480 are possible
 IDENT = IDENT_RGB        # kept for older callers
-IDENTS = (IDENT_FB, IDENT_YUV, IDENT_RGB)
+IDENTS = (IDENT_FB, IDENT_FB6, IDENT_YUV, IDENT_RGB)
+FB_IDENTS = (IDENT_FB, IDENT_FB6)         # cores that can read pictures from the framebuffer
 RUN = 0x33515459
 MAP_BYTES = yuv.MAP_BYTES        # one mapping serves both cores (the RGB core simply never touches the upper part)
 RGB_MAP_BYTES = 0x201000
@@ -44,6 +46,10 @@ def load_native(path=None):
     return NATIVE
 
 
+import collections
+_KEEP = collections.deque(maxlen=32)       # temporary copies of read-only buffers, kept alive while their addresses are in use
+
+
 def address_of(buf):
     """Address of the first byte of a bytes / bytearray / memoryview (writable or not) or a ctypes array."""
     if isinstance(buf, ctypes.Array):
@@ -52,6 +58,7 @@ def address_of(buf):
         return ctypes.addressof(ctypes.c_char.from_buffer(buf))
     if isinstance(buf, memoryview):
         buf = buf.tobytes()
+        _KEEP.append(buf)                       # the copy must outlive this call: its address is what the caller uses
     return ctypes.cast(ctypes.c_char_p(buf), ctypes.c_void_p).value
 
 
@@ -334,8 +341,9 @@ class Mailbox:
             raise ValueError('Incorrect picture size.')
         view = memoryview(frame)
         if in_fb:
-            self.fb.write_planes(number, [(yuv.Y_OFF, view[:ysize]), (yuv.U_OFF, view[ysize:ysize + csize]),
-                                          (yuv.V_OFF, view[ysize + csize:])])
+            head = yuv.parse_header(header)
+            self.fb.write_planes(number, [(yuv.Y_OFF, view[:ysize]), (head['u_off'], view[ysize:ysize + csize]),
+                                          (head['v_off'], view[ysize + csize:])])
         else:
             self.copy_pieces([(base + yuv.Y_OFF, view[:ysize]), (base + yuv.U_OFF, view[ysize:ysize + csize]),
                               (base + yuv.V_OFF, view[ysize + csize:])])

@@ -18,7 +18,7 @@ crt240 vid (.clk(clk), .reset(reset), .pattern(2'd0), .interlace(interlace), .il
             .ce_pix(ce), .hs(hs), .vs(vs), .de(de), .r(), .g(), .b(), .pixel_x(px), .pixel_y(py),
             .next_y(ny), .next_field(nfield), .next_il(nil));
 
-reg [63:0] mem [0:65535];
+reg [63:0] mem [0:131071];                        // 1 MiB: room for an 848 x 480 picture
 reg [63:0] ovmem [0:3*16384-1];                    // the three 128 KiB overlay buffers (beats)
 reg cfg_load = 0;
 wire have_frame, want, rd, busy, valid;
@@ -28,7 +28,7 @@ wire grant = want;
 yuv_scaler #(.BASE(BASE)) dut (
     .clk(clk), .reset(reset), .ce_pix(ce), .px(px), .ny(ny), .nfield(nfield), .nil(nil), .flicker(flk), .blur(sft), .prog(~il),
     .cfg_load(cfg_load), .cfg_slot(pic_base ? 3'd0 : slot[2:0]), .cfg_flags(mem[0][34:32]),
-    .cfg_w1(mem[1]), .cfg_w2(mem[2]), .cfg_w3(mem[3]), .cfg_w4(mem[4]), .cfg_w5(mem[5]), .cfg_w6(mem[6]),
+    .cfg_w1(mem[1]), .cfg_w2(mem[2]), .cfg_w3(mem[3]), .cfg_w4(mem[4]), .cfg_w5(mem[5]), .cfg_w6(mem[6]), .cfg_w7(mem[7]),
     .have_frame(have_frame), .want(want), .grant(grant), .busy(busy), .valid(valid), .dout(dout),
     .addr(addr), .burst(burst), .rd(rd), .rgb(rgb));
 
@@ -50,7 +50,7 @@ always @(posedge clk) begin
         if (a_cur < 0) $fatal(1, "bad address");
         active <= 1; a_cur <= addr; left <= burst; lat <= 4 + lfsr[5:4];
         bursts = bursts + 1;
-        if (!(addr >= slot_base && addr + burst <= slot_base + 29'd65536) &&
+        if (!(addr >= slot_base && addr + burst <= slot_base + 29'd131072) &&
             !(addr >= OVB && addr + burst <= OVB + 29'd49152)) $fatal(1, "read outside the slot and overlays: %h", addr);
     end
     if (active) begin

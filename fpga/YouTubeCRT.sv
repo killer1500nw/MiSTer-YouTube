@@ -42,7 +42,7 @@ localparam CONF_STR = {
     "J1,A,B,X,Y,L,R,Select,Start;",
     "jn,A,B,X,Y,L,R,Select,Start;",
     "v,6;",
-    "V,v0.16-fb-",`BUILD_DATE
+    "V,v0.16b-fb-",`BUILD_DATE
 };
 wire [127:0] status;
 wire [1:0] buttons;
@@ -125,7 +125,7 @@ wire [28:0] s_addr, c_addr;
 wire [7:0] s_burst, s_be, c_burst;
 wire s_rd, s_wr, c_rd, c_want, c_grant, s_busy, s_valid, c_busy, c_valid;
 wire [63:0] s_din;
-wire [63:0] h0, h1, h2, h3, h4, h5, h6;
+wire [63:0] h0, h1, h2, h3, h4, h5, h6, h7;
 wire [2:0] h_slot;
 wire rec_ready;
 ddr_stream stream (
@@ -136,7 +136,7 @@ ddr_stream stream (
     .audio_wr(movie_audio_wr), .audio_addr(movie_audio_addr), .audio_data(movie_data),
     .audio_ready(movie_audio_ready), .commit(movie_commit),
     .clear_frame(stream_clear), .error(movie_error), .done(movie_done),
-    .hdr0(h0), .hdr1(h1), .hdr2(h2), .hdr3(h3), .hdr4(h4), .hdr5(h5), .hdr6(h6), .hdr_slot(h_slot), .record_ready(rec_ready),
+    .hdr0(h0), .hdr1(h1), .hdr2(h2), .hdr3(h3), .hdr4(h4), .hdr5(h5), .hdr6(h6), .hdr7(h7), .hdr_slot(h_slot), .record_ready(rec_ready),
     .in0({joy1,joy0}), .in1({key_seq,key_ev})
 );
 ddr_arb arb (
@@ -172,7 +172,7 @@ yuv_scaler scaler (
     .clk(clk_sys), .reset(reset | movie_clear), .ce_pix(raw_ce), .px(px),
     .ny(next_y), .nfield(next_field), .nil(next_il), .flicker(status[10:9]), .blur(status[12:11]), .prog(~raw_il),
     .cfg_load(movie_commit), .cfg_slot(h5[4] ? h5[7:5] : h_slot), .cfg_flags(h0[34:32] | {status[8],2'b00}),
-    .cfg_w1(h1), .cfg_w2(h2), .cfg_w3(h3), .cfg_w4(h4), .cfg_w5(h5), .cfg_w6(h6),
+    .cfg_w1(h1), .cfg_w2(h2), .cfg_w3(h3), .cfg_w4(h4), .cfg_w5(h5), .cfg_w6(h6), .cfg_w7(h7),
     .have_frame(have_frame),
     .want(c_want), .grant(c_grant), .busy(c_busy), .valid(c_valid), .dout(DDRAM_DOUT),
     .addr(c_addr), .burst(c_burst), .rd(c_rd), .rgb(scaled_rgb)

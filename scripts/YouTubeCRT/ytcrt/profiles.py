@@ -36,6 +36,7 @@ PIXEL_SHARE = 0.5          # assume half of the decoding cost follows the pixel 
 LIMIT = 0.72              # the decoder may use at most this much of the ARM: the rest is the player's own pipe reading and record copying (about a quarter)
 LIMIT_TOTAL = 1.10         # used instead of LIMIT once the Speed test has measured the picture copy: decoding plus copying may use this much
 PICTURE_BOX = (640, 480)   # the v0.15 core takes pictures up to this size; a bigger stream is scaled down by ffmpeg first
+PICTURE_BOX_BIG = (864, 480)   # the v0.16 core reading from the framebuffer takes pictures this big
 BIG_PX = 110000            # above this many pixels (a little more than 426x240) the cheaper decoder settings are used
 
 
@@ -49,10 +50,11 @@ def limit_for(cal=None):
     return LIMIT_TOTAL if cal and cal.get('copy_ms') else LIMIT
 
 
-def picture_bytes(stream):
+def picture_bytes(stream, big=False):
     """Bytes of YUV 4:2:0 the player copies to the core for one picture of this stream."""
     w, h = stream['width'], stream['height']
-    f = min(1.0, PICTURE_BOX[0] / w, PICTURE_BOX[1] / h)
+    box = PICTURE_BOX_BIG if big else PICTURE_BOX
+    f = min(1.0, box[0] / w, box[1] / h)
     return int(w * f) * int(h * f) * 3 // 2
 
 
@@ -62,7 +64,7 @@ def copy_scale(stream, cal):
     base = cal.get('copy_bytes')
     if cal.get('copy_fixed') or not base:
         return 1.0
-    return 0.5 + 0.5 * picture_bytes(stream) / float(base)
+    return 0.5 + 0.5 * picture_bytes(stream, bool(cal.get('big'))) / float(base)
 
 
 def copy_cost(stream, cal, fps):

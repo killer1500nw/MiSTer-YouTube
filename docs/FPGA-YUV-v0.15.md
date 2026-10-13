@@ -50,6 +50,8 @@ Header (little-endian 64-bit words):
 | 4 | 31:0 / 63:32 | `sx0`, `sy0`: source coordinate of the first destination pixel / line, unsigned 16.16 |
 | 5 | 0 / 2:1 | overlay enable, overlay buffer index (0..2) |
 | 5 | 4 / 7:5 | repeat: when bit 4 is set the Y/U/V planes are read from slot `7:5` instead of this record's slot (the record carries only its header and audio) |
+| 6 | 63 / 31:0 | v0.16: bit 63 set = the Y/U/V planes start at the physical byte address in bits 31:0 (the Linux framebuffer, which the CPU writes about ten times faster than the uncached slot memory) instead of in this record's slot |
+| 7 | 31:0 / 63:32 | v0.16b: byte offsets of the U and V planes from that base (0 = the fixed 0x4C000 / 0x60000); lets pictures up to 864 x 480 in |
 
 The player computes the steps and start offsets (crop, aspect, letterbox) so the RTL stays simple. Pixel centres:
 `sx0 = max(0, (0.5 * hstep - 0.5 + crop_x)) * 65536`, likewise `sy0`.
@@ -106,6 +108,15 @@ dither: out = min(255, v + M[d&3][x&3]) & 0xFC, M = 0 2 0 2 / 3 1 3 1 / 0 2 0 2 
 * **240p output** uses the v0.14 pixel timing (6.67 MHz, 320 active pixels, accepted by the MiSTer's HDMI scaler). The core keeps every second
   pixel and line of the 640 x 480 frame; the player starts sampling at the centre of each 2 x 2 cell (`sx0 += hstep / 2`, `sy0 += vstep / 2`) so
   bilinear sampling averages what would be dropped.
+
+## v0.16 / v0.16b: pictures from the framebuffer, up to 864 x 480
+
+Measured on a MiSTer: `/dev/fb0` (driver `MiSTer_fb`, physical 0x22001000, 8,294,400 bytes) takes a 345 KB picture in about 0.75 ms against
+8 ms (idle) to 28 ms (playing) for the uncached region at 0x30000000. The player writes the planes into the framebuffer, issues a cache flush
+as the memory barrier, checks some bytes back through an uncached /dev/mem window (the first 16 pictures, then one in 16), and only then writes
+the header (still in the small uncached slot, with the audio). Identities: 0x36445459 (word 6) and 0x37445459 (words 6 and 7).
+Pictures wider than 640 go in unscaled (848 x 480 for a 16:9 480p stream): ffmpeg's shrink to 640 wide cost it about half its throughput
+(0.81x against 1.66x decode only), and the FPGA scales it for free. Framebuffer slot n: `fb_start + 0x100000 + n * 0xA0000`.
 
 ## Verification
 

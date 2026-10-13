@@ -21,7 +21,7 @@ SLOTS = t.SLOTS
 RECORD_BYTES = t.RECORD_BYTES
 FRAME_SECONDS = t.FRAME_SECONDS
 YUV_SLOTS = 6            # records the v0.15 player keeps queued: 8 slots minus the one on screen and one of margin
-KINDS = {t.IDENT_RGB: 'rgb', t.IDENT_YUV: 'yuv', t.IDENT_FB: 'yuv'}
+KINDS = {t.IDENT_RGB: 'rgb', t.IDENT_YUV: 'yuv', t.IDENT_FB: 'yuv', t.IDENT_FB6: 'yuv'}
 
 
 class Cancelled(RuntimeError):
@@ -87,7 +87,8 @@ class Link:
     def _adopt(self, ident):
         """Remember which core this is; the v0.16 core can read pictures from the framebuffer."""
         fb = getattr(self, 'fb_candidate', None)
-        if self.box is not None and ident == t.IDENT_FB and fb is not None and self.box.fb is None:
+        self.big_core = ident == t.IDENT_FB                     # only the v0.16b core understands pictures wider than 640
+        if self.box is not None and ident in t.FB_IDENTS and fb is not None and self.box.fb is None:
             self.box.fb = fb
             self.fb_candidate = None
         self.ident = ident
@@ -121,8 +122,8 @@ class Link:
             now = time.monotonic()
             if ident != last_ident or now - last_note > 60:
                 # Diagnostics only: what the mailbox looks like while we wait.
-                self.log('Waiting: identity word %08x (want %08x, %08x or %08x), heartbeat %d' %
-                         (ident, t.IDENT_FB, t.IDENT_YUV, t.IDENT_RGB, self.box.read(36)))
+                self.log('Waiting: identity word %08x (want %08x, %08x, %08x or %08x), heartbeat %d' %
+                         (ident, t.IDENT_FB, t.IDENT_FB6, t.IDENT_YUV, t.IDENT_RGB, self.box.read(36)))
                 last_note, last_ident = now, ident
             if end is not None and time.monotonic() > end:
                 raise RuntimeError('No live YouTubeCRT core detected.')
