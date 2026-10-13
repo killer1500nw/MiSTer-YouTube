@@ -77,6 +77,50 @@ def cacheflush(start, end):
         return False
 
 
+def console_bind(on, root='/sys/class/vtconsole'):
+    """Attach (on=True) or detach (False) the Linux text console from the framebuffer. While it is attached its cursor blinks and any
+    text it prints is drawn into /dev/fb0, which is where this player writes pictures (dashes through the video, one per blink).
+    -> the names of the console drivers that were switched ('vtcon1'), [] when there is nothing to switch."""
+    changed = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return changed
+    for name in names:
+        try:
+            with open(os.path.join(root, name, 'name'), encoding='utf-8', errors='replace') as f:
+                if 'frame buffer' not in f.read().lower():
+                    continue
+            with open(os.path.join(root, name, 'bind'), 'w') as f:
+                f.write('1' if on else '0')
+            changed.append(name)
+        except OSError:
+            continue
+    return changed
+
+
+def console_graphics(on, tty_paths=('/dev/tty0', '/dev/tty1')):
+    """Put the text console into graphics mode (KDSETMODE, what X does): the framebuffer console then stops drawing its text and
+    cursor altogether. A second way to keep it out of the pictures if it cannot be unbound. -> True if a console took it."""
+    try:
+        import fcntl
+    except ImportError:
+        return False
+    for path in tty_paths:
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+        except OSError:
+            continue
+        try:
+            fcntl.ioctl(fd, 0x4B3A, 1 if on else 0)           # KDSETMODE: KD_GRAPHICS (1) / KD_TEXT (0)
+            return True
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
+    return False
+
+
 def quiet_console(tty_paths=('/dev/tty1', '/dev/console'), blink='/sys/class/graphics/fbcon/cursor_blink'):
     """Stop the Linux text console's cursor from blinking in the framebuffer (it flashes dashes through a picture that sits where the
     cursor happens to be). Hides the cursor (escape code) and switches the blink off; best effort, -> how many things worked."""

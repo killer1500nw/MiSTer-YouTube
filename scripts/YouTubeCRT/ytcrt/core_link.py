@@ -91,11 +91,28 @@ class Link:
         if self.box is not None and ident in t.FB_IDENTS and fb is not None and self.box.fb is None:
             self.box.fb = fb
             self.fb_candidate = None
+        if self.box is not None and ident in t.FB_IDENTS and self.box.fb is not None:
+            self._detach_console()                             # (again in every session: it is attached again when one ends)
         self.ident = ident
         if self.box is not None and KINDS.get(ident) == 'yuv' and getattr(self, 'preferred_method', None):
             self.box.use_method(self.preferred_method)
         self.kind = KINDS[ident]
         self.slots = YUV_SLOTS if self.kind == 'yuv' else SLOTS
+
+    def _detach_console(self):
+        if not getattr(self, 'console_detached', False):
+            names = t.console_bind(False)
+            graphics = t.console_graphics(True)
+            self.console_detached = bool(names) or graphics
+            getattr(self, 'log', print)('Linux text console: %s; graphics mode %s' % (
+                ('detached from the framebuffer (%s)' % ', '.join(names)) if names else 'could not be detached (not found or not allowed)',
+                'on' if graphics else 'not available'))
+
+    def _attach_console(self):
+        if getattr(self, 'console_detached', False):
+            t.console_graphics(False)
+            t.console_bind(True)
+            self.console_detached = False
 
     def core_alive(self):
         """Read-only probe: is one of our cores loaded and its heartbeat ticking?"""
@@ -184,9 +201,11 @@ class Link:
                     self.box.command(0)
         finally:
             self.session = None
+            self._attach_console()                             # the core may be about to go: give the F9 terminal its framebuffer back
 
     def close(self):
         try:
+            self._attach_console()
             self.end_session()
         finally:
             if self.box:

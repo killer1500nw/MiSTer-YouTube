@@ -2727,5 +2727,67 @@ class FramebufferParallel(unittest.TestCase):
             tmp.close()
 
 
+class ConsoleDetach(unittest.TestCase):
+    def make_root(self):
+        import os
+        import tempfile
+        root = tempfile.mkdtemp()
+        for name, label, bind in (('vtcon0', '(S) dummy device', '1'), ('vtcon1', '(M) frame buffer device', '1')):
+            os.makedirs(os.path.join(root, name))
+            open(os.path.join(root, name, 'name'), 'w').write(label)
+            open(os.path.join(root, name, 'bind'), 'w').write(bind)
+        return root
+
+    def test_only_the_framebuffer_console_is_switched(self):
+        import os
+        from ytcrt import transport
+        root = self.make_root()
+        self.assertEqual(transport.console_bind(False, root), ['vtcon1'])
+        self.assertEqual(open(os.path.join(root, 'vtcon1', 'bind')).read(), '0')
+        self.assertEqual(open(os.path.join(root, 'vtcon0', 'bind')).read(), '1')        # the dummy console is left alone
+        self.assertEqual(transport.console_bind(True, root), ['vtcon1'])
+        self.assertEqual(open(os.path.join(root, 'vtcon1', 'bind')).read(), '1')
+
+    def test_nothing_happens_without_a_vtconsole(self):
+        from ytcrt import transport
+        self.assertEqual(transport.console_bind(False, '/nonexistent/vtconsole'), [])
+
+    def test_the_link_detaches_for_a_framebuffer_core_and_attaches_again_when_the_session_ends(self):
+        from ytcrt import core_link, transport, yuv
+        calls = []
+        saved = (transport.console_bind, transport.console_graphics)
+        transport.console_bind = lambda on, root=None: (calls.append(on), ['vtcon1'])[1]
+        transport.console_graphics = lambda on, paths=None: True
+        try:
+            link = core_link.Link.__new__(core_link.Link)
+            link.log = lambda m: None
+            link.box = transport.Mailbox(bytearray(yuv.MAP_BYTES))
+            link.box.fb = object()
+            link.session = None
+            link._adopt(transport.IDENT_FB)
+            link._adopt(transport.IDENT_FB)                                          # polled again: not detached twice
+            self.assertEqual(calls, [False])
+            link.end_session()
+            self.assertEqual(calls, [False, True])
+            link._adopt(transport.IDENT_FB)                                          # a new session detaches again
+            self.assertEqual(calls, [False, True, False])
+            old = core_link.Link.__new__(core_link.Link)
+            old.log = lambda m: None
+            old.box = transport.Mailbox(bytearray(yuv.MAP_BYTES))
+            old._adopt(transport.IDENT_YUV)                                          # the v0.15 core never touches the console
+            self.assertEqual(calls, [False, True, False])
+            link.box.fb = None
+            link.box.close()
+            old.box.close()
+        finally:
+            transport.console_bind, transport.console_graphics = saved
+
+
+class ConsoleGraphics(unittest.TestCase):
+    def test_graphics_mode_is_harmless_where_there_is_no_console(self):
+        from ytcrt import transport
+        self.assertFalse(transport.console_graphics(True, ('/nonexistent/tty0',)))
+
+
 if __name__ == '__main__':
     unittest.main()
