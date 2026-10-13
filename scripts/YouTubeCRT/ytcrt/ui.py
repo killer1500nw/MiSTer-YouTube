@@ -108,7 +108,7 @@ class Message(Screen):
         if self.spinner:
             n = int(time.monotonic() * 6) % 8
             for i in range(8):
-                c.rect(MX + 8 + i * 14, 190, 10, 8, RED if i == n else PANEL)
+                c.rect(MX + 8 + i * 14, min(max(190, y + 4), 212), 10, 8, RED if i == n else PANEL)
 
     def handle(self, app, act):
         if act == 'back' and self.on_back is not False:
@@ -159,9 +159,10 @@ class TextInput(Screen):
     KW, KH, X0, Y0 = 28, 20, 20, 76
     MAX = 200
 
-    def __init__(self, title, prompt, on_submit):
+    def __init__(self, title, prompt, on_submit, initial='', spaces=False):
         self.title, self.prompt, self.on_submit = title, prompt, on_submit
-        self.text, self.error = '', ''
+        self.spaces = spaces                          # the space key types a space (searches); links and handles have none
+        self.text, self.error = initial, ''
         self.row, self.col = 1, 0
         self.shift = False
         self.hints = 'A:Key X:Del Y:Shift Start:OK B:Cancel'
@@ -188,7 +189,7 @@ class TextInput(Screen):
                 self.submit(app)
         else:
             ch = self.ROWS[self.row][self.col]
-            if ch != ' ' and len(self.text) < self.MAX:
+            if (ch != ' ' or self.spaces) and len(self.text) < self.MAX:
                 self.text += self._char(ch)
         self.error = ''
 
@@ -377,11 +378,12 @@ class VideoList(ListScreen):
     """Rows are video dicts. Subclasses supply `videos(app)`."""
 
     def __init__(self, title, source, hints='A:Play  Y:Later  B:Back', empty=None, status=None, refresh=None,
-                 more=None, can_more=None, loading=None):
+                 more=None, can_more=None, loading=None, remove=None):
         super().__init__()
         self.title, self.source, self.hints = title, source, hints
         self._empty, self._status, self.refresh = empty, status, refresh
         self.more, self.can_more, self.loading = more, can_more, loading      # paging: a "Load more" row at the end
+        self.remove = remove                                                  # Y removes the highlighted entry (My Videos)
 
     def items(self, app):
         vids = self.source(app)
@@ -438,6 +440,8 @@ class VideoList(ListScreen):
             bits.append('resume ' + mmss(pos))
         if app.store.in_later(v['id']):
             bits.append('saved')
+        if app.store.is_slow(v['id']):
+            bits.insert(0, 'slow start')                  # needs YouTube's security check
         lines.append('  '.join(bits))
         return {'vid': v['id'], 'title': v.get('title', ''), 'lines': lines}
 
@@ -454,6 +458,9 @@ class VideoList(ListScreen):
             return True
         if v.get('_more'):
             return False
+        if act == 'alt' and self.remove:
+            self.remove(app, v)
+            return True
         if act == 'alt':
             added = app.store.toggle_later(v)
             app.toast('Saved to Watch Later' if added else 'Removed from Watch Later')
@@ -463,7 +470,7 @@ class VideoList(ListScreen):
 
 class ChannelList(ListScreen):
     title = 'Channels'
-    hints = 'A:Open  X:Refresh  B:Back'
+    hints = 'A:Open X:Refresh Y:Remove B:Back'
     detail = False
     visible = 8
 
@@ -498,12 +505,15 @@ class ChannelList(ListScreen):
         if act == 'menu':
             app.refresh_feeds(force=True)
             return True
+        if act == 'alt':
+            app.confirm_remove_channel(ch[0], ch[1])
+            return True
         return False
 
 
 class PlaylistList(ListScreen):
     title = 'Playlists'
-    hints = 'A:Open  X:Refresh  B:Back'
+    hints = 'A:Open X:Refresh Y:Remove B:Back'
     detail = False
     visible = 8
 
@@ -543,6 +553,45 @@ class PlaylistList(ListScreen):
         if act == 'menu':
             app.refresh_lists(force=True)
             return True
+        if act == 'alt':
+            app.confirm_remove('playlist', row[1], [row[0]])
+            return True
+        return False
+
+
+class FoundPlaylists(ListScreen):
+    """The result of a YouTube playlist search: A opens one, Y saves it to your playlists."""
+    hints = 'A:Open  Y:Save  B:Back'
+    detail = False
+    visible = 7
+
+    def __init__(self, query, results):
+        super().__init__()
+        self.title = 'Playlists: ' + clip(query, 20)
+        self.results = results
+
+    def items(self, app):
+        return self.results
+
+    def label(self, app, row):
+        return clip(row['title'], 29)
+
+    def right(self, app, row):
+        return str(row['count']) if row.get('count') else ''
+
+    def empty_text(self, app):
+        return ['No playlists found.']
+
+    def info(self, app, row):
+        return clip(row.get('channel') or '', 36)
+
+    def activate(self, app, row):
+        app.open_found_playlist(row)
+
+    def extra(self, app, row, act):
+        if act == 'alt':
+            app.save_found_playlist(row)
+            return True
         return False
 
 
@@ -552,8 +601,8 @@ class Home(ListScreen):
     detail = False
     visible = 7
 
-    ENTRIES = ('Subscriptions', 'Channels', 'Playlists', 'My Videos', 'Watch Later', 'History', 'Play URL / ID',
-               'Add to Lists', 'Settings')
+    ENTRIES = ('Search', 'Search Playlists', 'Subscriptions', 'Channels', 'Playlists', 'My Videos', 'Watch Later', 'History', 'Play URL / ID',
+               'Add Channel via @handle', 'Add to Lists', 'Settings')
 
     def items(self, app):
         return self.ENTRIES

@@ -17,11 +17,16 @@ NS = {'a': 'http://www.w3.org/2005/Atom', 'yt': 'http://www.youtube.com/xml/sche
 FEED = 'https://www.youtube.com/feeds/videos.xml?channel_id='
 TTL = 15 * 60
 MAX_LOADED = 500        # stop offering "Load more" at this many videos in one list
+FAIL_COOLDOWN = 1800    # seconds before a playlist that failed is tried again in the background
 PAGE = 50               # videos fetched per page of a channel or playlist (yt-dlp, not the 15-video RSS feed)
 RSS_TRIES = 4           # YouTube's RSS endpoint answers 404/500 at random: retry before giving up
+RSS_DOWN_AFTER = 2      # this many channels in a row failing on RSS: treat the endpoint as down
+RSS_DOWN_FOR = 30 * 60  # and do not try it again for this long (seconds)
 RSS_BACKOFF = 1.0       # seconds; waits 1 s, 2 s, 3 s between tries
 UA = 'Mozilla/5.0 (X11; Linux armv7l) YouTubeCRT/1.0'
 THUMB_W, THUMB_H = 80, 45
+THUMB_BYTES = {'rgb565': THUMB_W * THUMB_H * 2,
+               'yuv420p': THUMB_W * THUMB_H + 2 * ((THUMB_W + 1) // 2) * ((THUMB_H + 1) // 2)}      # Y, then U and V
 
 
 def parse_time(text):
@@ -79,9 +84,11 @@ class Feeds:
         self.thumbs = {}       # video id -> bytes | None (failed) ; absent = not requested
         self.thumb_pending = set()
         self.ffmpeg = None
+        self.thumb_format = 'rgb565'          # 'yuv420p' when the v0.15 core's YUV canvas draws them
         self.generation = 0    # bumped whenever data changes, UI polls it
         self.log = lambda msg: None   # set by the player so problems reach the log file
         self.status = {}       # subscription ref -> 'ok, 15 videos' or the reason it failed
+        self.failed_at = {}          # playlist id -> when its last fetch failed (not retried for FAIL_COOLDOWN unless forced)
         self.playlist_fetch = None   # callable(playlist_id) -> (title, [videos]), set by the player
         self.page_fetch = None       # callable(playlist_id, start, count) -> (title, [videos]): later pages
         self.loading = set()         # ('channel' | 'playlist', id) pages being fetched right now
@@ -89,6 +96,9 @@ class Feeds:
         self.titles = self._load('titles.json', {})         # video id -> {'title', 'channel'} (+ 'err')
         self.fallback = None   # callable(channel_id) -> [video dicts]: used when RSS keeps failing
         self.fallback_lock = threading.Lock()   # one heavy yt-dlp at a time
+        self.rss_failed = 0                     # channels in a row whose RSS feed failed completely
+        self.rss_down_until = 0.0               # while set, RSS is not even tried: YouTube's feed endpoint is down
+        self.hold = threading.Event()           # set while a video is starting or playing: background jobs wait their turn
         disk = self._load('feeds.json', {})
         for cid, e in disk.items():
             e['ok'] = True
@@ -111,6 +121,11 @@ class Feeds:
             os.replace(tmp, os.path.join(self.cache_dir, name))
         except OSError:
             pass
+
+    def wait_turn(self):
+        """Background work stands aside while a video is starting or playing: that is the core's job."""
+        while self.hold.is_set():
+            time.sleep(0.5)
 
     def _get(self, url, timeout=15, headers=None):
         req = urllib.request.Request(url, headers=dict({'User-Agent': UA}, **(headers or {})))
@@ -187,12 +202,17 @@ class Feeds:
                 cur['name'] = name_override
             self.status[ref] = 'ok, %d videos' % len(cur['videos'])
             return
+        self.wait_turn()
         entry, err = None, None
-        for attempt in range(RSS_TRIES):
+        rss_down = time.time() < self.rss_down_until
+        if rss_down:
+            err = RuntimeError('RSS is down')
+        for attempt in range(0 if rss_down else RSS_TRIES):
             try:
                 name, videos = parse_feed(self._get(FEED + cid))
                 entry = {'name': name_override or name, 'videos': videos, 'at': time.time(), 'ok': True}
                 self.status[ref] = 'ok, %d videos' % len(videos)
+                self.rss_failed, self.rss_down_until = 0, 0.0
                 break
             except Exception as exc:
                 err = exc
@@ -201,7 +221,13 @@ class Feeds:
                     time.sleep(RSS_BACKOFF * (attempt + 1))
                     continue
                 break
+        if entry is None and not rss_down:
+            self.rss_failed += 1
+            if self.rss_failed >= RSS_DOWN_AFTER:           # two channels in a row: stop wasting time and CPU on a dead endpoint
+                self.rss_down_until = time.time() + RSS_DOWN_FOR
+                self.log('YouTube\'s RSS feeds are failing for every channel; using yt-dlp instead for %d min' % (RSS_DOWN_FOR // 60))
         if entry is None and self.fallback:
+            self.wait_turn()
             self.log('channel %s: RSS failed (%s); asking yt-dlp instead' % (ref, self._why(err)))
             try:
                 with self.fallback_lock:
@@ -212,6 +238,7 @@ class Feeds:
                     self.status[ref] = 'ok, %d videos (no dates)' % len(videos)
             except Exception as exc:
                 self.log('channel %s: yt-dlp fallback failed: %s' % (ref, str(exc)[:100]))
+                err = RuntimeError('yt-dlp: ' + self._clean(exc))        # say what really failed, not the RSS 404
         if entry is None:
             self.status[ref] = self._why(err)
             self.log('channel %s (%s): feed failed: %s' % (ref, cid, self.status[ref]))
@@ -304,6 +331,7 @@ class Feeds:
 
         def run():
             try:
+                self.wait_turn()
                 with self.lock:
                     e = self._entry(kind, ident)
                     have = len(e['videos']) if e else 0
@@ -359,6 +387,9 @@ class Feeds:
                 if not self.playlist_fetch:
                     self.status[pid] = 'yt-dlp is not installed'
                     continue
+                if not force and time.time() - self.failed_at.get(pid, 0) < FAIL_COOLDOWN:
+                    continue                                     # it failed a moment ago: do not tie up the ARM retrying (X retries)
+                self.wait_turn()
                 try:
                     with self.fallback_lock:
                         title, vids = self.playlist_fetch(pid)
@@ -370,12 +401,15 @@ class Feeds:
                                                'next': getattr(vids, 'raw', len(vids)) + 1}
                         self.generation += 1
                     self.status[pid] = 'ok, %d videos' % len(vids)
+                    self.failed_at.pop(pid, None)
                 except Exception as exc:
                     self.status[pid] = self._clean(exc)
+                    self.failed_at[pid] = time.time()
                     self.log('playlist %s: %s' % (pid, self.status[pid]))
             for name, vid in videos:
                 if vid in self.titles and not force and not self.titles[vid].get('err'):
                     continue
+                self.wait_turn()
                 try:
                     self.titles[vid] = self._oembed(vid)
                 except Exception as exc:
@@ -423,7 +457,7 @@ class Feeds:
 
     # thumbnails -------------------------------------------------------
     def thumb(self, vid):
-        """-> raw RGB565LE bytes (THUMB_W x THUMB_H) or None; schedules a fetch."""
+        """-> raw picture bytes (THUMB_W x THUMB_H, in `thumb_format`) or None; schedules a fetch."""
         with self.lock:
             if vid in self.thumbs:
                 return self.thumbs[vid]
@@ -434,12 +468,14 @@ class Feeds:
         return None
 
     def _fetch_thumb(self, vid):
-        path = os.path.join(self.cache_dir, 'thumbs', vid + '.rgb565')
+        self.wait_turn()
+        fmt = self.thumb_format
+        path = os.path.join(self.cache_dir, 'thumbs', vid + ('.rgb565' if fmt == 'rgb565' else '.yuv'))
         data = None
         try:
             with open(path, 'rb') as f:
                 data = f.read()
-            if len(data) != THUMB_W * THUMB_H * 2:
+            if len(data) != THUMB_BYTES[fmt]:
                 data = None
         except OSError:
             pass
@@ -448,10 +484,10 @@ class Feeds:
                 jpg = self._get('https://i.ytimg.com/vi/%s/mqdefault.jpg' % vid, timeout=10)
                 p = subprocess.run(
                     [self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-i', 'pipe:0',
-                     '-vf', 'scale=%d:%d:flags=area' % (THUMB_W, THUMB_H), '-pix_fmt', 'rgb565le',
+                     '-vf', 'scale=%d:%d:flags=area' % (THUMB_W, THUMB_H), '-pix_fmt', 'rgb565le' if fmt == 'rgb565' else 'yuv420p',
                      '-frames:v', '1', '-f', 'rawvideo', 'pipe:1'],
                     input=jpg, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
-                if p.returncode == 0 and len(p.stdout) == THUMB_W * THUMB_H * 2:
+                if p.returncode == 0 and len(p.stdout) == THUMB_BYTES[fmt]:
                     data = p.stdout
                     os.makedirs(os.path.dirname(path), exist_ok=True)
                     with open(path, 'wb') as f:

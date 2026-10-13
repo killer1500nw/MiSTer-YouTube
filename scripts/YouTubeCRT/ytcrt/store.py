@@ -21,7 +21,12 @@ SETTINGS_DEFAULTS = {
     'thumbnails': 'On',
     'quality': 'Auto',         # Auto | 240p | 360p | 480p: Auto picks the best stream the ARM can decode in time
     'cal': dict(profiles.CAL_DEFAULT),   # measured by the Speed test: cost of one reference stream on this MiSTer
+    'speed_clip': '',          # the video the last Speed test used: reused so repeated tests are comparable
+    'fastest_ids': [],         # videos that starved on Fast at 480p and played cleanly on Fastest (newest last, at most 60)
     'cost_mult': 1.0,          # learned: grows when a stream starved, shrinks slowly while streams play cleanly
+    'decode_threads': None,    # ffmpeg decoder threads chosen by the Speed test (None = the default of 2)
+    'copy_method': None,       # how pictures are copied to the v0.15 core ('memmove' | 'pwrite'), chosen by the Speed test
+    'speed_x': None,           # the Speed test's result for each decoder setting {Normal, Fast, Fastest: times real time}
     'speed_big': 'Fast',       # decoder setting used for larger streams (learned by the Speed test)
     'crop': 'Off',             # Off | 14:9 | Fill : starting crop for each video (More > Crop changes it live)
 }
@@ -55,10 +60,12 @@ class Store:
         self.p_history = os.path.join(root, 'history.json')
         self.p_later = os.path.join(root, 'watch_later.json')
         self.p_subs = os.path.join(root, 'subscriptions.txt')
+        self.p_slow = os.path.join(root, 'slow_videos.json')
         self.settings = dict(SETTINGS_DEFAULTS)
         self.settings.update({k: v for k, v in _read_json(self.p_settings, {}).items()
                               if k in SETTINGS_DEFAULTS})
         self.history = _read_json(self.p_history, {})
+        self.slow = _read_json(self.p_slow, {})        # video id -> when it was seen to need YouTube's slow security check
         self.later = _read_json(self.p_later, [])
         self._last_pos_save = 0.0
 
@@ -148,6 +155,44 @@ class Store:
             f.flush()
             os.fsync(f.fileno())
         return True
+
+    def remove_entry(self, kind, refs):
+        """Delete every line of subscriptions.txt that names one of `refs` as a `kind`. Other lines and comments stay."""
+        refs, kept, removed = set(refs), [], 0
+        try:
+            with open(self.p_subs, 'r', encoding='utf-8-sig', newline='') as f:
+                lines = f.read().splitlines(True)
+        except OSError:
+            return 0
+        for raw in lines:
+            line = raw.split('#', 1)[0].strip()
+            if line:
+                if '|' in line:
+                    line = line.split('|', 1)[1].strip()
+                k, r = self.classify(line)
+                if k == kind and r in refs:
+                    removed += 1
+                    continue
+            kept.append(raw)
+        if removed:
+            tmp = self.p_subs + '.tmp'
+            with open(tmp, 'w', encoding='utf-8', newline='') as f:
+                f.write(''.join(kept))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.p_subs)
+        return removed
+
+    # slow videos ------------------------------------------------------
+    def is_slow(self, vid):
+        return vid in self.slow
+
+    def mark_slow(self, vid):
+        if vid not in self.slow:
+            self.slow[vid] = int(time.time())
+            if len(self.slow) > 300:
+                self.slow = dict(sorted(self.slow.items(), key=lambda kv: kv[1])[-200:])
+            _write_json(self.p_slow, self.slow)
 
     @staticmethod
     def parse_channel_ref(text):

@@ -10,16 +10,25 @@ LOG=/media/fat/YouTubeNative/YouTube-crt-log.txt
 RT=/media/fat/YouTubeNative
 VER="$(grep -o "__version__ = '[^']*'" "$BASE/ytcrt/__init__.py" 2>/dev/null | cut -d"'" -f2)"
 echo "YouTube CRT installer - files are version ${VER:-unknown}"
-CORE=YouTubeCRT_v0.14-auto.rbf
-
-if [ -f "$BASE/$CORE" ]; then
-  mkdir -p /media/fat/_Other
-  cp -f "$BASE/$CORE" /media/fat/_Other/"$CORE"
-  echo "Core installed: /media/fat/_Other/$CORE"
-elif [ -f /media/fat/_Other/"$CORE" ]; then
-  echo "Core already in /media/fat/_Other/"
-else
-  echo "WARNING: $CORE is not next to this script or in /media/fat/_Other/."
+# Only the current core is installed; older ones are removed below.
+for CORE in YouTubeCRT_v0.16-fb.rbf; do
+  if [ -f "$BASE/$CORE" ]; then
+    mkdir -p /media/fat/_Other
+    cp -f "$BASE/$CORE" /media/fat/_Other/"$CORE"
+    echo "Core installed: /media/fat/_Other/$CORE"
+  elif [ -f /media/fat/_Other/"$CORE" ]; then
+    echo "Core already in /media/fat/_Other/: $CORE"
+  else
+    echo "NOTE: $CORE is not next to this script or in /media/fat/_Other/."
+  fi
+done
+# Remove the cores of earlier versions (v0.14 / v0.15) once the current one is in place; they are not used any more.
+if [ -f /media/fat/_Other/YouTubeCRT_v0.16-fb.rbf ]; then
+  for OLD in YouTubeCRT_v0.14-auto.rbf YouTubeCRT_v0.15-yuv.rbf; do
+    for DIR in /media/fat/_Other "$BASE"; do
+      if [ -f "$DIR/$OLD" ]; then rm -f "$DIR/$OLD" && echo "Removed the old core: $DIR/$OLD"; fi
+    done
+  done
 fi
 command -v python3 >/dev/null || echo "WARNING: python3 not found; the player cannot run."
 echo "Checking the video tools (downloads them if missing; needs internet)..."
@@ -56,5 +65,5 @@ sync
 echo "--- player log ($LOG) ---"
 tail -n 8 "$LOG" 2>/dev/null || echo "(no log yet)"
 echo "-------------------------"
-echo "Expected: 'Waiting for the YouTubeCRT core to be loaded...'. Now load the core from _Other."
+echo "Expected: 'Waiting for the YouTubeCRT core to be loaded...'. Now load YouTubeCRT_v0.16-fb from _Other."
 if [ -t 0 ]; then read -r -p "Press Enter to return to MiSTer." _ || true; fi
