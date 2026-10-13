@@ -142,6 +142,8 @@ class Profiles(unittest.TestCase):
         self.assertEqual(profiles.speed_for(640 * 360, 'Normal', None), 'Fast')       # big picture: never the slow default
         self.assertEqual(profiles.speed_for(640 * 360, 'Normal', 'Fastest'), 'Fastest')
         self.assertEqual(profiles.speed_for(426 * 240, 'Normal', 'Fastest'), 'Normal')  # small picture: as asked
+        self.assertEqual(profiles.speed_for(854 * 480, 'Fastest', 'Fast'), 'Fastest')    # a manual Fastest is never overridden by the Speed test
+        self.assertEqual(profiles.speed_for(854 * 480, 'Fast', 'Fastest'), 'Fastest')    # (the learned value still applies to Fast/Normal)
 
 
 @unittest.skipIf(sys.platform == "win32", "POSIX pipes/process groups (runs on the MiSTer or WSL)")
@@ -551,6 +553,22 @@ class PlayPolicy(unittest.TestCase):
             self.inp.push('back')
         threading.Thread(target=stopper, daemon=True).start()
         self.app.play({'id': 'v' * 11, 'title': 't'}, 0)
+
+    def test_a_clip_that_starves_on_fast_at_480p_gets_fastest_and_is_remembered(self):
+        st = self.make(quality='480p', cost=0.3)
+        st.settings['decode_speed'] = 'Normal'
+        seen = []
+
+        def loop(v, media, prof, level, pos, can_step, refresh):
+            seen.append((media.tier, level))
+            return ('downgrade', 5000) if len(seen) == 1 else ('stop', 6000)
+        self.app._play_loop = loop
+        self.app.play({'id': 'v' * 11, 'title': 't'}, 0)
+        self.assertEqual(seen[0][1], 'Fast')
+        self.assertEqual(seen[1], (seen[0][0], 'Fastest'))               # same picture, stronger setting
+        self.assertEqual(st.settings['fastest_ids'], ['v' * 11])
+        self.app.play({'id': 'v' * 11, 'title': 't'}, 0)                 # next time it starts on Fastest
+        self.assertEqual(seen[2][1], 'Fastest')
 
     def test_a_fast_arm_gets_360p_and_a_slow_one_steps_down_and_learns(self):
         st = self.make(cost=0.7)                         # calibration says 360p@452k needs ~62% of the ARM
@@ -1132,7 +1150,8 @@ class SpeedTest(unittest.TestCase):
             {'id': 'live' + 'a' * 7, 'title': 'LIVE', 'channel': 'C', 'published': 3, 'short': False},
             {'id': 'live' + 'b' * 7, 'title': 'LIVE2', 'channel': 'C', 'published': 2, 'short': False}]}
         Path(st.p_subs).write_text(uc + '\n')
-        saved = (pipeline.resolve, pipeline.benchmark)
+        saved = (pipeline.resolve, pipeline.benchmark, pipeline.pipe_benchmark)
+        pipeline.pipe_benchmark = lambda *a, **k: 1.2
         info, fm = fixture('landscape')
         tried = []
 
@@ -1149,7 +1168,7 @@ class SpeedTest(unittest.TestCase):
             while not done and time.time() < end:
                 a.pump(0.01)
         finally:
-            pipeline.resolve, pipeline.benchmark = saved
+            pipeline.resolve, pipeline.benchmark, pipeline.pipe_benchmark = saved
         return a, st, tried
 
     def test_livestreams_are_skipped_and_a_good_clip_is_used(self):

@@ -37,6 +37,7 @@ LIMIT = 0.72              # the decoder may use at most this much of the ARM: th
 LIMIT_TOTAL = 1.10         # used instead of LIMIT once the Speed test has measured the picture copy: decoding plus copying may use this much
 PICTURE_BOX = (640, 480)   # the v0.15 core takes pictures up to this size; a bigger stream is scaled down by ffmpeg first
 PICTURE_BOX_BIG = (864, 480)   # the v0.16 core reading from the framebuffer takes pictures this big
+BIG_480_PX = 300000        # above this (more than 640x360 = 230,400) Auto prefers the Fast decoder setting
 BIG_PX = 110000            # above this many pixels (a little more than 426x240) the cheaper decoder settings are used
 
 
@@ -106,15 +107,17 @@ def setting_for(stream, cal, mult, speed_x):
     fps = stream.get('fps') or cal.get('fps') or 30.0
     copy = copy_cost(stream, cal, fps)
     decode = predicted_cost(stream, cal, 1.0) - copy
+    # At 480p the whole ARM is busy (ffmpeg ~95% of a core, nothing idle), so Normal needs a wide margin; Fast looked right on the CRT.
+    margin = 0.55 if (stream.get('width') or 0) * (stream.get('height') or 0) > BIG_480_PX else 0.9
     for level in SPEEDS:
-        if level in xs and (decode * best_x / xs[level] + copy) * mult <= 0.9 * limit_for(cal):
+        if level in xs and (decode * best_x / xs[level] + copy) * mult <= margin * limit_for(cal):
             return level
     return 'Fast'
 
 
 def speed_for(px, speed, learned):
     """Decoder setting for a stream: big pictures use what the Speed test found (never the slow default)."""
-    if px > BIG_PX:
+    if px > BIG_PX and speed != 'Fastest':             # a manual Fastest is always honoured
         return learned if learned in ('Fast', 'Fastest') else ('Fast' if speed == 'Normal' else speed)
     return speed
 

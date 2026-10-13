@@ -4,6 +4,7 @@
     python tools/deploy_to_mister.py --setup HOST      one time: make an SSH key and print the command that installs it
     python tools/deploy_to_mister.py [HOST]            copy scripts/YouTubeCRT to /media/fat/Scripts/YouTubeCRT
     python tools/deploy_to_mister.py --core            also copy the core to /media/fat/_Other (reload the core afterwards)
+    python tools/deploy_to_mister.py --install         send and run the one-file installer (player and cores)
     python tools/deploy_to_mister.py --log             fetch YouTube-crt-log.txt to ./mister-log.txt (and print its tail)
 
 HOST is read from the argument, $MISTER_HOST or tools/mister_host.txt (git-ignored). The running player notices
@@ -17,7 +18,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-KEY = Path.home() / '.ssh' / 'mister_ed25519'
+_KEYS = [Path.home() / '.ssh' / 'mister_ed25519']
+KEY = next((k for k in _KEYS if k.exists()), _KEYS[0])
 REMOTE_SCRIPTS = '/media/fat/Scripts'
 REMOTE_LOG = '/media/fat/YouTubeNative/YouTube-crt-log.txt'
 CORE = 'YouTubeCRT_v0.14-auto.rbf'
@@ -77,6 +79,22 @@ def deploy(host, core):
     print('Done. The player restarts itself in about 10 seconds; Home will show version %s.' % version)
 
 
+def install(host):
+    """Send release/Install_YouTube_CRT_Test.sh to /media/fat/Scripts and run it there (what you would do from the Scripts menu)."""
+    f = ROOT / 'release' / 'Install_YouTube_CRT_Test.sh'
+    if not f.is_file():
+        sys.exit('release/Install_YouTube_CRT_Test.sh not found')
+    dest = REMOTE_SCRIPTS + '/' + f.name
+    print('Sending %s (%.1f MB) ...' % (f.name, f.stat().st_size / 1e6))
+    with open(f, 'rb') as fh:
+        r = subprocess.run(ssh_base(host) + ['cat > %s.part && mv %s.part %s && sed -i "s/\r$//" %s && chmod +x %s' % ((dest,) * 5)], stdin=fh)
+    if r.returncode:
+        sys.exit('Copy failed (is the MiSTer on and the key installed?).')
+    print('Running the installer on the MiSTer ...')
+    print()
+    sys.exit(subprocess.run(ssh_base(host) + ['cd /media/fat/Scripts && sh ./%s' % f.name]).returncode)
+
+
 def fetch_log(host):
     out = ROOT / 'mister-log.txt'
     r = subprocess.run(ssh_base(host) + ['cat ' + REMOTE_LOG], stdout=subprocess.PIPE)
@@ -94,10 +112,13 @@ def main():
     ap.add_argument('--setup', action='store_true')
     ap.add_argument('--core', action='store_true')
     ap.add_argument('--log', action='store_true')
+    ap.add_argument('--install', action='store_true', help='send and run release/Install_YouTube_CRT_Test.sh')
     a = ap.parse_args()
     host = host_name(a.host)
     if a.setup:
         setup(host)
+    elif a.install:
+        install(host)
     elif a.log:
         fetch_log(host)
     else:

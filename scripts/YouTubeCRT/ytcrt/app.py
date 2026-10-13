@@ -629,6 +629,10 @@ class App:
                     full_big = pipeline.benchmark(self.rt, prof, big[0], best_sp, 8, limited, target=tgt_big)
                     self.log('Full playback pipeline on the bigger stream (%dx%d, pre-scale %s): %.2fx against %.2fx decode only' % (
                         big[0].video['width'], big[0].video['height'], tgt_big.get('prescale') or 'none', full_big, big[1]))
+                    deadline[0] = time.monotonic() + 60
+                    via_pipe = pipeline.pipe_benchmark(self.rt, prof, big[0], best_sp, 8, limited, target=tgt_big)
+                    self.log('Through the pipe to the player (no core): %s against %.2fx for ffmpeg alone' % (
+                        ('%.2fx' % via_pipe) if via_pipe else 'too short to tell', full_big))
                 except (ValueError, RuntimeError, OSError, TypeError, KeyError) as exc:
                     self.log('Speed test: full pipeline on the bigger stream not measured (%s)' % exc)
             av1 = None
@@ -806,8 +810,8 @@ class App:
             'Loading',
             lambda: [ui.clip(v.get('title', ''), 33),
                      'Contacting YouTube... %ds' % (time.monotonic() - started), ui.clip(last[0], 33),
-                     (('This video needs a security check: it can take a minute or so. Please be patient.' if getattr(self.rt, 'node', None)
-                       else 'This video needs a security check: it can take a few minutes. Please be patient.') if slow[0] else
+                     (('This video is age restricted (child or adult) and will take longer to start. Please be patient.' if getattr(self.rt, 'node', None)
+                       else 'This video is age restricted (child or adult) and will take a few minutes to start. Please be patient.') if slow[0] else
                       'This can take a minute or two. Please be patient.')],
             lambda check: pipeline.resolve(self.rt, prof, v['id'], check, self.log,
                                            note=note, quality=quality, cal=cal, mult=mult))
@@ -847,23 +851,38 @@ class App:
         copy0 = (self.link.copy_total, self.link.copy_count, getattr(self.link, 'full_total', 0.0),
                  getattr(self.link, 'full_count', 0), getattr(self.link, 'repeats', 0))
         self.link.copy_max = 0.0
+        boosted = speed == 'Normal' and v['id'] in self.store.settings.get('fastest_ids', [])
         while True:
             cal, mult = self.calibration()
             can_step = q == 'Auto' and pipeline.step_down(media, prof, cal, mult) is not None
             level = self.effective_speed(media, speed)
+            if boosted and level == 'Fast':
+                level = 'Fastest'                         # this clip starved on Fast before: start on the stronger setting
             self.log('Decoder setting %s for %s (estimated load %d%%, copy %.1f ms per picture, copy method %s)' % (
                 level, media.label, round(media.cost * 100), (cal.get('copy_ms') or 0.0),
                 getattr(getattr(self.link, 'box', None), 'method', '-')))
             try:
+                can_boost = speed == 'Normal' and level == 'Fast' and not boosted and (media.video or {}).get('height', 0) >= 400
                 outcome, pos_ms = self._play_loop(v, media, prof, level, pos_ms,
-                                                  can_step, refresh_left > 0)
+                                                  can_step or can_boost, refresh_left > 0)
             except Quit:
                 raise
             except pipeline.PlaybackError as exc:
                 self.log('Playback error: ' + ' | '.join(str(exc).splitlines())[:600])
                 self.push(ui.TextView('Playback stopped', ['!' + l for l in ui.wrap(str(exc), 37, 14)]))
                 return
+            if outcome == 'downgrade' and can_boost:
+                boosted = True                            # first try the stronger decoder setting on the same 480p stream (looks better than 360p)
+                ids = [i for i in self.store.settings.get('fastest_ids', []) if i != v['id']] + [v['id']]
+                self.store.set('fastest_ids', ids[-60:])
+                self.log('Starved on Fast at %s: trying Fastest before a smaller picture' % media.label)
+                self.toast('Heavy clip - using the stronger decoder setting')
+                continue
             if outcome in ('downgrade', 'crashstep'):     # the ARM could not keep up (or the decoder crashes at start): use a lighter stream
+                if boosted and outcome == 'downgrade':
+                    ids = [i for i in self.store.settings.get('fastest_ids', []) if i != v['id']]
+                    self.store.set('fastest_ids', ids)     # even Fastest was not enough: forget it, the smaller picture takes over
+                    boosted = False
                 if outcome == 'downgrade':                # ...and learn from it; a crash says nothing about the ARM's speed
                     mult = min(3.0, mult * 1.25)
                     self.store.set('cost_mult', round(mult, 3))
@@ -985,7 +1004,7 @@ class App:
         pipe = open_pipe(start_ms)
         next_save = time.monotonic() + 10
         cpuw, next_cpu = cpu.CpuWatch({}), time.monotonic() + 12.0          # the first sample early: a stream that struggles steps down soon
-        loop_t = {'since': time.monotonic(), 'wait': 0.0, 'push': 0.0}
+        loop_t = {'since': time.monotonic(), 'wait': 0.0, 'push': 0.0, 'poll': 0.0, 'keys': 0.0}
 
         def starting_lines():
             """What the screen says while the decoders start (a video whose stream details are cached has no lookup to show)."""
@@ -1003,7 +1022,9 @@ class App:
                     self.loading_frame()
                 link.health()
                 now = time.monotonic()
-                act = self.inputs.get(0.003)
+                tin = time.monotonic()
+                act = self.inputs.get(0)                     # (it used to wait up to 3 ms here on every pass)
+                loop_t['keys'] += time.monotonic() - tin
                 if act and state['more'] is not None:
                     more_key(act, now)                    # the panel owns the keys while it is open
                     act = None
@@ -1072,8 +1093,10 @@ class App:
                 if now >= next_cpu:                          # where the ARM's time goes (percent of one core; both busy = 200)
                     next_cpu = now + CPU_LOG_SECONDS
                     span = max(0.001, now - loop_t['since'])
-                    where = 'loop: %d%% waiting for the decoder, %d%% sending pictures' % (round(100 * loop_t['wait'] / span), round(100 * loop_t['push'] / span))
-                    loop_t.update(since=now, wait=0.0, push=0.0)
+                    where = 'loop: %d%% waiting for the decoder, %d%% reading a picture, %d%% sending pictures, %d%% keys and health' % (
+                        round(100 * loop_t['wait'] / span), round(100 * loop_t['poll'] / span), round(100 * loop_t['push'] / span),
+                        round(100 * loop_t['keys'] / span))
+                    loop_t.update(since=now, wait=0.0, push=0.0, poll=0.0, keys=0.0)
                     try:
                         procs = getattr(getattr(pipe, 'decoder', None), 'procs', {}) or {}
                         cpuw.named = {'video ffmpeg': getattr(procs.get('video'), 'pid', None),
@@ -1099,6 +1122,8 @@ class App:
                 tp = time.monotonic()
                 try:
                     kind, rec = pipe.poll()
+                    if kind == 'record':
+                        loop_t['poll'] += time.monotonic() - tp
                 except Exception as exc:
                     msg = str(exc)
                     if '403' in msg and state['retries'] < 3:      # YouTube sometimes refuses at random: try again

@@ -850,6 +850,38 @@ def _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only, target=
     return wall
 
 
+def pipe_benchmark(rt, profile, media, speed, seconds=8, cancel=lambda: None, target=None, threads=None):
+    """How many times faster than real time ffmpeg's pictures reach the player through the pipe (the playback path without the core):
+    ffmpeg decodes with the playback filters and writes every picture to a pipe, and this function reads them as the player does.
+    The first second of pictures is left out, so the start-up does not count. -> times real time, or None if too short to tell."""
+    cmd = decoder_command(rt, profile, media.video, 'video', start_s=min(30, max(0, media.duration // 3)), speed=speed,
+                          limit_s=seconds, target=target, threads=threads)
+    frame_bytes = target['w'] * target['h'] * 3 // 2
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            start_new_session=True, bufsize=0)
+    enlarge_pipe(proc)
+    started = time.monotonic()
+    got, mark = 0, None
+    try:
+        fd = proc.stdout.fileno()
+        while True:
+            cancel()
+            if time.monotonic() - started > seconds * 8 + 30:
+                raise RuntimeError('Pipe benchmark timed out.')
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            got += len(chunk)
+            if mark is None and got >= frame_bytes * profile.fps:           # one second of pictures in: start timing here
+                mark = (time.monotonic(), got)
+        end = time.monotonic()
+    finally:
+        stop_process(proc)
+    if mark is None or got <= mark[1] or end - mark[0] < 0.5:
+        return None
+    return ((got - mark[1]) / float(frame_bytes) / profile.fps) / (end - mark[0])
+
+
 def benchmark(rt, profile, media, speed, seconds=10, cancel=lambda: None, decode_only=False, target=None, threads=None):
     """How many times faster than real time the ARM decodes this stream (>= 1.0x keeps up).
 
