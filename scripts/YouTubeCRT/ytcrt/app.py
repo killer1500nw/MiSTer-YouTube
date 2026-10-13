@@ -61,6 +61,8 @@ class App:
     def __init__(self, link, store, feeds, rt, inputs, log=print):
         self.link, self.store, self.feeds, self.rt, self.inputs, self.log = link, store, feeds, rt, inputs, log
         getattr(link, 'use_copy_method', lambda m: None)(store.settings.get('copy_method'))      # the way the Speed test found fastest
+        if store.settings.get('decode_threads'):
+            pipeline.DECODE_THREADS = int(store.settings['decode_threads'])        # and the decoder thread count
         self.play_quality = 'Auto'                                    # the quality of the video being played (the More panel can change it)
         self.yuv = getattr(link, 'kind', 'rgb') == 'yuv'              # the v0.15 core: the GUI is an overlay, pictures are YUV
         self.canvas = YuvCanvas(320, 240) if self.yuv else Canvas(320, 240)
@@ -609,6 +611,16 @@ class App:
                 self.log('Speed test: no larger stream measured (%s)' % exc)
             # VP9 at the same size (it looks cleaner than H.264 at the same bitrate; can the ARM decode it in time?). AV1 was
             # tried and is far too slow on this ARM, so it is no longer measured.
+            threads = {}
+            if big:                                                  # does a different number of decoder threads help the bigger stream?
+                for n in (1, 3, 4):
+                    deadline[0] = time.monotonic() + 60
+                    try:
+                        threads[n] = pipeline.benchmark(self.rt, prof, big[0], best_sp, 8, limited, decode_only=True, threads=n)
+                    except (ValueError, RuntimeError, OSError, TypeError) as exc:
+                        self.log('Speed test: %d decoder threads not measured (%s)' % (n, exc))
+                        break
+                threads[2] = big[1]
             av1 = None
             deadline[0] = time.monotonic() + 75
             try:
@@ -616,12 +628,12 @@ class App:
                 av1 = (a, pipeline.benchmark(self.rt, prof, a, best_sp, 8, limited, decode_only=True))
             except (ValueError, RuntimeError, OSError, TypeError) as exc:
                 self.log('Speed test: VP9 not measured (%s)' % exc)
-            return runs, media, bare, big, av1
+            return runs, media, bare, big, av1, threads
         res, err = self.run_job('Speed test', ['Decoding a test stream (three runs)...', 'B: cancel'], work)
         if err:
             self.push(ui.Message('Speed test failed', [str(err)[:140]], ui.AMBER))
             return
-        results, media, bare, big, av1 = res
+        results, media, bare, big, av1, threads = res
         copy_avg, copy_max = self.link.measure_copy()       # on this thread: nothing else is writing the next slot
         fast = self.link.measure_fast_copy()
         try:
@@ -662,6 +674,16 @@ class App:
         self.store.set('copy_method', getattr(self.link.box, 'method', None) if self.link.kind == 'yuv' else None)
         self.store.set('speed_big', best_speed)
         self.store.set('speed_x', {sp: round(x, 3) for sp, x in results})
+        if len(threads) > 1:
+            best_n = max(threads, key=lambda n: threads[n])
+            if threads[best_n] > 1.08 * threads[2]:                  # only a clear win changes it
+                self.store.set('decode_threads', best_n)
+                pipeline.DECODE_THREADS = best_n
+            elif self.store.settings.get('decode_threads'):
+                self.store.set('decode_threads', None)
+                pipeline.DECODE_THREADS = 2
+            self.log('Decoder threads on the bigger stream (decode only): ' + ', '.join(
+                '%d: %.2fx' % (n, threads[n]) for n in sorted(threads)) + '; using %d' % pipeline.DECODE_THREADS)
         self.store.set('speed_clip', media.id)
         self.store.set('cost_mult', 1.0)
         extra = ''

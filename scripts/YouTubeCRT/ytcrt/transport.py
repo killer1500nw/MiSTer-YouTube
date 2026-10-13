@@ -81,6 +81,7 @@ class Framebuffer:
         self.start, self.length = start, length
         self.fb_map, self.view_map = fb_map, view_map
         self.stats = [0.0, 0.0, 0.0, 0]              # seconds spent copying, in the barrier, in the read-back check; pictures written
+        self.writes = 0
         self.base = ctypes.addressof(ctypes.c_char.from_buffer(fb_map))
         self.view = ctypes.addressof(ctypes.c_char.from_buffer(view_map))
 
@@ -137,7 +138,9 @@ class Framebuffer:
             cacheflush(self.base + slot_off + last[0] + last[1] - 64, self.base + slot_off + last[0] + last[1])
         t2 = time.monotonic()
         view_off = (number % 8) * yuv.FB_SLOT_STRIDE
-        for off, n, addr in done:
+        self.writes += 1
+        check = self.writes <= 16 or self.writes % 16 == 0         # the read-back costs more than the copy itself (3.5 ms against 0.4)
+        for off, n, addr in (done if check else ()):
             for p in {0, max(0, n // 2 - 8), max(0, n - 16)}:
                 k = min(16, n - p)
                 if ctypes.string_at(self.view + view_off + off + p, k) != ctypes.string_at(addr + p, k):

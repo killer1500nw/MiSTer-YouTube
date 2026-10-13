@@ -535,10 +535,13 @@ def resolve(rt, profile, video_id, cancel, log, note=None, quality='Auto', cal=N
     return media_from(info, formats, profile, quality, cal, mult, log)
 
 
+DECODE_THREADS = 2                 # ffmpeg decoder threads for the video (the Speed test can pick another number for this MiSTer)
+
+
 def decoder_command(rt, profile, source, kind, start_s=0, speed='Normal', limit_s=None, to_null=False, crop='Off',
-                    decode_only=False, target=None):
+                    decode_only=False, target=None, threads=None):
     args = [str(rt.ffmpeg), '-hide_banner', '-loglevel', 'error', '-nostdin',
-            '-threads', '2', '-filter_threads', '1', '-rw_timeout', '20000000',
+            '-threads', str((threads or DECODE_THREADS) if kind == 'video' else 1), '-filter_threads', '1', '-rw_timeout', '20000000',
             '-protocol_whitelist', 'http,https,tcp,tls,crypto']
     if source['url'].startswith('https://'):
         args += ['-tls_verify', '1', '-ca_file', str(rt.ca)]
@@ -823,10 +826,10 @@ def open_pipeline(rt, profile, media, start_s, speed, cancel, crop='Off', target
                           cancel)
 
 
-def _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only, target=None):
+def _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only, target=None, threads=None):
     """Wall-clock seconds ffmpeg needs to decode `seconds` of the video into the void."""
     cmd = decoder_command(rt, profile, media.video, 'video', start_s=min(30, max(0, media.duration // 3)),
-                          speed=speed, limit_s=seconds, to_null=True, decode_only=decode_only, target=target)
+                          speed=speed, limit_s=seconds, to_null=True, decode_only=decode_only, target=target, threads=threads)
     started = time.monotonic()
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE, start_new_session=True)
@@ -844,15 +847,15 @@ def _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only, target=
     return wall
 
 
-def benchmark(rt, profile, media, speed, seconds=10, cancel=lambda: None, decode_only=False, target=None):
+def benchmark(rt, profile, media, speed, seconds=10, cancel=lambda: None, decode_only=False, target=None, threads=None):
     """How many times faster than real time the ARM decodes this stream (>= 1.0x keeps up).
 
     ffmpeg needs a few seconds just to start and open the stream, which made short tests read about 25% too slow.
     Two runs of different lengths cancel that out: the rate is the extra video divided by the extra time.
     decode_only skips the scaling and colour conversion, to show how much of the time they take."""
     short = max(3.0, seconds * 0.4)
-    wall_short = _bench_wall(rt, profile, media, speed, short, cancel, decode_only, target)
-    wall_long = _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only, target)
+    wall_short = _bench_wall(rt, profile, media, speed, short, cancel, decode_only, target, threads)
+    wall_long = _bench_wall(rt, profile, media, speed, seconds, cancel, decode_only, target, threads)
     extra = wall_long - wall_short
     if extra > 0.25:                                    # a sane difference: use the slope
         return min(10.0, (seconds - short) / extra)

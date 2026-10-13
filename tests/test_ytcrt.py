@@ -1734,9 +1734,9 @@ class BenchmarkSlope(unittest.TestCase):
         saved = pipeline._bench_wall
         try:
             # 3 s of start-up overhead plus 1/1.5 s of decoding per video second
-            pipeline._bench_wall = lambda rt, prof, media, speed, seconds, cancel, decode_only, target=None: 3.0 + seconds / 1.5
+            pipeline._bench_wall = lambda rt, prof, media, speed, seconds, cancel, decode_only, target=None, threads=None: 3.0 + seconds / 1.5
             self.assertAlmostEqual(pipeline.benchmark(None, None, None, 'Fast', 12), 1.5, places=2)   # the plain figure would be 12/11 = 1.09
-            pipeline._bench_wall = lambda rt, prof, media, speed, seconds, cancel, decode_only, target=None: 5.0     # no difference: falls back
+            pipeline._bench_wall = lambda rt, prof, media, speed, seconds, cancel, decode_only, target=None, threads=None: 5.0     # no difference: falls back
             self.assertAlmostEqual(pipeline.benchmark(None, None, None, 'Fast', 12), 12 / 5.0, places=2)
         finally:
             pipeline._bench_wall = saved
@@ -2556,6 +2556,38 @@ class PipeSize(unittest.TestCase):
         fb.write_planes(1, [(yuv.Y_OFF, bytes(range(256)) * 40)])
         self.assertEqual(fb.stats[3], 2)
         self.assertTrue(all(x >= 0 for x in fb.stats[:3]))
+        fb.close()
+        tmp.close()
+
+
+class DecoderThreads(unittest.TestCase):
+    def test_the_thread_count_goes_into_the_video_decoder_command_only(self):
+        rt = type('Rt', (), {'ffmpeg': 'ffmpeg', 'ca': 'ca'})()
+        src = {'url': 'https://x/v', 'headers': {}}
+        saved = pipeline.DECODE_THREADS
+        try:
+            pipeline.DECODE_THREADS = 2
+            default = pipeline.decoder_command(rt, profiles.PROFILE, src, 'video')
+            self.assertEqual(default[default.index('-threads') + 1], '2')
+            three = pipeline.decoder_command(rt, profiles.PROFILE, src, 'video', threads=3)
+            self.assertEqual(three[three.index('-threads') + 1], '3')
+            pipeline.DECODE_THREADS = 4
+            self.assertEqual(pipeline.decoder_command(rt, profiles.PROFILE, src, 'video')[4:8].count('4'), 1)
+            audio = pipeline.decoder_command(rt, profiles.PROFILE, src, 'audio')
+            self.assertEqual(audio[audio.index('-threads') + 1], '1')         # the audio decoder never needs more than one
+        finally:
+            pipeline.DECODE_THREADS = saved
+
+    def test_the_framebuffer_check_is_sampled(self):
+        from ytcrt import yuv
+        t = FramebufferPictures()
+        tmp, fb = t.make()
+        for n in range(40):
+            fb.write_planes(n, [(yuv.Y_OFF, bytes(range(256)) * 20)])
+        self.assertEqual(fb.stats[3], 40)
+        # a corrupted view is only noticed on the checked pictures: the first 16, then every 16th
+        fb.view_map[0:16] = bytes(16)
+        fb.write_planes(40, [(yuv.Y_OFF, bytes(range(256)) * 20)])           # picture 41 of 41: not a checked one (41 % 16 != 0)
         fb.close()
         tmp.close()
 
