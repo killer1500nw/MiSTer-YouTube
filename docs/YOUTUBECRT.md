@@ -1,9 +1,10 @@
 # YouTube CRT — on-screen browser and player
 
-A gamepad/keyboard GUI that runs **inside the same streaming session** as the
-video: menus are 320×240 frames pushed through the v0.13-smooth DDR mailbox, so
-they appear on the CRT (and HDMI) exactly like video does. Playback uses the
-validated pipeline from `YouTubeURL` (yt-dlp → ffmpeg → bounded A/V records).
+A gamepad/keyboard GUI that runs **inside the same streaming session** as the video. With the **v0.15-yuv** core the ARM only
+decodes: it hands the core the decoded picture at the video's own size and the FPGA scales it to a true 640×480 interlaced
+(or 640×240) picture with 8-bit colour; the menus and the playback bar are a separate overlay layer the FPGA draws over the
+picture (see [FPGA-YUV-v0.15.md](FPGA-YUV-v0.15.md)). The older v0.14-auto core (320×240 RGB565 records) still works with
+the same player. Playback uses the validated pipeline from `YouTubeURL` (yt-dlp → ffmpeg → bounded A/V records).
 
 > **Status: not yet run on hardware.** The core compiles and its RTL tests pass in simulation (see below). The menus, store, feed parsing, resume
 > logic and the playback loop (OSD, pause, seek, end-of-video) were exercised on
@@ -38,15 +39,11 @@ Not included (yet): search, playlists, live streams, account login, on-screen ke
 
 **One script.** Download `Install_YouTube_CRT.sh` from the
 [latest release](https://github.com/killer1500nw/MiSTer-YouTube/releases/latest), put that single file in
-`/media/fat/Scripts/`, and run **Scripts → Install_YouTube_CRT** on the MiSTer. It downloads the installer package
-(about 1 MB), installs the core into `_Other`, downloads the ARM builds of yt-dlp, QuickJS and ffmpeg
+`/media/fat/Scripts/`, and run **Scripts → Install_YouTube_CRT** on the MiSTer. The player and the core are inside that
+file (about 3 MB). It installs the core into `_Other`, downloads the ARM builds of yt-dlp, QuickJS, ffmpeg and Node.js
 (checksum-verified), adds the boot entry, starts the player and shows its log
 (*Waiting for the YouTubeCRT core to be loaded...*). It needs internet access and a roughly correct clock. Run it
-again to update. Then load **YouTubeCRT_v0.14-auto** from `_Other`.
-
-**Offline instead.** `MiSTer-YouTube-SD.zip` (release asset; rebuild with `python tools/make_sd_package.py`) holds
-the core, the player and the tools (see its `TOOLS.txt`): unzip it to the **root of the SD card** (it merges with your
-`_Other`, `Scripts` and `YouTubeNative` folders), then run **Scripts → YouTubeCRT → Install_YouTube_CRT** once.
+again to update. Then load **YouTubeCRT_v0.16-fb** from `_Other`. Only this core is installed, and the installer removes the older v0.14 and v0.15 cores from `_Other`.
 
 That is the last script you run. From then on: **load the YouTubeCRT core from the MiSTer menu
 and the GUI appears.** The player starts the streaming session itself. There is no RAM-streaming
@@ -97,8 +94,12 @@ channel's uploads playlist is its channel ID with `UC` swapped for `UU`. A name 
 | Playlist | **Playlists**: open one to see its videos in playlist order (up to 200) |
 | Single video | **My Videos**: a plain list you can play from; titles are looked up automatically unless you give a name |
 
-**In the GUI:** Home → **Add to Lists**, then type or paste a channel, playlist or video link/ID. The player files it in
+**In the GUI:** Home → **Add Channel via @handle** (the `@` is already typed; add the handle, for example `@jawed`; the quickest way on a gamepad), or Home → **Add to Lists**, then type or paste a channel, playlist or video link/ID. The player files it in
 the right place for you. (A `watch?v=...&list=PL...` link is filed as the playlist. To add just that video, use its plain `watch?v=` link.) Press **X** (Tab) on Channels, Playlists or My Videos to refresh after editing the file.
+
+**Removing an entry:** highlight it on Channels, Playlists or My Videos and press **Y** (Remove), then confirm. The line is deleted from `subscriptions.txt`; your other lines and comments stay. (Handy for a mistyped handle.)
+
+**Slow videos:** some videos need YouTube's JS security check. With Node.js (installed by `Install_YouTube_CRT`, about 49 MB) it takes seconds to a minute; with only QuickJS it takes 3 to 5 minutes on a MiSTer and can time out. The Loading screen says so as soon as it sees it, and remembers it: next time the warning shows at once, and the video's details panel says *slow start*. Once a video has loaded, its details are saved for 3 hours, so replays are quick.
 
 A playlist or channel that does not load is listed with a `!`; open it to see why (for example *not found (check the
 spelling)* or *The playlist does not exist*). The same reason is in the log. YouTube's RSS feeds for channels are
@@ -107,6 +108,12 @@ channel's newest uploads instead. Videos loaded that way, and playlist videos, s
 
 To import your real subscriptions, export them with Google Takeout (YouTube → subscriptions), then on a PC:
 `python tools/import_subscriptions.py subscriptions.csv > subscriptions.txt`.
+
+## Search
+
+Home → **Search** (the first entry). Type what to look for with the on-screen keyboard (the space key works here) or a real keyboard, then Start / OK. The results are an ordinary video list: A plays, Y saves to Watch Later, and **Load more videos...** at the end fetches the next 20 (up to 200). A search is one yt-dlp run, so expect roughly 15 to 35 seconds on the MiSTer; B cancels. Starting a video from the results works like any other video, including the slow security check for some of them. Searches are not saved.
+
+**Search Playlists** (the second Home entry) does the same for public playlists: type what to look for, then A opens a playlist (its videos are listed like any other list, with **Load more videos...**) and Y saves it to your Playlists so it appears under Home → Playlists. Mixes that YouTube makes automatically are left out.
 
 ## More than the first page
 
@@ -140,8 +147,8 @@ refused with a message. A typed video gets its title from YouTube once it starts
 ## Video crop
 
 Most YouTube video is 16:9 but a CRT is 4:3. **Settings → Video crop** sets how each video starts; during
-playback press **X** for the **More** panel and change **Crop** for that video only (it restarts the picture at
-the current position, so allow a few seconds).
+playback press **X** for the **More** panel and change **Crop** and **Quality** (Auto, 240p, 360p, 480p) for that video only; a new Quality takes effect about a second after the last press, at the same position, without asking YouTube again. With the v0.15 core it takes effect on the very
+next picture (the FPGA does the crop); with the v0.14 core it restarts the picture at the current position, so allow a few seconds.
 
 | Crop | What you see |
 | --- | --- |
@@ -159,11 +166,18 @@ arrows, Enter, Space, Esc, Backspace, Tab, PgUp/PgDn, W and Q work too.
 
 ## Output modes and performance
 
-The core menu (F12) is deliberately short: **Output: 240p / 480i** (default 240p), **480i field order** and **Reset**.
+The core menu (F12) is deliberately short: **Output: 240p / 480i** (default 240p), **480i field order**, **Analog dither**, **480i flicker filter**, **Composite blur** and **Reset**.
 Everything else (streaming, test pattern, test tone, loading a frame) used to be there for development and is gone.
-In 480i the same 320×240 picture is sent as 525-line interlaced video (262/263-line fields at
-59.94 Hz, the same 15.7 kHz line rate as 240p). It adds compatibility, not detail. The player needs no setting
-for it: only the core's Output option changes the video signal. 60 fps is not offered: no core supports 60 fps
+With the v0.15 core the picture is drawn at 640 pixels per line (a 13.3 MHz pixel clock, the same 15.7 kHz line rate). In **480i**
+it is a real interlaced picture: the two fields show alternate lines of one 640×480 frame, so a 360p video really has three times
+the pixels it had at 320×240. **240p** shows 640×240. **Analog dither** adds a little ordered dither before the picture is cut to
+the analog output's 6 bits, which hides colour banding in smooth gradients on a CRT (leave it Off for HDMI). **Composite blur** (Low / Medium / High) softens the picture along each line the way a cable-box composite signal did, which
+many 1980s and 1990s programmes were made to look good with; it is gentler in 240p, where each pixel is twice as wide. **480i flicker filter**
+(Low / Medium / High) moves what the two fields show closer together, so thin horizontal lines twitter less on an interlaced TV, at the cost of a
+little vertical sharpness. In 240p the picture is sampled from the centre of each pair of pixels and lines, which averages what would otherwise
+be dropped. The player needs no
+setting for any of this: it reads the core's mode and sends pictures that fit it. (With the v0.14 core the same 320×240 picture is
+sent as 525-line video: it adds compatibility, not detail.) 60 fps is not offered: no core supports 60 fps
 records, and the ARM cannot decode 60 fps H.264 at useful sizes anyway (see
 [PROTOCOL-v0.14-draft.md](PROTOCOL-v0.14-draft.md)).
 
@@ -181,7 +195,7 @@ source **downscaled** to 320×240 is what actually looks cleaner, but it costs t
 
 What the ARM can decode in real time depends on the stream: how many **pixels**, how many **kbps** and how many
 **frames per second**. Auto estimates that load for every stream a video offers and picks the largest picture
-predicted to need at most 87% of the ARM:
+predicted to need at most 72% of the ARM, which leaves room for the player's own work (reading the video and copying records to the core, about a quarter):
 
 * A calm, low-bitrate upload (a 90s sitcom, an old movie) is cheap, so it gets **360p** (or 480×360 for 4:3 shows).
 * Busy footage (game capture, sports) is expensive and stays at **240p**.
@@ -192,11 +206,12 @@ Settings → **Stream quality**:
 
 | Setting | Behaviour |
 | --- | --- |
-| **Auto** (default) | Picks per video by estimated load. If the picture still starves (an empty queue for more than ~2.5 s in 12) it steps down to the next lighter stream from the same spot, without asking YouTube again, and makes the estimate 25% more pessimistic. After 90 s of clean playback of a demanding stream it trusts the estimate 3% more |
+| **Auto** (default) | Picks per video by estimated load. If the picture still starves (an empty queue for more than ~1.2 s in 12) it steps down to the next lighter stream from the same spot, without asking YouTube again, and makes the estimate 25% more pessimistic. After 90 s of clean playback of a demanding stream it trusts the estimate 3% more |
 | **240p / 360p / 480p** | Always the largest stream up to that size, whatever it costs, with no fall-back |
 
-**Speed test** decodes a reference stream with both cheap decoder settings (Fast and Fastest), shows each result in
+**Speed test** (background lookups are paused while it runs, and it reuses the video of the previous test so results are comparable) decodes a reference stream (each speed is measured with a short and a long run, so ffmpeg's start-up time does not make the MiSTer look slower) with both cheap decoder settings (Fast and Fastest), shows each result in
 "x real time", and calibrates the estimate to *your* MiSTer. It also records which decoder setting larger pictures use.
+It then runs the best setting once more with only the decoder (no scaling, no RGB565 colour conversion) and reports *Scale+colour: N% of the time*: the share of the ARM's time that scaling and colour conversion take. That is the part a future FPGA scaler could take over.
 The playback bar shows the size in use (`240p`, `360p`...) next to the time, and `YouTube-crt-log.txt` records every
 choice with its estimated load and any step-down.
 

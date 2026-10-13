@@ -1,0 +1,36 @@
+YouTube CRT Node.js test, 2026-10-12 14:16:37
+--- this MiSTer ---
+kernel: Linux MiSTer 6.18.38-MiSTer #2 SMP Sat Sep 12 20:19:51 CST 2026 armv7l GNU/Linux
+libc:   ldd (GNU) 2.31
+memory: Mem:            491         104         191          22         195         353
+disk:   /dev/root        29G   19G   11G  66% /media/fat
+yt-dlp: /media/fat/YouTubeNative/resolver-2026.08.19-qjs-0.17.0/bundle/yt-dlp_linux_armv7l
+
+--- 1. downloading Node.js v20.20.2 (about 43 MB) ---
+downloaded 8 of 41 MB
+downloaded 16 of 41 MB
+downloaded 24 of 41 MB
+downloaded 32 of 41 MB
+downloaded 40 of 41 MB
+download OK, checksum verified
+--- 2. unpacking the node program ---
+
+--- 3. does Node start on this MiSTer? ---
+node v20.20.2 starts fine
+3e7 loop ok 89999995
+(small speed check took 2 s)
+
+--- 4. one yt-dlp lookup of eqVnhWeYq94 using Node (QuickJS needed 3-5 minutes for videos like this) ---
+yt-dlp finished in 12 s (exit code 1)
+result: 
+--- the lines that show which JavaScript engine did the work ---
+[debug] Command-line config: ['--ignore-config', '--no-playlist', '--no-cache-dir', '--skip-download', '--verbose', '--print', '%(id)s | %(title).50s | %(duration)ss', '--extractor-args', 'youtube:ski
+[debug] Encodings: locale UTF-8, fs utf-8, pref UTF-8, out utf-8 (No ANSI), error utf-8 (No ANSI), screen utf-8 (No ANSI)
+[debug] JS runtimes: node-20.20.2 (unsupported)
+[debug] [youtube] [jsc] JS Challenge Providers: bun (unavailable), deno (unavailable), node (unavailable), quickjs (unavailable)
+ERROR: [youtube] eqVnhWeYq94: This video is not available
+
+RESULT: the lookup did not complete with Node. The yt-dlp log is in /media/fat/YouTubeNative/node-test/yt-dlp-node.log (send it too).
+
+Report saved to /media/fat/YouTubeNative/YouTube-node-test.txt (send this file back).
+To remove the test files: rm -rf /media/fat/YouTubeNative/node-test

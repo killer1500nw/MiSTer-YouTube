@@ -10,7 +10,7 @@ See scripts/YouTubeURL/CERTIFICATES-NOTICE.txt for source and MPL-2.0 informatio
 This certificate notice also accompanies the historical FPGA test scripts.
 
 The native ARM helper is supplied with its C source and build instructions.
-External yt-dlp, QuickJS, FFmpeg and Quartus are not included; their respective
+External yt-dlp, QuickJS, Node.js (MIT, downloaded from nodejs.org), FFmpeg and Quartus are not included; their respective
 upstream licences apply. No ownership of those projects is claimed.
 
 ## YouTube CRT GUI

@@ -13,9 +13,10 @@ This is stated up front because it is a fair thing for anyone evaluating the cod
 
 ## What it does
 
+- **Search** YouTube from the menu (type with the on-screen keyboard), with paging through the results.
 - **Subscriptions**: the newest videos of all your channels together; **Channels**: one channel at a time.
 - **Playlists**, **My Videos** (single videos you list), **Watch Later**, **History** with **resume**.
-- **Play URL / ID** and **Add to Lists**: type a link on an on-screen keyboard or a real keyboard.
+- **Play URL / ID**, **Add Channel via @handle** and **Add to Lists**: type a link or a handle on an on-screen keyboard or a real keyboard.
 - **Load more videos…** at the end of every channel and playlist, so you can scroll well past the first 15.
 - **Picture quality that adapts to your MiSTer**: Auto picks a 360p or 240p stream per video from an estimate of how
   much the ARM can decode in time (calm 90s TV and old movies get the sharper picture), and steps down by itself if
@@ -28,14 +29,13 @@ Not supported: live streams and past livestreams (YouTube serves those in segmen
 
 1. Download [`Install_YouTube_CRT.sh`](https://github.com/killer1500nw/MiSTer-YouTube/releases/latest/download/Install_YouTube_CRT.sh)
    and put that one file in `/media/fat/Scripts/` on the MiSTer's SD card.
-2. On the MiSTer, run **Scripts → Install_YouTube_CRT**. It downloads the latest release, installs the core into
-   `_Other`, downloads the video tools (yt-dlp, QuickJS, ffmpeg) and makes the player start at boot. It needs internet
+2. On the MiSTer, run **Scripts → Install_YouTube_CRT**. The player and the core are inside that one file: it installs the core into
+   `_Other`, downloads the video tools (yt-dlp, QuickJS, ffmpeg and Node.js) and makes the player start at boot. It needs internet
    access and a roughly correct clock, and it takes a couple of minutes.
-3. Load **YouTubeCRT_v0.14-auto** from `_Other`. The menu appears. Nothing is run per session.
+3. Load **YouTubeCRT_v0.16-fb** from `_Other`. The menu appears. Nothing is run per session.
 
-Run the same script again at any time to update; your lists and settings are kept. Prefer a manual copy, or no
-internet on the MiSTer? Use the full offline package `MiSTer-YouTube-SD.zip` from the
-[releases page](https://github.com/killer1500nw/MiSTer-YouTube/releases) (see [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md)).
+Run the same script again at any time to update; your lists and settings are kept. YouTube needs the internet anyway,
+so there is no separate offline package.
 
 Full instructions, controls and every setting: [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md).
 
@@ -83,7 +83,7 @@ How to use it:
 
 - **Edit the file** on a PC (SD card path `YouTubeNative/ytcrt/subscriptions.txt`) or over SSH, then in the GUI press
   **X** (Tab) on Channels, Playlists or My Videos to refresh.
-- **Or skip the file:** Home → **Add to Lists**, then type or paste a channel, playlist or video link/ID. The player writes
+- **Or skip the file:** Home → **Add Channel via @handle** (just type the handle, for example `@jawed`; quickest on a gamepad), or Home → **Add to Lists**, then type or paste a channel, playlist or video link/ID. The player writes
   the line for you and puts it in the right place. (A `watch?v=…&list=PL…` link is filed as the playlist; for just that video, use its plain `watch?v=` link.)
 - **Import your real subscriptions** from a Google Takeout `subscriptions.csv` with `python tools/import_subscriptions.py`.
 - A channel or playlist that cannot load is shown with a `!`; open it to see why (for example *not found (check the

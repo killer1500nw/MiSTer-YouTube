@@ -1,14 +1,23 @@
 """The on-screen app: menus and playback share one streaming session, so the
 GUI is simply more 320x240 frames pushed through the same DDR mailbox."""
+import subprocess
 import threading
+import re
 import time
 
-from . import feeds as feedsmod, pipeline, profiles, ui, urls
+from . import cpu, feeds as feedsmod, pipeline, profiles, ui, urls, yuv
 from .core_link import SLOTS
-from .gfx import Canvas
+from .gfx import Canvas, YuvCanvas
 from .store import RESUME_MIN_MS
 
 TEST_CLIP = 'M7kB0lis3xg'
+CPU_LOG_SECONDS = 30.0         # how often playback logs the CPU split between the player and the decoders
+EARLY_NUDGES_MS = (1200, 3000, -2000, 6000)   # where to try again, relative to the start, when the decoder crashes before the first picture
+QUALITY_SETTLE = 1.2        # seconds after the last Quality press in the More panel before the picture restarts
+COPY_BUSY_FB = 2.5            # the framebuffer copy: 0.75 ms idle; under load it slows down too, but far less than the uncached region
+COPY_BUSY_PARALLEL = 2.2      # the two-core copy slows down less under load than the single-core one, but still does
+COPY_BUSY_CACHED = 1.5        # the same for the cached copy, which does not stall the CPU on every store
+COPY_BUSY = 3.2            # copying while ffmpeg decodes took about 23 ms against 7 ms on an idle MiSTer (corrected by _learn_copy)
 # The core starts consuming only once 4 records are queued (PROTOCOL.md prefill),
 # so the menu must queue at least 4 or it never appears. ~130 ms of latency.
 MENU_DEPTH = 4
@@ -16,7 +25,8 @@ SEEK_SMALL, SEEK_BIG = 10, 60  # seconds
 SMOOTH_AFTER = 90.0            # seconds of clean playback of a demanding stream before Auto trusts its estimate more
 STARVE_GRACE = 8.0             # seconds after (re)starting before starvation counts
 STARVE_WINDOW = 12.0           # judge starvation over windows of this length
-STARVE_LIMIT = 2.5             # seconds of an empty queue within a window that means 'too slow'
+DRY_LIMIT = 4                  # dropouts (the queue running empty) within a window that also mean 'too slow': each one is a gap in the audio
+STARVE_LIMIT = 1.2             # seconds of an empty queue within a window that means 'too slow' (visible glitching starts well below 2.5)
 SEEK_SETTLE = 0.6              # seconds of no seek keys before the seek is actually performed
 OSD_SECONDS = 4.0
 
@@ -50,11 +60,21 @@ class Job:
 class App:
     def __init__(self, link, store, feeds, rt, inputs, log=print):
         self.link, self.store, self.feeds, self.rt, self.inputs, self.log = link, store, feeds, rt, inputs, log
-        self.canvas = Canvas(320, 240)
+        getattr(link, 'use_copy_method', lambda m: None)(store.settings.get('copy_method'))      # the way the Speed test found fastest
+        if store.settings.get('decode_threads'):
+            pipeline.DECODE_THREADS = int(store.settings['decode_threads'])        # and the decoder thread count
+        self.play_quality = 'Auto'                                    # the quality of the video being played (the More panel can change it)
+        self.yuv = getattr(link, 'kind', 'rgb') == 'yuv'              # the v0.15 core: the GUI is an overlay, pictures are YUV
+        self.canvas = YuvCanvas(320, 240) if self.yuv else Canvas(320, 240)
         self.stack = []
         self.dirty = True
         self.record = None
         self.silence = bytes(self.profile().audio_bytes)
+        self.menu_ov = None                                           # overlay buffer holding the current menu screen
+        self.osd_ov, self.osd_sig, self.osd_canvas = None, None, None  # and the one holding the playback bar
+        self.black = bytearray(b'\x10' * 256 + b'\x80' * 128)         # a 16x16 black picture: the menu's video
+        if self.yuv:
+            self.feeds.thumb_format = 'yuv420p'
         self.toast_text, self.toast_until = '', 0.0
         self.refresher = None
         self.lists_refresher = None
@@ -64,6 +84,7 @@ class App:
         self.stack.append(self.home)
         self.feeds.ffmpeg = str(rt.ffmpeg) if rt.ffmpeg.is_file() else None
         self.feeds.log = self.log
+        pipeline.hook_log = self.log
         if self.feeds.playlist_fetch is None and getattr(rt, 'resolver', None) is not None and rt.resolver.is_file():
             self.feeds.playlist_fetch = lambda pid: pipeline.playlist_entries(
                 rt, pid, lambda: None, self.log, limit=feedsmod.PAGE)
@@ -155,7 +176,15 @@ class App:
             c.rect(x, 188, w, 22, ui.PANEL)
             c.frame(x, 188, w, 22, ui.RED, 2)
             c.text(x + 8, 195, self.toast_text, ui.WHITE, ui.PANEL)
-        self.record = bytes(self.canvas.buf) + self.silence
+        if self.yuv:
+            idx = self.link.free_overlay(keep=self.menu_ov)
+            if idx is None:                                # every overlay buffer is still on its way to the screen: retry
+                self.dirty = True
+                return
+            self.link.upload_overlay(idx, self.canvas.y, self.canvas.u, self.canvas.v)
+            self.menu_ov, self.record = idx, True
+        else:
+            self.record = bytes(self.canvas.buf) + self.silence
         self.dirty = False
 
     def tick_ui(self):
@@ -182,8 +211,22 @@ class App:
         if self.dirty or self.record is None:
             self.render()
         if self.link.queued < MENU_DEPTH:
-            self.link.push(self.record)
+            if self.yuv:
+                self.link.push_picture(self.black, self.silence, 16, 16, 'Off', 0, self.menu_ov)
+            else:
+                self.link.push(self.record)
         return act
+
+    def loading_frame(self):
+        """Keep the screen alive while a video starts: the menu loop's redraw and feeding, without its input or health checks."""
+        self.tick_ui()
+        if self.dirty or self.record is None:
+            self.render()
+        if self.link.queued < MENU_DEPTH:
+            if self.yuv:
+                self.link.push_picture(self.black, self.silence, 16, 16, 'Off', 0, self.menu_ov)
+            else:
+                self.link.push(self.record)
 
     def run(self):
         self.refresh_feeds()
@@ -211,7 +254,11 @@ class App:
     def open_home_entry(self, name):
         st = self.store
         shorts = lambda a: a.store.settings['shorts'] == 'On'
-        if name == 'Subscriptions':
+        if name == 'Search':
+            self.push(ui.TextInput('Search', 'Search YouTube for...', self._search_typed, spaces=True))
+        elif name == 'Search Playlists':
+            self.push(ui.TextInput('Search Playlists', 'Search YouTube playlists for...', self._playlist_search_typed, spaces=True))
+        elif name == 'Subscriptions':
             self.push(ui.VideoList('Subscriptions', lambda a: a.feeds.feed(a.store.subscriptions(), shorts(a)),
                                    empty=lambda a: a.no_subscriptions_text() if not a.store.subscriptions()
                                    else ['Fetching videos...' if a.feeds_busy() else 'No videos found.'],
@@ -229,10 +276,13 @@ class App:
             self.push(ui.PlaylistList())
         elif name == 'My Videos':
             self.push(ui.VideoList('My Videos', lambda a: a.feeds.listed_videos(a.store.video_list()),
-                                   hints='A:Play  Y:Later  X:Refresh  B:Back', empty=lambda a: a.no_lists_text('video'),
-                                   refresh=lambda a: a.refresh_lists(True)))
+                                   hints='A:Play X:Refresh Y:Remove B:Back', empty=lambda a: a.no_lists_text('video'),
+                                   refresh=lambda a: a.refresh_lists(True),
+                                   remove=lambda a, v: a.confirm_remove('video', v.get('title') or v['id'], [v['id']])))
         elif name == 'Play URL / ID':
             self.push(ui.TextInput('Play URL or ID', 'YouTube video link or 11-character ID', self._play_typed))
+        elif name == 'Add Channel via @handle':
+            self.push(ui.TextInput('Add Channel', 'YouTube handle, e.g. @youtuberuser', self._add_handle, initial='@'))
         elif name == 'Add to Lists':
             self.push(ui.TextInput('Add to Lists', 'Channel, playlist or video link / ID', self._add_typed))
         elif name == 'Settings':
@@ -250,6 +300,191 @@ class App:
         self.pop()
         self.log('Typed video id ' + vid)
         self.start_video({'id': vid, 'title': '', 'channel': '', 'typed': True})
+        return None
+
+    # search -----------------------------------------------------------
+    SEARCH_PAGE = 20
+    SEARCH_MAX = 200
+
+    def _search_typed(self, app, text):
+        """TextInput callback: search YouTube. Returns an error message to show, or None when handled."""
+        query = ' '.join(text.split())
+        if len(query) < 2:
+            return 'Type something to search for.'
+        self.pop()
+        self.start_search(query)
+        return None
+
+    def start_search(self, query):
+        self.feeds.hold.set()                                    # the ARM is the search's until it is done
+        pipeline.pause_background()
+        started = time.monotonic()
+        try:
+            res, err = self.run_job(
+                'Searching',
+                lambda: [ui.clip(query, 33), 'Asking YouTube... %ds' % (time.monotonic() - started),
+                         'This can take a minute. Please be patient.'],
+                lambda check: pipeline.search_entries(self.rt, query, check, self.log, limit=self.SEARCH_PAGE))
+        finally:
+            self.feeds.hold.clear()
+            pipeline.resume_background()
+        if err:
+            if str(err) != 'Cancelled':
+                self.log('Search failed: ' + str(err)[:300])
+                self.push(ui.TextView('Search failed', ['!' + l for l in ui.wrap(str(err), 37, 10)]))
+            return
+        state = {'query': query, 'videos': list(res[1]), 'next': 1 + getattr(res[1], 'raw', len(res[1])),
+                 'more': getattr(res[1], 'raw', len(res[1])) >= self.SEARCH_PAGE, 'loading': False}
+        self.search = state
+        shorts = lambda a: a.store.settings['shorts'] == 'On'
+        self.push(ui.VideoList('Search: ' + ui.clip(query, 22),
+                               lambda a: [v for v in state['videos'] if shorts(a) or not v.get('short')],
+                               empty=lambda a: ['No results for "%s".' % ui.clip(query, 20)],
+                               more=lambda a: self.search_more(state),
+                               can_more=lambda a: state['more'] and len(state['videos']) < self.SEARCH_MAX,
+                               loading=lambda a: state['loading']))
+
+    # playlist search ---------------------------------------------------
+    def _playlist_search_typed(self, app, text):
+        query = ' '.join(text.split())
+        if len(query) < 2:
+            return 'Type something to search for.'
+        self.pop()
+        self.start_playlist_search(query)
+        return None
+
+    def start_playlist_search(self, query):
+        self.feeds.hold.set()
+        pipeline.pause_background()
+        started = time.monotonic()
+        try:
+            res, err = self.run_job(
+                'Searching playlists',
+                lambda: [ui.clip(query, 33), 'Asking YouTube... %ds' % (time.monotonic() - started),
+                         'This can take a minute. Please be patient.'],
+                lambda check: pipeline.search_playlists(self.rt, query, check, self.log, limit=self.SEARCH_PAGE))
+        finally:
+            self.feeds.hold.clear()
+            pipeline.resume_background()
+        if err:
+            if str(err) != 'Cancelled':
+                self.log('Playlist search failed: ' + str(err)[:300])
+                self.push(ui.TextView('Search failed', ['!' + l for l in ui.wrap(str(err), 37, 10)]))
+            return
+        self.log('Playlist search "%s": %d playlists' % (query[:40], len(res)))
+        self.push(ui.FoundPlaylists(query, list(res)))
+
+    def open_found_playlist(self, row):
+        """Load the first videos of a found playlist and show them like any other list (paged, up to a few hundred)."""
+        pid, name = row['id'], row['title']
+        started = time.monotonic()
+        self.feeds.hold.set()
+        pipeline.pause_background()
+        try:
+            res, err = self.run_job(
+                'Opening playlist',
+                lambda: [ui.clip(name, 33), 'Asking YouTube... %ds' % (time.monotonic() - started)],
+                lambda check: pipeline.playlist_entries(self.rt, pid, check, self.log, limit=self.SEARCH_PAGE, background=False))
+        finally:
+            self.feeds.hold.clear()
+            pipeline.resume_background()
+        if err:
+            if str(err) != 'Cancelled':
+                self.log('Playlist %s failed: %s' % (pid, str(err)[:300]))
+                self.push(ui.TextView('Could not open playlist', ['!' + l for l in ui.wrap(str(err), 37, 10)]))
+            return
+        vids = res[1]
+        raw = getattr(vids, 'raw', len(vids))
+        state = {'id': pid, 'videos': list(vids), 'next': 1 + raw, 'more': raw >= self.SEARCH_PAGE, 'loading': False}
+        shorts = lambda a: a.store.settings['shorts'] == 'On'
+        self.push(ui.VideoList(ui.clip(name, 30), lambda a: [v for v in state['videos'] if shorts(a) or not v.get('short')],
+                               hints='A:Play  Y:Later  B:Back', empty=lambda a: ['This playlist has no videos.'],
+                               more=lambda a: self._found_playlist_more(state),
+                               can_more=lambda a: state['more'] and len(state['videos']) < self.SEARCH_MAX,
+                               loading=lambda a: state['loading']))
+
+    def _found_playlist_more(self, state):
+        if state['loading']:
+            return
+        state['loading'] = True
+        self.toast('Loading more videos...')
+
+        def run():
+            try:
+                self.feeds.wait_turn()
+                _, vids = pipeline.playlist_entries(self.rt, state['id'], lambda: None, self.log,
+                                                    limit=self.SEARCH_PAGE, start=state['next'], background=False)
+                raw = getattr(vids, 'raw', len(vids))
+                seen = {v['id'] for v in state['videos']}
+                state['videos'].extend(v for v in vids if v['id'] not in seen)
+                state['next'] += raw
+                state['more'] = raw >= self.SEARCH_PAGE
+            except Exception as exc:
+                self.log('Playlist: could not load more: ' + str(exc)[:200])
+            finally:
+                state['loading'] = False
+                self.dirty = True
+        threading.Thread(target=run, daemon=True).start()
+
+    def save_found_playlist(self, row):
+        added = self.store.add_entry('playlist', row['id'])
+        self.log('Playlist %s %s' % (row['id'], 'saved' if added else 'already saved'))
+        self.toast('Saved to Playlists' if added else 'Already in Playlists')
+        if added:
+            self.refresh_lists(force=True)
+
+    def search_more(self, state):
+        """"Load more videos": the next page of this search, in the background (frozen while a video plays)."""
+        if state['loading']:
+            return
+        state['loading'] = True
+        self.toast('Loading more results...')
+
+        def run():
+            try:
+                self.feeds.wait_turn()
+                _, vids = pipeline.search_entries(self.rt, state['query'], lambda: None, self.log,
+                                                  limit=self.SEARCH_PAGE, start=state['next'])
+                raw = getattr(vids, 'raw', len(vids))
+                seen = {v['id'] for v in state['videos']}
+                state['videos'].extend(v for v in vids if v['id'] not in seen)
+                state['next'] += raw
+                state['more'] = raw >= self.SEARCH_PAGE
+            except Exception as exc:
+                self.log('Search: could not load more: ' + str(exc)[:200])
+            finally:
+                state['loading'] = False
+                self.dirty = True
+        threading.Thread(target=run, daemon=True).start()
+
+    def confirm_remove_channel(self, row_id, name):
+        """Y on Channels: the file may list the channel by @handle or by ID; remove whichever line(s) name it."""
+        refs = [r for _, r in self.store.subscriptions() if r == row_id or self.feeds.handles.get(r) == row_id]
+        self.confirm_remove('channel', name, refs or [row_id])
+
+    def confirm_remove(self, kind, name, refs):
+        self.push(ui.Choice('Remove', 'Remove "%s" from your lists?' % ui.clip(str(name), 26), ['Remove', 'Cancel'],
+                            lambda i: self._remove(kind, name, refs) if i == 0 else None))
+
+    def _remove(self, kind, name, refs):
+        n = self.store.remove_entry(kind, refs)
+        self.log('Removed %s %s (%d line%s)' % (kind, ','.join(refs), n, '' if n == 1 else 's'))
+        self.toast('Removed' if n else 'Not found in the file')
+        self.dirty = True
+
+    def _add_handle(self, app, text):
+        """TextInput callback for Add Channel: a bare @handle (the @ is optional). Returns an error message, or None."""
+        handle = text.strip()
+        if handle and not handle.startswith('@') and '/' not in handle and ':' not in handle:
+            handle = '@' + handle
+        if not re.fullmatch(r'@[A-Za-z0-9._-]{3,30}', handle):
+            return 'Type a handle such as @youtuberuser'
+        added = self.store.add_entry('channel', handle)
+        self.pop()
+        self.log('Typed channel %s (%s)' % (handle, 'added' if added else 'already listed'))
+        self.toast('%s added' % handle if added else 'Already in your list')
+        if added:
+            self.refresh_feeds(force=True)
         return None
 
     def _add_typed(self, app, text):
@@ -312,13 +547,24 @@ class App:
         return False
 
     def run_benchmark(self):
+        """The Speed test. Background lookups are frozen meanwhile: they would steal the ARM and spoil the numbers."""
+        self.feeds.hold.set()
+        pipeline.pause_background()
+        try:
+            self._run_benchmark()
+        finally:
+            self.feeds.hold.clear()
+            pipeline.resume_background()
+
+    def _run_benchmark(self):
         """Measure decoding on this MiSTer with both cheap decoder settings and calibrate the Auto cost model."""
         if self.missing_tools():
             return
         prof = self.profile()
         # Test clips: your newest videos first (a realistic load), then a known good one. Livestreams and
         # other videos that cannot be decoded are skipped instead of failing the whole test.
-        candidates = [v['id'] for v in self.feeds.feed(self.store.subscriptions(), False, 3)] + [TEST_CLIP]
+        again = self.store.settings.get('speed_clip')
+        candidates = ([again] if again else []) + [v['id'] for v in self.feeds.feed(self.store.subscriptions(), False, 3)] + [TEST_CLIP]
         candidates = list(dict.fromkeys(candidates))
 
         def work(check):
@@ -331,36 +577,165 @@ class App:
                     self.log('Speed test: skipping %s (%s)' % (vid, exc))
             if media is None:
                 raise RuntimeError('No video in your lists could be used as a test clip.')
-            return [(sp, pipeline.benchmark(self.rt, prof, media, sp, 8, check)) for sp in ('Fast', 'Fastest')], media
-        res, err = self.run_job('Speed test', ['Decoding a test stream (twice)...', 'B: cancel'], work)
+            for attempt in range(3):
+                try:
+                    tgt = pipeline.yuv_target(media, self.link.interlaced, self.big_pictures()) if self.yuv else None    # the pipeline the core really gets
+                    runs = [(sp, pipeline.benchmark(self.rt, prof, media, sp, 12, check, target=tgt)) for sp in profiles.SPEEDS]
+                    best_sp, best_x = 'Fast', dict(runs)['Fast']      # Auto is sized for Fast: Fastest drops the deblocking filter completely (blocky), so it is never relied on
+                    # The same setting again with only the decoder (no scaling, no RGB565 conversion): the difference is the
+                    # share of the ARM's time that an FPGA scaler could take over.
+                    bare = pipeline.benchmark(self.rt, prof, media, best_sp, 12, check, decode_only=True)
+                    break
+                except RuntimeError as exc:
+                    # YouTube sometimes refuses the saved stream URLs (403) on the first try: ask for fresh ones, like playback does.
+                    if attempt == 2 or not re.search(r'403|forbidden|access denied|ffmpeg failed', str(exc), re.I):
+                        raise
+                    self.log('Speed test: the stream was refused (%s); getting fresh stream details' % ' '.join(str(exc).split())[:100])
+                    pipeline.forget(self.rt, media.id)
+                    media = pipeline.resolve(self.rt, prof, media.id, check, self.log, quality='360p')
+            # How far the decoder alone gets with the next size up (the core now does the scaling): tells whether a
+            # bigger source is worth offering. Optional: a video without a bigger H.264 stream just skips it.
+            def limited():
+                """The optional probes get about a minute each: a slow decoder must not hold up the whole test."""
+                check()
+                if time.monotonic() > deadline[0]:
+                    raise RuntimeError('probe took too long')
+            big = None
+            deadline = [time.monotonic() + 75]
+            try:
+                bigger = pipeline.resolve(self.rt, prof, media.id, check, self.log, quality='480p')
+                bv, mv = bigger.video, media.video
+                if bv['width'] * bv['height'] > mv['width'] * mv['height'] * 1.2:
+                    big = (bigger, pipeline.benchmark(self.rt, prof, bigger, best_sp, 8, limited, decode_only=True))
+            except (ValueError, RuntimeError, OSError) as exc:
+                self.log('Speed test: no larger stream measured (%s)' % exc)
+            # VP9 at the same size (it looks cleaner than H.264 at the same bitrate; can the ARM decode it in time?). AV1 was
+            # tried and is far too slow on this ARM, so it is no longer measured.
+            threads = {}
+            if big:                                                  # does a different number of decoder threads help the bigger stream?
+                for n in (1, 3, 4):
+                    deadline[0] = time.monotonic() + 60
+                    try:
+                        threads[n] = pipeline.benchmark(self.rt, prof, big[0], best_sp, 8, limited, decode_only=True, threads=n)
+                    except (ValueError, RuntimeError, OSError, TypeError) as exc:
+                        self.log('Speed test: %d decoder threads not measured (%s)' % (n, exc))
+                        break
+                threads[2] = big[1]
+                # The same stream through the pipeline playback really uses (fps filter, the pre-scale to 640 wide when the stream is
+                # wider, the pipe format): if that is much slower than decode only, the filter chain is the limit, not the decoder.
+                try:
+                    deadline[0] = time.monotonic() + 60
+                    tgt_big = pipeline.yuv_target(big[0], self.link.interlaced, self.big_pictures())
+                    full_big = pipeline.benchmark(self.rt, prof, big[0], best_sp, 8, limited, target=tgt_big)
+                    self.log('Full playback pipeline on the bigger stream (%dx%d, pre-scale %s): %.2fx against %.2fx decode only' % (
+                        big[0].video['width'], big[0].video['height'], tgt_big.get('prescale') or 'none', full_big, big[1]))
+                    deadline[0] = time.monotonic() + 60
+                    via_pipe = pipeline.pipe_benchmark(self.rt, prof, big[0], best_sp, 8, limited, target=tgt_big)
+                    self.log('Through the pipe to the player (no core): %s against %.2fx for ffmpeg alone' % (
+                        ('%.2fx' % via_pipe) if via_pipe else 'too short to tell', full_big))
+                except (ValueError, RuntimeError, OSError, TypeError, KeyError) as exc:
+                    self.log('Speed test: full pipeline on the bigger stream not measured (%s)' % exc)
+            av1 = None
+            deadline[0] = time.monotonic() + 75
+            try:
+                a = pipeline.media_from(media.catalog[0], media.catalog[1], prof, '360p', log=self.log, codec='vp09')
+                av1 = (a, pipeline.benchmark(self.rt, prof, a, best_sp, 8, limited, decode_only=True))
+            except (ValueError, RuntimeError, OSError, TypeError) as exc:
+                self.log('Speed test: VP9 not measured (%s)' % exc)
+            return runs, media, bare, big, av1, threads
+        res, err = self.run_job('Speed test', ['Decoding a test stream (three runs)...', 'B: cancel'], work)
         if err:
             self.push(ui.Message('Speed test failed', [str(err)[:140]], ui.AMBER))
             return
-        results, media = res
-        best_speed, best = max(results, key=lambda r: r[1])
+        results, media, bare, big, av1, threads = res
+        copy_avg, copy_max = self.link.measure_copy()       # on this thread: nothing else is writing the next slot
+        fast = self.link.measure_fast_copy()
+        try:
+            fb = self.link.measure_fb_copy() if hasattr(self.link, 'measure_fb_copy') else None
+        except Exception:                                    # an experiment: whatever goes wrong, the Speed test carries on
+            fb = None
+        best_speed, best = 'Fast', dict(results)['Fast']
         v = media.video
-        lines = ['%s decoder: %.2fx real time' % (sp, f) for sp, f in results]
-        lines.append('Test stream: %s, %d kbps, %d fps' % (media.label, round(media.tbr), round(v.get('fps') or 30)))
-        self.store.set('cal', {'px': v['width'] * v['height'], 'tbr': float(v.get('tbr') or 300),
-                               'fps': float(v.get('fps') or 30), 'cost': round(1.0 / best, 4)})
+        lines = ['  '.join('%s %.2fx' % (sp, f) for sp, f in results)]
+        t_full, t_bare = 1.0 / best, 1.0 / bare
+        share = max(0.0, (t_full - t_bare) / t_full)           # fraction of the ARM's time spent scaling and converting colour
+        lines.append('Decode only: %.2fx' % bare)
+        lines.append('Scale+colour: %d%% of the time' % round(share * 100))
+        if big:
+            lines.append('Decode only at %s (%d kbps): %.2fx' % (big[0].label, round(big[0].tbr), big[1]))
+        if av1:
+            lines.append('VP9 %s (%d kbps), decode only: %.2fx (H.264 %.2fx)' % (av1[0].label, round(av1[0].tbr), av1[1], bare))
+        kb = max(1, round(self.link.copy_bytes / 1000.0))
+        lines.append('Copy %d KB: %.1f ms (max %.1f)%s' % (kb, copy_avg, copy_max, (', ' + ', '.join(
+            '%s %.1f ms' % (m, r[0]) for m, r in sorted(self.link.copy_report.items()))) if len(self.link.copy_report) > 1 else ''))
+        if fast:
+            method, (bulk_ms, _, intact) = min(fast.items(), key=lambda kv: kv[1][0])
+            lines.append('Bulk copy: %.1f ms (%s%s)' % (bulk_ms, method, '' if intact else ' BAD DATA'))
+        else:
+            lines.append('Bulk copy: not possible')
+        if fb:
+            lines.append('Framebuffer: ' + fb[:34])
+        lines.append('Test: %s, %d kbps, %d fps' % (media.label, round(media.tbr), round(v.get('fps') or 30)))
+        cal = {'px': v['width'] * v['height'], 'tbr': float(v.get('tbr') or 300),
+               'fps': float(v.get('fps') or 30), 'cost': round(1.0 / best, 4)}
+        if self.link.copy_bytes and copy_avg > 0:
+            # Copying while ffmpeg is decoding is slower than on an idle MiSTer; start with twice the idle time and let
+            # the real figures from playback correct it (see _learn_copy).
+            busy = {'memmove': COPY_BUSY, 'parallel': COPY_BUSY_PARALLEL, 'fb': COPY_BUSY_FB}.get(getattr(self.link.box, 'method', 'memmove'), COPY_BUSY_CACHED)
+            cal.update({'copy_ms': round(copy_avg * busy, 2), 'copy_bytes': self.link.copy_bytes,
+                        'copy_fixed': self.link.kind != 'yuv'})
+        self.store.set('cal', cal)
+        self.store.set('copy_method', getattr(self.link.box, 'method', None) if self.link.kind == 'yuv' else None)
         self.store.set('speed_big', best_speed)
+        self.store.set('speed_x', {sp: round(x, 3) for sp, x in results})
+        if len(threads) > 1:
+            best_n = max(threads, key=lambda n: threads[n])
+            if threads[best_n] > 1.08 * threads[2]:                  # only a clear win changes it
+                self.store.set('decode_threads', best_n)
+                pipeline.DECODE_THREADS = best_n
+            elif self.store.settings.get('decode_threads'):
+                self.store.set('decode_threads', None)
+                pipeline.DECODE_THREADS = 2
+            self.log('Decoder threads on the bigger stream (decode only): ' + ', '.join(
+                '%d: %.2fx' % (n, threads[n]) for n in sorted(threads)) + '; using %d' % pipeline.DECODE_THREADS)
+        self.store.set('speed_clip', media.id)
         self.store.set('cost_mult', 1.0)
-        lines.append('Auto now picks streams by estimated load')
-        self.log('Speed test %s: %s; calibration %s, speed_big=%s' % (
-            media.label, ', '.join('%s %.2fx' % r for r in results), self.store.settings['cal'], best_speed))
+        extra = ''
+        if big:
+            extra += '; %s %dx%d %d kbps %d fps decode only %.2fx' % (
+                big[0].label, big[0].video['width'], big[0].video['height'], round(big[0].tbr), round(big[0].video.get('fps') or 30), big[1])
+        if av1:
+            extra += '; VP9 %dx%d %d kbps %d fps decode only %.2fx (H.264 %.2fx at %d kbps)' % (
+                av1[0].video['width'], av1[0].video['height'], round(av1[0].tbr), round(av1[0].video.get('fps') or 30), av1[1], bare, round(media.tbr))
+        if fb:
+            self.log('Framebuffer probe: ' + fb)
+        self.log('Speed test %s: %s; decode only %.2fx (scaling+colour = %d%% of the time); copy %d KB %.1f ms (worst %.1f) %s; bulk copy %s; calibration %s, speed_big=%s%s' % (
+            media.label, ', '.join('%s %.2fx' % r for r in results), bare, round(share * 100), kb, copy_avg, copy_max,
+            {m: round(r[0], 1) for m, r in self.link.copy_report.items()}, fast, self.store.settings['cal'], best_speed, extra))
         self.push(ui.Message('Speed test', lines, ui.GREEN if best >= 1.15 else ui.AMBER))
 
     # playback ---------------------------------------------------------
+    def big_pictures(self):
+        """Can pictures wider than 640 go to the core as they are (v0.16 core reading from the framebuffer)? The FPGA then shrinks them."""
+        return bool(getattr(getattr(self.link, 'box', None), 'fb_active', False) and getattr(self.link, 'big_core', False))
+
     def calibration(self):
         """(cal, mult): the measured reference stream and the learned correction."""
         cal = self.store.settings.get('cal')
         if not (isinstance(cal, dict) and cal.get('cost') and cal.get('px')):
             cal = profiles.CAL_DEFAULT
+        if self.big_pictures():
+            cal = dict(cal, big=True)                  # copy costs follow the real picture size, and no pre-scale is needed
         return cal, float(self.store.settings.get('cost_mult', 1.0))
 
     def effective_speed(self, media, speed):
         """Decoder setting for this stream: big pictures use what the Speed test learned."""
         v = media.video or {}
+        if speed == 'Normal':                          # automatic: the gentlest setting that keeps up (best picture)
+            cal, mult = self.calibration()
+            pick = profiles.setting_for(v, cal, mult, self.store.settings.get('speed_x')) if v else None
+            if pick:
+                return pick
         return profiles.speed_for((v.get('width') or 0) * (v.get('height') or 0), speed,
                                   self.store.settings.get('speed_big'))
 
@@ -373,10 +748,50 @@ class App:
         else:
             self.play(v, pos if pos >= RESUME_MIN_MS else 0)
 
+    def _probe_audio(self, media, prof, at_ms):
+        """After the audio decoder crashed at start: run it once more, verbosely, for two seconds and log what it says. A refused or
+        reset connection normally prints a line before the crash that the normal run (errors only) does not show."""
+        try:
+            if not media.audio:
+                return
+            cmd = pipeline.decoder_command(self.rt, prof, media.audio, 'audio', start_s=at_ms / 1000.0, limit_s=2, to_null=True)
+            cmd[cmd.index('-loglevel') + 1] = 'verbose'
+            done = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+            tail = pipeline.safe_text(done.stderr).splitlines()[-14:]
+            self.log('Audio probe (exit %s): %s' % (done.returncode, ' | '.join(l.strip()[:110] for l in tail if l.strip())))
+        except Exception as exc:                          # a diagnostic must never take playback down with it
+            self.log('Audio probe failed: %s' % exc)
+
+    def _log_crash_clues(self):
+        """After a decoder crash at start: what the kernel says about it (a segfault line or an out-of-memory kill) and free memory."""
+        try:
+            out = subprocess.run(['dmesg'], capture_output=True, text=True, timeout=4).stdout.splitlines()
+            hits = [l for l in out[-60:] if re.search(r'segfault|ffmpeg|out of memory|oom|killed process|Killed', l, re.I)]
+            self.log('Kernel notes after the crash: %s' % (' | '.join(l[-110:] for l in hits[-4:]) or 'none'))
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            with open('/proc/meminfo', encoding='utf-8') as f:
+                mem = dict(l.split(':', 1) for l in f.read().splitlines()[:5])
+            self.log('Memory: ' + ', '.join('%s %s' % (k, v.strip()) for k, v in mem.items()))
+        except OSError:
+            pass
+
+    def _learn_copy(self, media, avg_ms, n):
+        """Fold the copy time seen during real playback into the Auto cost model (an idle MiSTer copies faster)."""
+        cal = self.store.settings.get('cal')
+        if n < 90 or not (isinstance(cal, dict) and cal.get('copy_ms') and cal.get('copy_bytes')) or not media.video:
+            return
+        per_base = avg_ms if cal.get('copy_fixed') else avg_ms / profiles.copy_scale(media.video, dict(cal, big=self.big_pictures()))
+        new = round(0.7 * cal['copy_ms'] + 0.3 * min(per_base, 4.0 * cal['copy_ms']), 2)
+        if abs(new - cal['copy_ms']) >= 0.1:
+            self.store.set('cal', dict(cal, copy_ms=new))
+            self.log('Copy time per picture now estimated at %.1f ms (%d KB)' % (new, cal['copy_bytes'] // 1000))
+
     def _note_smooth(self, media):
         """A demanding stream ran for a while without starving: trust the cost estimate a little more."""
-        if media.cost >= 0.8 * profiles.LIMIT:
-            mult = max(0.7, float(self.store.settings.get('cost_mult', 1.0)) * 0.97)
+        if media.cost >= 0.8 * profiles.limit_for(self.calibration()[0]):
+            mult = max(0.9, float(self.store.settings.get('cost_mult', 1.0)) * 0.97)      # never more optimistic than 0.9: an empty queue is not the only way to stutter
             self.store.set('cost_mult', round(mult, 3))
             self.log('%s at estimated load %d%% played cleanly; cost multiplier now %.3f' %
                      (media.label, round(media.cost * 100), mult))
@@ -384,25 +799,47 @@ class App:
     def _resolve(self, v, prof, quality):
         """Ask YouTube (via yt-dlp) for the video, showing progress. -> Media, or None if it failed."""
         started, last = time.monotonic(), ['starting yt-dlp']
+        slow = [self.store.is_slow(v['id'])]               # known from an earlier play, or seen during this lookup
         cal, mult = self.calibration()
+
+        def note(text):
+            last[0] = text
+            if re.search(r'UNPLAYABLE|web embedded|Solving JS', text):
+                slow[0] = True
         res, err = self.run_job(
             'Loading',
-            lambda: [ui.clip(v.get('title', ''), 60),
-                     'Contacting YouTube... %ds' % (time.monotonic() - started), ui.clip(last[0], 60)],
+            lambda: [ui.clip(v.get('title', ''), 33),
+                     'Contacting YouTube... %ds' % (time.monotonic() - started), ui.clip(last[0], 33),
+                     (('This video is age restricted (child or adult) and will take longer to start. Please be patient.' if getattr(self.rt, 'node', None)
+                       else 'This video is age restricted (child or adult) and will take a few minutes to start. Please be patient.') if slow[0] else
+                      'This can take a minute or two. Please be patient.')],
             lambda check: pipeline.resolve(self.rt, prof, v['id'], check, self.log,
-                                           note=lambda t: last.__setitem__(0, t), quality=quality, cal=cal, mult=mult))
+                                           note=note, quality=quality, cal=cal, mult=mult))
         if err:
             if str(err) != 'Cancelled':
                 self.log('Cannot play: ' + ' | '.join(str(err).splitlines())[:600])
                 self.push(ui.TextView('Cannot play', ['!' + l for l in ui.wrap(str(err), 37, 14)]))
             return None
+        if slow[0] and res is not None:
+            self.store.mark_slow(v['id'])                  # warn about it straight away next time
         return res
 
     def play(self, v, start_ms):
+        """Play a video. Background refreshing is paused from here until playback is over."""
+        self.feeds.hold.set()
+        pipeline.pause_background()                       # freeze any lookup already running
+        try:
+            self._play(v, start_ms)
+        finally:
+            self.feeds.hold.clear()
+            pipeline.resume_background()
+
+    def _play(self, v, start_ms):
         if self.missing_tools():
             return
         prof, speed = self.profile(), self.store.settings['decode_speed']
         q = self.store.settings.get('quality', 'Auto')
+        self.play_quality = q
         self.log('Play %s "%s" profile=%s quality=%s speed=%s resume=%dms' %
                  (v['id'], v.get('title', '')[:60], prof.key, q, speed, start_ms))
         media = self._resolve(v, prof, q)
@@ -411,38 +848,91 @@ class App:
         if not v.get('title'):
             v['title'] = media.title                      # a typed link has no title until YouTube tells us
         refresh_left, pos_ms, outcome = 1, start_ms, 'stop'
+        copy0 = (self.link.copy_total, self.link.copy_count, getattr(self.link, 'full_total', 0.0),
+                 getattr(self.link, 'full_count', 0), getattr(self.link, 'repeats', 0))
+        self.link.copy_max = 0.0
+        boosted = speed == 'Normal' and v['id'] in self.store.settings.get('fastest_ids', [])
         while True:
             cal, mult = self.calibration()
             can_step = q == 'Auto' and pipeline.step_down(media, prof, cal, mult) is not None
+            level = self.effective_speed(media, speed)
+            if boosted and level == 'Fast':
+                level = 'Fastest'                         # this clip starved on Fast before: start on the stronger setting
+            self.log('Decoder setting %s for %s (estimated load %d%%, copy %.1f ms per picture, copy method %s)' % (
+                level, media.label, round(media.cost * 100), (cal.get('copy_ms') or 0.0),
+                getattr(getattr(self.link, 'box', None), 'method', '-')))
             try:
-                outcome, pos_ms = self._play_loop(v, media, prof, self.effective_speed(media, speed), pos_ms,
-                                                  can_step, refresh_left > 0)
+                can_boost = speed == 'Normal' and level == 'Fast' and not boosted and (media.video or {}).get('height', 0) >= 400
+                outcome, pos_ms = self._play_loop(v, media, prof, level, pos_ms,
+                                                  can_step or can_boost, refresh_left > 0)
             except Quit:
                 raise
             except pipeline.PlaybackError as exc:
                 self.log('Playback error: ' + ' | '.join(str(exc).splitlines())[:600])
                 self.push(ui.TextView('Playback stopped', ['!' + l for l in ui.wrap(str(exc), 37, 14)]))
                 return
-            if outcome == 'downgrade':                    # the ARM could not keep up: learn from it, use a lighter stream
-                mult = min(3.0, mult * 1.25)
-                self.store.set('cost_mult', round(mult, 3))
+            if outcome == 'downgrade' and can_boost:
+                boosted = True                            # first try the stronger decoder setting on the same 480p stream (looks better than 360p)
+                ids = [i for i in self.store.settings.get('fastest_ids', []) if i != v['id']] + [v['id']]
+                self.store.set('fastest_ids', ids[-60:])
+                self.log('Starved on Fast at %s: trying Fastest before a smaller picture' % media.label)
+                self.toast('Heavy clip - using the stronger decoder setting')
+                continue
+            if outcome in ('downgrade', 'crashstep'):     # the ARM could not keep up (or the decoder crashes at start): use a lighter stream
+                if boosted and outcome == 'downgrade':
+                    ids = [i for i in self.store.settings.get('fastest_ids', []) if i != v['id']]
+                    self.store.set('fastest_ids', ids)     # even Fastest was not enough: forget it, the smaller picture takes over
+                    boosted = False
+                if outcome == 'downgrade':                # ...and learn from it; a crash says nothing about the ARM's speed
+                    mult = min(3.0, mult * 1.25)
+                    self.store.set('cost_mult', round(mult, 3))
                 smaller = pipeline.step_down(media, prof, cal, mult, self.log)
-                self.log('%s (estimated load %d%%) could not keep up; cost multiplier now %.3f; %s' % (
-                    media.label, round(media.cost * 100), mult,
+                self.log('%s (estimated load %d%%) %s; cost multiplier now %.3f; %s' % (
+                    media.label, round(media.cost * 100), 'could not keep up' if outcome == 'downgrade' else 'crashed at start', mult,
                     ('switching to %s' % smaller.label) if smaller else 'nothing lighter to switch to'))
                 if smaller is not None:
                     self.toast('Too heavy for %s - using %s' % (media.label, smaller.label))
                     media = smaller
                 continue
+            if outcome == 'quality':                      # the user changed the quality from the More panel
+                q = self.play_quality
+                cal, mult = self.calibration()
+                try:
+                    media = pipeline.media_from(media.catalog[0], media.catalog[1], prof, q, cal, mult, self.log)
+                except (ValueError, TypeError, IndexError):
+                    fresh = self._resolve(v, prof, q)
+                    if fresh is None:
+                        return
+                    media = fresh
+                self.log('Quality set to %s for this video: %s' % (q, media.label))
+                self.toast('Quality: %s (%s)' % (q, media.label))
+                continue
             if outcome == 'refresh':                      # YouTube kept refusing these URLs: ask for fresh ones once
                 refresh_left -= 1
                 self.toast('Refreshing the stream...')
+                pipeline.forget(self.rt, v['id'])             # the saved URLs are what YouTube refused
                 fresh = self._resolve(v, prof, q)
                 if fresh is None:
                     return
                 media = fresh
                 continue
             break
+        if self.link.copy_count > copy0[1]:
+            n = self.link.copy_count - copy0[1]
+            avg_ms = 1000.0 * (self.link.copy_total - copy0[0]) / n
+            nfull = getattr(self.link, 'full_count', n) - copy0[3]
+            full_ms = 1000.0 * (getattr(self.link, 'full_total', self.link.copy_total) - copy0[2]) / nfull if nfull else avg_ms
+            again = getattr(self.link, 'repeats', 0) - copy0[4]
+            self.log('Record copy to the core: average %.1f ms, worst %.1f ms (%d records%s)' % (
+                avg_ms, 1000.0 * self.link.copy_max, n,
+                '; %d repeated pictures not copied, %.1f ms per full picture' % (again, full_ms) if again else ''))
+            fb = getattr(getattr(self.link, 'box', None), 'fb', None)
+            if fb is not None and fb.stats[3] and getattr(self.link.box, 'fb_active', False):
+                n_fb = fb.stats[3]
+                self.log('Framebuffer write per picture (this session): copy %.1f ms, barrier %.1f ms, read-back check %.1f ms' % (
+                    1000 * fb.stats[0] / n_fb, 1000 * fb.stats[1] / n_fb, 1000 * fb.stats[2] / n_fb))
+            self._learn_copy(media, full_ms, nfull)
+        self.log('Playback %s at %s of %s' % ('finished' if outcome == 'eof' else 'stopped', ui.mmss(pos_ms), ui.mmss(media.duration * 1000)))
         self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))
         self.dirty = True
 
@@ -452,9 +942,13 @@ class App:
                  'osd_until': time.monotonic() + OSD_SECONDS, 'note': '', 'last': None,
                  'pending': None, 'pending_at': 0.0, 'seeking': False,
                  'crop': self.store.settings.get('crop', 'Off'), 'more': None, 'crop_change': False,
+                 'quality': self.play_quality, 'quality_req': None, 'quality_at': 0.0,
                  'opened_at': time.monotonic(), 'starved': 0.0, 'win_start': time.monotonic(),
-                 'tick': time.monotonic(), 'tier': media.tier, 'retries': 0, 'smooth_noted': False}
+                 'tick': time.monotonic(), 'tier': media.tier, 'retries': 0, 'smooth_noted': False,
+                 'crashes': 0, 'crash_at': 0.0}
         dur_ms = media.duration * 1000
+        ytarget = pipeline.yuv_target(media, link.interlaced, self.big_pictures()) if self.yuv else None
+        state['flags'] = 0
 
         def pos_ms():
             return min(dur_ms or 1 << 60, state['start'] + max(0, link.consumed - state['base']) * 1000 // fps)
@@ -462,10 +956,11 @@ class App:
         def open_pipe(at_ms):
             state['start'], state['base'] = at_ms, link.sent
             state['opened_at'] = time.monotonic()
+            state['first_logged'] = False
             state['starved'], state['win_start'] = 0.0, time.monotonic()
             try:
                 return pipeline.open_pipeline(self.rt, prof, media, at_ms / 1000.0, speed, lambda: None,
-                                              crop=state['crop'])
+                                              crop=state['crop'], target=ytarget)
             except Exception as exc:
                 raise pipeline.PlaybackError(str(exc))
 
@@ -475,6 +970,9 @@ class App:
             if mode == state['crop']:
                 return
             state['crop'] = mode
+            if self.yuv:                                    # the FPGA does the crop: it takes effect on the next picture
+                state.update(note='Crop: ' + mode)
+                return
             if state['pending'] is None:
                 state['pending'] = pos_ms()
             state.update(pending_at=now, crop_change=True, note='Crop: ' + mode)
@@ -485,25 +983,48 @@ class App:
             if act in ('back', 'menu'):
                 state['more'] = None
             elif act == 'down':
-                m['sel'] = (m['sel'] + 1) % 3
+                m['sel'] = (m['sel'] + 1) % 4
             elif act == 'up':
-                m['sel'] = (m['sel'] - 1) % 3
+                m['sel'] = (m['sel'] - 1) % 4
             elif m['sel'] == 0 and act in ('left', 'right', 'ok'):
                 step = -1 if act == 'left' else 1
                 set_crop(profiles.CROPS[(profiles.CROPS.index(state['crop']) + step) % len(profiles.CROPS)], now)
             elif m['sel'] == 1 and act in ('left', 'right', 'ok'):
+                # Quality for this video only. It applies about a second after the last press (so cycling through the
+                # choices does not restart the picture each time), at the same position.
+                step = -1 if act == 'left' else 1
+                state['quality'] = profiles.QUALITIES[(profiles.QUALITIES.index(state['quality']) + step) % len(profiles.QUALITIES)]
+                state.update(quality_req=state['quality'], quality_at=now, note='Quality: ' + state['quality'])
+            elif m['sel'] == 2 and act in ('left', 'right', 'ok'):
                 state['note'] = 'Saved' if self.store.toggle_later(v) else 'Removed'
-            elif m['sel'] == 2 and act == 'ok':
+            elif m['sel'] == 3 and act == 'ok':
                 state['more'] = None
             state['osd_until'] = now + OSD_SECONDS
             state['pause_pushed'] = False                 # redraw a paused frame so the panel updates
         pipe = open_pipe(start_ms)
         next_save = time.monotonic() + 10
+        cpuw, next_cpu = cpu.CpuWatch({}), time.monotonic() + 12.0          # the first sample early: a stream that struggles steps down soon
+        loop_t = {'since': time.monotonic(), 'wait': 0.0, 'push': 0.0, 'poll': 0.0, 'keys': 0.0}
+
+        def starting_lines():
+            """What the screen says while the decoders start (a video whose stream details are cached has no lookup to show)."""
+            try:
+                tail = bytes(pipe.decoder.errors.get('video', b'')).decode(errors='replace').strip().splitlines()
+            except Exception:
+                tail = []
+            return [ui.clip(v.get('title', ''), 33), 'Starting the decoders... %ds' % (time.monotonic() - state['opened_at']),
+                    '%s, %d kbps' % (media.label, round(media.tbr or 0)), ui.clip(pipeline.safe_text(tail[-1]) if tail else '', 33)]
+        loading = ui.Message('Starting', starting_lines, spinner=True, on_back=False)
+        self.push(loading)                                   # with the spinner, until the first picture arrives
         try:
             while True:
+                if loading is not None:
+                    self.loading_frame()
                 link.health()
                 now = time.monotonic()
-                act = self.inputs.get(0.003)
+                tin = time.monotonic()
+                act = self.inputs.get(0)                     # (it used to wait up to 3 ms here on every pass)
+                loop_t['keys'] += time.monotonic() - tin
                 if act and state['more'] is not None:
                     more_key(act, now)                    # the panel owns the keys while it is open
                     act = None
@@ -530,51 +1051,85 @@ class App:
                     state.update(more={'sel': 0}, osd_until=now + OSD_SECONDS, pause_pushed=False)
                 elif act:
                     state['osd_until'] = now + OSD_SECONDS
+                if (state['quality_req'] is not None and now - state['quality_at'] > QUALITY_SETTLE
+                        and state['pending'] is None and state['quality_req'] != self.play_quality):
+                    self.play_quality, state['quality_req'] = state['quality_req'], None
+                    return 'quality', pos_ms()
+                if state['quality_req'] == self.play_quality:
+                    state['quality_req'] = None
                 if state['pending'] is not None and now - state['pending_at'] > SEEK_SETTLE:
-                    target, state['pending'] = state['pending'], None
+                    seek_to, state['pending'] = state['pending'], None
                     pipe.close(wait=False)                  # do not wait for the old ffmpeg to exit
-                    pipe = open_pipe(target)
+                    pipe = open_pipe(seek_to)
                     state.update(paused=False, pause_pushed=False, seeking=True,
                                  note='Applying crop...' if state['crop_change'] else 'Seeking...',
                                  crop_change=False, osd_until=now + OSD_SECONDS + 3)
-                    if state['last'] is not None and link.queued < SLOTS:   # immediate on-screen feedback
-                        link.push(self._osd(state['last'], v, target, dur_ms, False, state, prof, silent=True))
+                    if state['last'] is not None and link.queued < link.slots:   # immediate on-screen feedback
+                        self._present(state['last'], v, seek_to, dur_ms, False, state, prof, True, True, ytarget)
                 # Is the ARM keeping up? The FPGA queue only runs dry when the decoder falls behind.
                 dt, state['tick'] = now - state['tick'], now
-                if (may_fall_back and not state['paused'] and not state['seeking'] and state['pending'] is None
-                        and state['last'] is not None and now - state['opened_at'] > STARVE_GRACE
-                        and link.queued == 0):
+                rs = getattr(pipe, 'restarts', 0)                 # an audio stream reopened: the picture waits for it, not for the ARM
+                if rs != state.get('restarts', 0):
+                    state['restarts'], state['restart_at'] = rs, now
+                settling = (now - state.get('restart_at', -99.0) < 8.0) or bool(dur_ms and pos_ms() > dur_ms - 20000)
+                empty = link.queued == 0
+                counting = (may_fall_back and not state['paused'] and not state['seeking'] and state['pending'] is None
+                            and state['last'] is not None and now - state['opened_at'] > STARVE_GRACE and not settling)
+                if counting and empty:
                     state['starved'] += dt
+                    if not state.get('was_empty'):                 # a new dropout: the audio gaps even when the total time is short
+                        state['dry'] = state.get('dry', 0) + 1
+                state['was_empty'] = empty
                 if (may_fall_back and not state['smooth_noted'] and state['starved'] == 0.0
                         and now - state['opened_at'] > SMOOTH_AFTER):
                     state['smooth_noted'] = True
                     self._note_smooth(media)
                 if now - state['win_start'] > STARVE_WINDOW:
-                    if may_fall_back and state['starved'] > STARVE_LIMIT:
-                        self.log('Starved %.1fs of the last %.0fs at %s: stepping down' %
-                                 (state['starved'], now - state['win_start'], media.tier))
+                    if may_fall_back and (state['starved'] > STARVE_LIMIT or state.get('dry', 0) >= DRY_LIMIT):
+                        self.log('Starved %.1fs (%d dropouts) of the last %.0fs at %s: stepping down' %
+                                 (state['starved'], state.get('dry', 0), now - state['win_start'], media.tier))
                         return 'downgrade', pos_ms()
-                    state['starved'], state['win_start'] = 0.0, now
+                    state['starved'], state['dry'], state['win_start'] = 0.0, 0, now
+                if now >= next_cpu:                          # where the ARM's time goes (percent of one core; both busy = 200)
+                    next_cpu = now + CPU_LOG_SECONDS
+                    span = max(0.001, now - loop_t['since'])
+                    where = 'loop: %d%% waiting for the decoder, %d%% reading a picture, %d%% sending pictures, %d%% keys and health' % (
+                        round(100 * loop_t['wait'] / span), round(100 * loop_t['poll'] / span), round(100 * loop_t['push'] / span),
+                        round(100 * loop_t['keys'] / span))
+                    loop_t.update(since=now, wait=0.0, push=0.0, poll=0.0, keys=0.0)
+                    try:
+                        procs = getattr(getattr(pipe, 'decoder', None), 'procs', {}) or {}
+                        cpuw.named = {'video ffmpeg': getattr(procs.get('video'), 'pid', None),
+                                      'audio ffmpeg': getattr(procs.get('audio'), 'pid', None)}
+                        text = cpuw.sample()
+                        if text and not state['paused']:
+                            self.log('CPU %s (%s, %d queued); %s' % (text, media.tier, link.queued, where))
+                    except Exception:                        # a log line must never stop a video
+                        pass
                 if now >= next_save:
                     self.store.record_play(v, pos_ms(), dur_ms, force=False)
                     next_save = now + 10
-                if link.queued >= SLOTS:
+                if link.queued >= link.slots:
                     time.sleep(.002)
                     continue
                 if state['paused']:
                     if not state['pause_pushed'] and state['last'] is not None:
-                        link.push(self._osd(state['last'], v, pos_ms(), dur_ms, True, state, prof, silent=True))
+                        self._present(state['last'], v, pos_ms(), dur_ms, True, state, prof, True, True, ytarget)
                         state['pause_pushed'] = True
                     else:
                         time.sleep(.01)
                     continue
+                tp = time.monotonic()
                 try:
                     kind, rec = pipe.poll()
+                    if kind == 'record':
+                        loop_t['poll'] += time.monotonic() - tp
                 except Exception as exc:
                     msg = str(exc)
                     if '403' in msg and state['retries'] < 3:      # YouTube sometimes refuses at random: try again
                         state['retries'] += 1
-                        self.log('YouTube refused the stream (403); retry %d of 3' % state['retries'])
+                        self.log('YouTube refused the stream (403); retry %d of 3' % state['retries'] +
+                                 ((': ' + ' | '.join(msg.splitlines())[-200:]) if state['retries'] == 1 else ''))
                         pipe.close(wait=False)
                         time.sleep(0.6)
                         pipe = open_pipe(pos_ms())
@@ -583,31 +1138,129 @@ class App:
                     if '403' in msg and can_refresh:
                         self.log('403 persists; asking YouTube for fresh stream URLs')
                         return 'refresh', pos_ms()
+                    if re.search(r'\(-11\)|reset by peer|Connection reset|Broken pipe', msg):
+                        # This ffmpeg build crashes (SIGSEGV) when YouTube drops the connection: carry on from here.
+                        if now - state['opened_at'] < 8.0 and not state['first_logged']:
+                            # It crashed before showing a single picture: starting again the same way will crash again.
+                            state['early'] = state.get('early', 0) + 1
+                            if state['early'] == 1:
+                                state['early_base'] = pos_ms()
+                                self._log_crash_clues()
+                                if msg.startswith('audio'):
+                                    self._probe_audio(media, prof, pos_ms())
+                            if state['early'] <= len(EARLY_NUDGES_MS):
+                                # ffmpeg's seek crashes at certain positions of some streams (the same position crashes every time,
+                                # a second further on works): start a little before or after instead of at the same place.
+                                at = max(0, state['early_base'] + EARLY_NUDGES_MS[state['early'] - 1])
+                                self.log('The decoder crashes as soon as it starts at %s; trying %s (%d of %d)' % (
+                                    ui.mmss(state['early_base']), ui.mmss(at), state['early'], len(EARLY_NUDGES_MS)))
+                                pipe.close(wait=False)
+                                time.sleep(0.3)
+                                pipe = open_pipe(at)
+                                state.update(seeking=True, note='Reconnecting...', osd_until=now + OSD_SECONDS + 3)
+                                continue
+                            if state['early'] > len(EARLY_NUDGES_MS):
+                                if may_fall_back:
+                                    self.log('The decoder crashes as soon as it starts at %s: stepping down' % media.tier)
+                                    return 'crashstep', pos_ms()
+                                raise pipeline.PlaybackError(
+                                    'The decoder crashed as soon as it started at %s (%s). Try a lower quality (X, then Quality) or Auto.' %
+                                    (media.tier, ' '.join(msg.split())[:50]))
+                        else:
+                            state['early'] = 0
+                        if now - state['crash_at'] > 120:
+                            state['crashes'] = 0
+                        state['crash_at'] = now
+                        if state['crashes'] < 5:
+                            state['crashes'] += 1
+                            self.log('The decoder stopped (%s); reconnecting at %s (%d of 5)' % (
+                                ' | '.join(msg.splitlines())[:120], ui.mmss(pos_ms()), state['crashes']))
+                            pipe.close(wait=False)
+                            time.sleep(0.3)
+                            pipe = open_pipe(pos_ms())
+                            state.update(seeking=True, note='Reconnecting...', osd_until=now + OSD_SECONDS + 3)
+                            continue
                     raise pipeline.PlaybackError(msg)
                 if kind == 'wait':
                     time.sleep(.002)
+                    loop_t['wait'] += time.monotonic() - tp
                     continue
                 if kind == 'eof':
                     return 'eof', dur_ms
                 state['last'] = rec
                 state['retries'] = 0
+                if self.yuv and not state.get('flags_known'):
+                    state['flags'] = pipe.decoder.colour_flags(ytarget['h'])      # matrix and range, from ffmpeg's stream line
+                    state['flags_known'] = True
+                if state.get('opened_at') and not state.get('first_logged'):
+                    state['first_logged'] = True
+                    self.log('First picture %.1f s after starting the decoders' % (time.monotonic() - state['opened_at']))
+                if loading is not None:
+                    if self.screen is loading:
+                        self.pop()
+                    loading = None
                 if state['seeking']:                         # first picture from the new position
                     state.update(seeking=False, note='', osd_until=now + 1.5)
-                if now < state['osd_until'] or state['more'] is not None:
+                show_osd = now < state['osd_until'] or state['more'] is not None
+                if show_osd:
                     shown = state['pending'] if state['pending'] is not None else pos_ms()
-                    rec = self._osd(rec, v, shown, dur_ms, False, state, prof)
-                elif state['note']:
-                    state['note'] = ''
-                link.push(rec)
+                else:
+                    shown = 0
+                    if state['note']:
+                        state['note'] = ''
+                tq = time.monotonic()
+                self._present(rec, v, shown, dur_ms, False, state, prof, False, show_osd, ytarget)
+                loop_t['push'] += time.monotonic() - tq
         finally:
-            pipe.close()
+            if loading is not None and self.screen is loading:
+                self.pop()
+            pipe.close(wait=False)        # kill the decoders at once: a step-down or a stop must not wait for a busy ffmpeg to exit
+
+    def _present(self, rec, v, pos, dur, paused, state, prof, silent, osd, target):
+        """Publish one decoded picture + PCM to the core, with the playback bar when `osd` (v0.15: as an overlay layer the
+        FPGA draws, so nothing is burned into the picture; v0.14: burned into the 320x240 record)."""
+        if not self.yuv:
+            if osd:
+                rec = self._osd(rec, v, pos, dur, paused, state, prof, silent)
+            elif silent:
+                rec = rec[:prof.video_bytes] + bytes(prof.audio_bytes)
+            self.link.push(rec)
+            return
+        frame, audio = rec
+        if silent:
+            audio = self.silence
+        overlay = self._osd_overlay(v, pos, dur, paused, state) if osd else None
+        self.link.push_picture(frame, audio, target['w'], target['h'], state['crop'], state.get('flags', 0), overlay)
+
+    def _osd_overlay(self, v, pos, dur, paused, state):
+        """The overlay buffer holding the playback bar for this moment: drawn again only when what it shows changes."""
+        m = state.get('more')
+        sig = (pos // 1000, paused, state['note'], None if m is None else m['sel'], state['crop'], state.get('tier'), state.get('quality'),
+               self.store.in_later(v['id']), state.get('flags', 0))
+        if sig == self.osd_sig and self.osd_ov is not None:
+            return self.osd_ov
+        idx = self.link.free_overlay(keep=self.osd_ov)
+        if idx is None:                                   # all busy: keep showing the old one
+            return self.osd_ov
+        bt601 = bool(state.get('flags', 0) & yuv.FLAG_601)
+        if self.osd_canvas is None or self.osd_canvas.bt601 != bt601:
+            self.osd_canvas = YuvCanvas(320, 240, bt601)
+        c = self.osd_canvas
+        c.clear()
+        self._draw_osd(c, v, pos, dur, paused, state)
+        self.link.upload_overlay(idx, c.y, c.u, c.v)
+        self.osd_ov, self.osd_sig = idx, sig
+        return idx
 
     def _osd(self, rec, v, pos, dur, paused, state, prof, silent=False):
         """Return `rec` with a title/progress bar burned into its picture."""
         buf = bytearray(rec)
         if silent:
             buf[prof.video_bytes:] = bytes(prof.audio_bytes)
-        c = Canvas(320, 240, buf, 0)
+        self._draw_osd(Canvas(320, 240, buf, 0), v, pos, dur, paused, state)
+        return bytes(buf)
+
+    def _draw_osd(self, c, v, pos, dur, paused, state):
         x, y, w = 12, 182, 296
         c.rect(x, y, w, 44, ui.BLACK)
         c.frame(x, y, w, 44, ui.RED, 2)
@@ -628,11 +1281,12 @@ class App:
         c.text(x + w - 8 - len(right) * 8, y + 30, right, ui.AMBER if state['note'] else ui.DIM, ui.BLACK)
         m = state.get('more')
         if m is not None:                                   # the More panel, over the picture
-            px, py, pw, ph = 56, 44, 208, 86
+            px, py, pw, ph = 56, 40, 208, 102
             c.rect(px, py, pw, ph, ui.BLACK)
             c.frame(px, py, pw, ph, ui.RED, 2)
             c.text(px + 10, py + 7, 'More', ui.WHITE, ui.BLACK)
             rows = ['Crop: ' + state['crop'],
+                    'Quality: ' + state['quality'],
                     'Watch Later: ' + ('Saved' if self.store.in_later(v['id']) else 'Add'),
                     'Close']
             for i, text in enumerate(rows):
@@ -640,5 +1294,4 @@ class App:
                 yy = py + 22 + i * 16
                 c.rect(px + 4, yy, pw - 8, 14, bg)
                 c.text(px + 10, yy + 3, text, ui.WHITE if i == m['sel'] else ui.TEXT, bg)
-            c.text(px + 10, py + 74, 'Left/Right   B:Back', ui.DIM, ui.BLACK)
-        return bytes(buf)
+            c.text(px + 10, py + 90, 'Left/Right   B:Back', ui.DIM, ui.BLACK)

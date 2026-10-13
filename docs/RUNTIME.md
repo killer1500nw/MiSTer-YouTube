@@ -23,6 +23,7 @@ still a follow-up task; do not treat this package as a one-step installer.
 Upstream projects:
 - https://github.com/yt-dlp/yt-dlp
 - https://bellard.org/quickjs/
+- https://nodejs.org/ (Node.js v22 armv7l, optional: solves YouTube's JS challenge in seconds; yt-dlp needs v22+)
 - https://ffmpeg.org/
 
 The CA bundle and libyt_sender.so are supplied beside url_player.py. The helper

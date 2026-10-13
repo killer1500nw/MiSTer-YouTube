@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""YouTube CRT daemon: the GUI that lives inside the v0.14-auto core.
+"""YouTube CRT daemon: the GUI that lives inside the YouTubeCRT core (v0.16-fb, or the older v0.15-yuv / v0.14-auto).
 
 Started once at boot (see Install_YouTube_CRT.sh). It idles, reading one
 memory word a few times a second, until you load the YouTubeCRT core from the
@@ -34,6 +34,7 @@ def startup_report(log, rt):
     log('clock: %s (a badly wrong MiSTer clock can break HTTPS)' % time.strftime('%Y-%m-%d %H:%M:%S %Z'))
     for name, p in (('yt-dlp', rt.resolver), ('qjs', rt.qjs), ('ffmpeg', rt.ffmpeg), ('cacert', rt.ca)):
         log('%s: %s %s' % (name, 'ok' if p.is_file() else 'MISSING', p))
+    log('node: %s' % (rt.node if getattr(rt, 'node', None) else 'not installed (security-check videos will be slow; run Install_YouTube_CRT)'))
     try:
         fams = sorted({'IPv6' if a[0] == socket.AF_INET6 else 'IPv4'
                        for a in socket.getaddrinfo('www.youtube.com', 443, type=socket.SOCK_STREAM)})
@@ -91,7 +92,7 @@ def daemon():
     def cancel():
         if STOP.exists():
             raise core_link.Cancelled('Stopped by the stop file.')
-    log('YouTube CRT %s daemon; core v0.14-auto. %s' % (VERSION, datetime.now(timezone.utc).isoformat()))
+    log('YouTube CRT %s daemon. %s' % (VERSION, datetime.now(timezone.utc).isoformat()))
     rt = pipeline.Runtime(ROOT, HERE)
     if rt.missing():
         log('NOTE: external tools missing (playback disabled): ' + ', '.join(rt.missing()))
@@ -149,6 +150,9 @@ def daemon():
 
 
 if __name__ == '__main__':
+    # A thread that finishes a bulk copy (the GIL is released while it copies) waits at most this long for the interpreter;
+    # the default 5 ms made each of the five copies per picture wait for a busy thread.
+    sys.setswitchinterval(0.001)
     parser = argparse.ArgumentParser()
     parser.add_argument('--daemon', action='store_true')
     parser.add_argument('--stop', action='store_true')
