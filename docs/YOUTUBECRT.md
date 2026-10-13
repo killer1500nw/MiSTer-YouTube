@@ -33,7 +33,7 @@ This is stated up front because it is a fair thing for anyone evaluating the cod
 | Playback OSD | Title, progress bar, time; pause/seek; hides after 4 s |
 | Speed test | Settings → Speed test: decodes a test stream and calibrates how much picture quality your ARM can sustain |
 
-Not included (yet): search, playlists, live streams, account login, on-screen keyboard.
+Not included: live streams, account login, 60 fps.
 
 ## Install (once)
 
@@ -183,24 +183,27 @@ records, and the ARM cannot decode 60 fps H.264 at useful sizes anyway (see
 
 Settings → **Decoder speed** (`Normal` / `Fast` / `Fastest`) passes
 `-skip_loop_filter noref|all -flags2 +fast` to ffmpeg's H.264 decoder: less
-CPU per frame for a slightly softer picture. Run **Speed test** after changing
-it; **≥ 1.15×** means smooth, below **1.0×** means that setting cannot hold
+CPU per frame for a slightly softer, blockier picture, which a CRT hides well.
+**Normal** is automatic: the gentlest setting predicted to keep up. At 480p it prefers **Fast**, and a clip that still
+starves on Fast is switched to **Fastest** on the same stream before Auto considers a smaller picture (the clip is
+remembered, so it starts on Fastest next time). Choosing **Fast** or **Fastest** by hand is always honoured.
+Run **Speed test** after changing it; **≥ 1.15×** means smooth, below **1.0×** means that setting cannot hold
 real time.
 
 ## Picture quality: Stream quality
 
-The screen is 320×240, but YouTube's own **240p stream is only about 210-240 kbps**, so it arrives already blocky.
-Scaling, dithering and deblocking filters were compared on real frames and change very little on a CRT. A bigger
-source **downscaled** to 320×240 is what actually looks cleaner, but it costs the ARM much more to decode.
+YouTube's own **240p stream is only about 210-240 kbps**, so it arrives already blocky. A bigger source looks cleaner on
+the CRT, and with the v0.16-fb core the FPGA does all the scaling, so the ARM only has to decode: pictures up to 854×480 go
+straight to the core (read from the framebuffer) with no shrink step in ffmpeg.
 
 What the ARM can decode in real time depends on the stream: how many **pixels**, how many **kbps** and how many
 **frames per second**. Auto estimates that load for every stream a video offers and picks the largest picture
 predicted to need at most 72% of the ARM, which leaves room for the player's own work (reading the video and copying records to the core, about a quarter):
 
-* A calm, low-bitrate upload (a 90s sitcom, an old movie) is cheap, so it gets **360p** (or 480×360 for 4:3 shows).
-* Busy footage (game capture, sports) is expensive and stays at **240p**.
+* Most TV and music-video uploads play at **480p** on a stock MiSTer, using the **Fast** decoder setting.
+* A very heavy 480p clip (a high bitrate such as 950 kbps) is moved to **Fastest** while it plays; if even that is not enough, Auto drops to **360p**.
+* Busy footage (game capture, sports) can still need **360p** or **240p**.
 * A **24 or 25 fps** source has 20% fewer frames than 30 fps, so it is estimated 20% cheaper.
-* 480p is chosen only when a stream is light enough, which needs a faster ARM than a stock MiSTer.
 
 Settings → **Stream quality**:
 
