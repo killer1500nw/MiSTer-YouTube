@@ -621,6 +621,16 @@ class App:
                         self.log('Speed test: %d decoder threads not measured (%s)' % (n, exc))
                         break
                 threads[2] = big[1]
+                # The same stream through the pipeline playback really uses (fps filter, the pre-scale to 640 wide when the stream is
+                # wider, the pipe format): if that is much slower than decode only, the filter chain is the limit, not the decoder.
+                try:
+                    deadline[0] = time.monotonic() + 60
+                    tgt_big = pipeline.yuv_target(big[0], self.link.interlaced)
+                    full_big = pipeline.benchmark(self.rt, prof, big[0], best_sp, 8, limited, target=tgt_big)
+                    self.log('Full playback pipeline on the bigger stream (%dx%d, pre-scale %s): %.2fx against %.2fx decode only' % (
+                        big[0].video['width'], big[0].video['height'], tgt_big.get('prescale') or 'none', full_big, big[1]))
+                except (ValueError, RuntimeError, OSError, TypeError, KeyError) as exc:
+                    self.log('Speed test: full pipeline on the bigger stream not measured (%s)' % exc)
             av1 = None
             deadline[0] = time.monotonic() + 75
             try:
