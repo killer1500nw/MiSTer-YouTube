@@ -22,6 +22,7 @@ SETTINGS_DEFAULTS = {
     'quality': 'Auto',         # Auto | 240p | 360p | 480p: Auto picks the best stream the ARM can decode in time
     'cal': dict(profiles.CAL_DEFAULT),   # measured by the Speed test: cost of one reference stream on this MiSTer
     'speed_clip': '',          # the video the last Speed test used: reused so repeated tests are comparable
+    'cap_ids': {},             # video id -> estimated load of the stream that played cleanly after Auto had to step down (newest last, at most 100)
     'fastest_ids': [],         # videos that starved on Fast at 480p and played cleanly on Fastest (newest last, at most 60)
     'cost_mult': 1.0,          # learned: grows when a stream starved, shrinks slowly while streams play cleanly
     'decode_threads': None,    # ffmpeg decoder threads chosen by the Speed test (None = the default of 2)

@@ -593,6 +593,15 @@ class PlayPolicy(unittest.TestCase):
         self.assertTrue(any('ignoring it once' in l for l in lines))           # the first starve was put down to a hiccup
         self.assertEqual(seen[1], 'Fastest')                                    # it happened again: now the stronger setting is tried
 
+    def test_a_video_that_needed_a_lighter_stream_starts_on_it_next_time(self):
+        st = self.make(cost=0.7)
+        self.run_play([FakePipe(rate=4), FakePipe()], lambda: len(self.opened) >= 2)
+        self.assertEqual([t for t, _ in self.opened], ['360p', '240p'])
+        self.assertIn('v' * 11, st.settings['cap_ids'])
+        self.opened.clear()
+        self.run_play([FakePipe()], lambda: len(self.opened) >= 1)
+        self.assertEqual(self.opened[0][0], '240p')                     # straight to the stream that worked: no second interruption
+
     def test_a_fast_arm_gets_360p_and_a_slow_one_steps_down_and_learns(self):
         st = self.make(cost=0.7)                         # calibration says 360p@452k needs ~62% of the ARM
         self.run_play([FakePipe(rate=4), FakePipe()], lambda: len(self.opened) >= 2)

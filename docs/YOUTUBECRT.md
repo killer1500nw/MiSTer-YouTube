@@ -205,6 +205,8 @@ predicted to need at most 72% of the ARM, which leaves room for the player's own
 * Busy footage (game capture, sports) can still need **360p** or **240p**.
 * A **24 or 25 fps** source has 20% fewer frames than 30 fps, so it is estimated 20% cheaper.
 
+**Auto remembers each video.** When Auto has to step a video down to a lighter stream, it saves that choice (the last 100 videos), and the next time you play the video it starts on the stream that worked, so a music video does not stutter and switch a second time. A video that needed the **Fastest** decoder setting is remembered the same way. Running the **Speed test** clears both lists, because they belong to the old measurement.
+
 Settings → **Stream quality**:
 
 | Setting | Behaviour |

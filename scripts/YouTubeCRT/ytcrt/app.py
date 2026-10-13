@@ -689,6 +689,8 @@ class App:
         self.store.set('copy_method', getattr(self.link.box, 'method', None) if self.link.kind == 'yuv' else None)
         self.store.set('speed_big', best_speed)
         self.store.set('speed_x', {sp: round(x, 3) for sp, x in results})
+        self.store.set('cap_ids', {})                       # what was remembered about single videos belongs to the old measurement
+        self.store.set('fastest_ids', [])
         if len(threads) > 1:
             best_n = max(threads, key=lambda n: threads[n])
             if threads[best_n] > 1.08 * threads[2]:                  # only a clear win changes it
@@ -848,6 +850,12 @@ class App:
             return
         if not v.get('title'):
             v['title'] = media.title                      # a typed link has no title until YouTube tells us
+        cap = self.store.settings.get('cap_ids', {}).get(v['id'])
+        if q == 'Auto' and cap and media.catalog and media.cost > cap * 1.02:
+            # Auto had to step this video down before: start at the stream that worked, so the music does not stop again
+            cal0, mult0 = self.calibration()
+            media = pipeline.media_from(media.catalog[0], media.catalog[1], prof, 'Auto', cal0, mult0, self.log, max_cost=cap * 1.02)
+            self.log('Starting at %s: this video needed a lighter stream before' % media.label)
         refresh_left, pos_ms, outcome = 1, start_ms, 'stop'
         copy0 = (self.link.copy_total, self.link.copy_count, getattr(self.link, 'full_total', 0.0),
                  getattr(self.link, 'full_count', 0), getattr(self.link, 'repeats', 0))
@@ -894,6 +902,11 @@ class App:
                 if smaller is not None:
                     self.toast('Too heavy for %s - using %s' % (media.label, smaller.label))
                     media = smaller
+                    if q == 'Auto' and outcome == 'downgrade':
+                        caps = dict(self.store.settings.get('cap_ids', {}))
+                        caps.pop(v['id'], None)
+                        caps[v['id']] = round(smaller.cost, 4)
+                        self.store.set('cap_ids', dict(list(caps.items())[-100:]))
                 continue
             if outcome == 'quality':                      # the user changed the quality from the More panel
                 q = self.play_quality
