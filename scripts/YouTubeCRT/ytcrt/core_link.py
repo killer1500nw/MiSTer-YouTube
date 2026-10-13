@@ -21,7 +21,7 @@ SLOTS = t.SLOTS
 RECORD_BYTES = t.RECORD_BYTES
 FRAME_SECONDS = t.FRAME_SECONDS
 YUV_SLOTS = 6            # records the v0.15 player keeps queued: 8 slots minus the one on screen and one of margin
-KINDS = {t.IDENT_RGB: 'rgb', t.IDENT_YUV: 'yuv'}
+KINDS = {t.IDENT_RGB: 'rgb', t.IDENT_YUV: 'yuv', t.IDENT_FB: 'yuv'}
 
 
 class Cancelled(RuntimeError):
@@ -122,7 +122,7 @@ class Link:
             if ident != last_ident or now - last_note > 60:
                 # Diagnostics only: what the mailbox looks like while we wait.
                 self.log('Waiting: identity word %08x (want %08x or %08x), heartbeat %d' %
-                         (ident, t.IDENT_YUV, t.IDENT_RGB, self.box.read(36)))
+                         (ident, t.IDENT_FB, t.IDENT_YUV, t.IDENT_RGB, self.box.read(36)))
                 last_note, last_ident = now, ident
             if end is not None and time.monotonic() > end:
                 raise RuntimeError('No live YouTubeCRT core detected.')

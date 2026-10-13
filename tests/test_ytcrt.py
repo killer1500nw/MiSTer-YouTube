@@ -2518,5 +2518,30 @@ class FramebufferPictures(unittest.TestCase):
         tmp.close()
 
 
+class KnownCores(unittest.TestCase):
+    def test_every_identity_the_player_waits_for_is_a_known_core(self):
+        from ytcrt import core_link, transport
+        for ident in transport.IDENTS:
+            self.assertIn(ident, core_link.KINDS, hex(ident))           # a core the player waits for but cannot adopt shows only its test pattern
+
+    def test_adopting_the_v016_core_makes_it_a_yuv_link_that_can_use_the_framebuffer(self):
+        import mmap
+        from ytcrt import core_link, transport, yuv
+        link = core_link.Link.__new__(core_link.Link)
+        link.box = transport.Mailbox(bytearray(yuv.MAP_BYTES))
+        link.fb_candidate = object()                                    # stands in for an opened framebuffer
+        link._adopt(transport.IDENT_FB)
+        self.assertEqual(link.kind, 'yuv')
+        self.assertIsNotNone(link.box.fb)
+        link2 = core_link.Link.__new__(core_link.Link)
+        link2.box = transport.Mailbox(bytearray(yuv.MAP_BYTES))
+        link2.fb_candidate = object()
+        link2._adopt(transport.IDENT_YUV)                               # the v0.15 core never gets the framebuffer
+        self.assertIsNone(link2.box.fb)
+        link.box.fb = link2.box.fb = None
+        link.box.close()
+        link2.box.close()
+
+
 if __name__ == '__main__':
     unittest.main()
