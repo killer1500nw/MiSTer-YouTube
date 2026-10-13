@@ -33,6 +33,7 @@ class CpuWatch:
 
     def __init__(self, named, read=_read, now=time.monotonic):
         self.named, self.read, self.now = dict(named), read, now
+        self.values = {}                  # the last sample as numbers (percent of one core), by name
         self.last = self._take()
 
     def _take(self):
@@ -56,7 +57,8 @@ class CpuWatch:
         t0, j0, b0, i0 = self.last
         self.last = t1, j1, b1, i1 = self._take()
         span = max(0.001, t1 - t0)
-        parts = ['%s %d%%' % (name, round(100.0 * (j1[name] - j0[name]) / CLK_TCK / span)) for name in j1 if name in j0]
+        self.values = {name: 100.0 * (j1[name] - j0[name]) / CLK_TCK / span for name in j1 if name in j0}
+        parts = ['%s %d%%' % (name, round(v)) for name, v in self.values.items()]
         total = (b1 - b0) + (i1 - i0)
         if total > 0:
             parts.append('idle %d%% of all cores' % round(100.0 * (i1 - i0) / total))

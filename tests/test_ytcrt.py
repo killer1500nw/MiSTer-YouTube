@@ -570,6 +570,29 @@ class PlayPolicy(unittest.TestCase):
         self.app.play({'id': 'v' * 11, 'title': 't'}, 0)                 # next time it starts on Fastest
         self.assertEqual(seen[2][1], 'Fastest')
 
+    def test_a_starve_while_ffmpeg_is_not_busy_is_ignored_once(self):
+        from ytcrt import cpu as cpumod
+        st = self.make(quality='480p', cost=0.3)
+        st.settings['decode_speed'] = 'Normal'
+        seen = []
+        real = cpumod.CpuWatch
+
+        class Idle(real):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self.values = {'video ffmpeg': 40.0}          # the decoder is nowhere near a full core
+        cpumod.CpuWatch = Idle
+        self.addCleanup(setattr, cpumod, 'CpuWatch', real)
+        orig = self.app._play_loop
+        self.app._play_loop = lambda v, media, prof, speed, *a: (seen.append(speed), orig(v, media, prof, speed, *a))[1]
+        lines = []
+        real_log = self.app.log
+        self.app.log = lambda m, *a: (lines.append(m % a if a else m), real_log(m, *a))[1]
+        self.run_play([FakePipe(rate=4), FakePipe()], lambda: len(self.opened) >= 2)
+        self.assertEqual(seen[0], 'Fast')
+        self.assertTrue(any('ignoring it once' in l for l in lines))           # the first starve was put down to a hiccup
+        self.assertEqual(seen[1], 'Fastest')                                    # it happened again: now the stronger setting is tried
+
     def test_a_fast_arm_gets_360p_and_a_slow_one_steps_down_and_learns(self):
         st = self.make(cost=0.7)                         # calibration says 360p@452k needs ~62% of the ARM
         self.run_play([FakePipe(rate=4), FakePipe()], lambda: len(self.opened) >= 2)

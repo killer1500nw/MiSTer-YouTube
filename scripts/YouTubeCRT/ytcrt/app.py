@@ -12,6 +12,7 @@ from .store import RESUME_MIN_MS
 
 TEST_CLIP = 'M7kB0lis3xg'
 CPU_LOG_SECONDS = 30.0         # how often playback logs the CPU split between the player and the decoders
+BOOST_MIN_CPU = 85.0           # percent of one core ffmpeg must be using for a starve on Fast to mean 'the decoder is the limit'
 EARLY_NUDGES_MS = (1200, 3000, -2000, 6000)   # where to try again, relative to the start, when the decoder crashes before the first picture
 QUALITY_SETTLE = 1.2        # seconds after the last Quality press in the More panel before the picture restarts
 COPY_BUSY_FB = 2.5            # the framebuffer copy: 0.75 ms idle; under load it slows down too, but far less than the uncached region
@@ -1086,9 +1087,17 @@ class App:
                     self._note_smooth(media)
                 if now - state['win_start'] > STARVE_WINDOW:
                     if may_fall_back and (state['starved'] > STARVE_LIMIT or state.get('dry', 0) >= DRY_LIMIT):
-                        self.log('Starved %.1fs (%d dropouts) of the last %.0fs at %s: stepping down' %
-                                 (state['starved'], state.get('dry', 0), now - state['win_start'], media.tier))
-                        return 'downgrade', pos_ms()
+                        if (speed == 'Fast' and not state.get('hiccup_ignored') and cpuw.values.get('video ffmpeg', 100.0) < BOOST_MIN_CPU
+                                and (media.video or {}).get('height', 0) >= 400):
+                            # The decoder was not working flat out, so a stronger decoder setting would not help: a one-off (network,
+                            # start-up). Ignore it once; if it repeats the normal fall-back applies.
+                            state['hiccup_ignored'] = True
+                            self.log('Starved %.1fs (%d dropouts) at %s while ffmpeg used only %d%% of a core: ignoring it once' % (
+                                state['starved'], state.get('dry', 0), media.tier, cpuw.values.get('video ffmpeg', 0)))
+                        else:
+                            self.log('Starved %.1fs (%d dropouts) of the last %.0fs at %s: stepping down' %
+                                     (state['starved'], state.get('dry', 0), now - state['win_start'], media.tier))
+                            return 'downgrade', pos_ms()
                     state['starved'], state['dry'], state['win_start'] = 0.0, 0, now
                 if now >= next_cpu:                          # where the ARM's time goes (percent of one core; both busy = 200)
                     next_cpu = now + CPU_LOG_SECONDS
