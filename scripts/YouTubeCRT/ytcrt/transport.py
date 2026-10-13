@@ -9,6 +9,7 @@ import ctypes
 import os
 import queue
 import threading
+import time
 from .memory_layout import check_layout, BASE
 from . import yuv
 
@@ -79,6 +80,7 @@ class Framebuffer:
     def __init__(self, start, length, fb_map, view_map):
         self.start, self.length = start, length
         self.fb_map, self.view_map = fb_map, view_map
+        self.stats = [0.0, 0.0, 0.0, 0]              # seconds spent copying, in the barrier, in the read-back check; pictures written
         self.base = ctypes.addressof(ctypes.c_char.from_buffer(fb_map))
         self.view = ctypes.addressof(ctypes.c_char.from_buffer(view_map))
 
@@ -119,6 +121,7 @@ class Framebuffer:
         """pieces = [(offset inside the picture slot, buffer)]: copy them into slot `number` and check that they arrived."""
         slot_off = yuv.FB_SLOTS_OFFSET + (number % 8) * yuv.FB_SLOT_STRIDE
         done = []
+        t0 = time.monotonic()
         for off, src in pieces:
             n = len(src)
             if n <= 0:
@@ -128,15 +131,22 @@ class Framebuffer:
             addr = address_of(src)
             ctypes.memmove(self.base + slot_off + off, addr, n)
             done.append((off, n, addr))
+        t1 = time.monotonic()
         last = done[-1] if done else None
         if last:                                                    # the barrier: the merged writes are drained before the header goes out
             cacheflush(self.base + slot_off + last[0] + last[1] - 64, self.base + slot_off + last[0] + last[1])
+        t2 = time.monotonic()
         view_off = (number % 8) * yuv.FB_SLOT_STRIDE
         for off, n, addr in done:
             for p in {0, max(0, n // 2 - 8), max(0, n - 16)}:
                 k = min(16, n - p)
                 if ctypes.string_at(self.view + view_off + off + p, k) != ctypes.string_at(addr + p, k):
                     raise RuntimeError('Framebuffer write verification failed.')
+        t3 = time.monotonic()
+        self.stats[0] += t1 - t0
+        self.stats[1] += t2 - t1
+        self.stats[2] += t3 - t2
+        self.stats[3] += 1
 
     def close(self):
         for m in (self.fb_map, self.view_map):

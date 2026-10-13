@@ -941,7 +941,8 @@ class App:
             state['pause_pushed'] = False                 # redraw a paused frame so the panel updates
         pipe = open_pipe(start_ms)
         next_save = time.monotonic() + 10
-        cpuw, next_cpu = cpu.CpuWatch({}), time.monotonic() + CPU_LOG_SECONDS
+        cpuw, next_cpu = cpu.CpuWatch({}), time.monotonic() + 12.0          # the first sample early: a stream that struggles steps down soon
+        loop_t = {'since': time.monotonic(), 'wait': 0.0, 'push': 0.0}
 
         def starting_lines():
             """What the screen says while the decoders start (a video whose stream details are cached has no lookup to show)."""
@@ -1027,13 +1028,16 @@ class App:
                     state['starved'], state['dry'], state['win_start'] = 0.0, 0, now
                 if now >= next_cpu:                          # where the ARM's time goes (percent of one core; both busy = 200)
                     next_cpu = now + CPU_LOG_SECONDS
+                    span = max(0.001, now - loop_t['since'])
+                    where = 'loop: %d%% waiting for the decoder, %d%% sending pictures' % (round(100 * loop_t['wait'] / span), round(100 * loop_t['push'] / span))
+                    loop_t.update(since=now, wait=0.0, push=0.0)
                     try:
                         procs = getattr(getattr(pipe, 'decoder', None), 'procs', {}) or {}
                         cpuw.named = {'video ffmpeg': getattr(procs.get('video'), 'pid', None),
                                       'audio ffmpeg': getattr(procs.get('audio'), 'pid', None)}
                         text = cpuw.sample()
                         if text and not state['paused']:
-                            self.log('CPU %s (%s, %d queued)' % (text, media.tier, link.queued))
+                            self.log('CPU %s (%s, %d queued); %s' % (text, media.tier, link.queued, where))
                     except Exception:                        # a log line must never stop a video
                         pass
                 if now >= next_save:
@@ -1049,6 +1053,7 @@ class App:
                     else:
                         time.sleep(.01)
                     continue
+                tp = time.monotonic()
                 try:
                     kind, rec = pipe.poll()
                 except Exception as exc:
@@ -1110,6 +1115,7 @@ class App:
                     raise pipeline.PlaybackError(msg)
                 if kind == 'wait':
                     time.sleep(.002)
+                    loop_t['wait'] += time.monotonic() - tp
                     continue
                 if kind == 'eof':
                     return 'eof', dur_ms
@@ -1134,7 +1140,9 @@ class App:
                     shown = 0
                     if state['note']:
                         state['note'] = ''
+                tq = time.monotonic()
                 self._present(rec, v, shown, dur_ms, False, state, prof, False, show_osd, ytarget)
+                loop_t['push'] += time.monotonic() - tq
         finally:
             if loading is not None and self.screen is loading:
                 self.pop()

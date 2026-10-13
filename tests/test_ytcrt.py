@@ -2543,5 +2543,22 @@ class KnownCores(unittest.TestCase):
         link2.box.close()
 
 
+class PipeSize(unittest.TestCase):
+    def test_enlarging_a_pipe_never_raises(self):
+        proc = type('P', (), {'stdout': object()})()                  # no usable file descriptor, and no fcntl on some systems
+        self.assertFalse(pipeline.enlarge_pipe(proc))
+
+    def test_framebuffer_write_times_are_recorded(self):
+        t = FramebufferPictures()
+        tmp, fb = t.make()
+        from ytcrt import yuv
+        fb.write_planes(0, [(yuv.Y_OFF, bytes(range(256)) * 40)])
+        fb.write_planes(1, [(yuv.Y_OFF, bytes(range(256)) * 40)])
+        self.assertEqual(fb.stats[3], 2)
+        self.assertTrue(all(x >= 0 for x in fb.stats[:3]))
+        fb.close()
+        tmp.close()
+
+
 if __name__ == '__main__':
     unittest.main()

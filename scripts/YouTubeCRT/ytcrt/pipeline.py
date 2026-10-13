@@ -83,6 +83,17 @@ def safe_text(text):
     return ''.join(c for c in text if c in '\n\t' or ord(c) >= 32)[:4096]
 
 
+def enlarge_pipe(proc, size=1 << 20):
+    """Give ffmpeg's output pipe room for a whole picture (Linux F_SETPIPE_SZ). The default 64 KB makes ffmpeg stop after every
+    64 KB until the player has read it, so decoding waits on the player's reading; a big pipe lets it run ahead. Best effort."""
+    try:
+        import fcntl
+        fcntl.fcntl(proc.stdout.fileno(), 1031, size)
+        return True
+    except (OSError, ImportError, ValueError, AttributeError):
+        return False
+
+
 BACKGROUND = set()                 # running background yt-dlp processes (see capture(background=True))
 PAUSED = threading.Event()         # set while a video starts or plays: background processes are frozen
 
@@ -592,6 +603,8 @@ class Decoders:
             for kind, cmd in commands.items():
                 self.procs[kind] = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                                     stderr=subprocess.PIPE, start_new_session=True, bufsize=0)
+                if kind == 'video':
+                    enlarge_pipe(self.procs[kind])
                 self.errors[kind] = bytearray()
         except BaseException:
             self.close()

@@ -441,6 +441,11 @@ print('fb0 %s start=0x%x len=%d avg_ms=%.2f worst_ms=%.2f' % (ident, start, leng
                         self.copy_report[method] = result
                 except (OSError, RuntimeError, ValueError):
                     pass                                   # this way of copying does not work on this system: leave it out
+        fb = self.box.fb
+        if fb is not None and fb.stats[3]:
+            n = fb.stats[3]
+            self.log('Framebuffer write per picture: copy %.2f ms, barrier %.2f ms, read-back check %.2f ms' % (
+                1000 * fb.stats[0] / n, 1000 * fb.stats[1] / n, 1000 * fb.stats[2] / n))
         best = min(self.copy_report, key=lambda m: self.copy_report[m][0]) if self.copy_report else keep
         self.box.use_method(best)
         return self.copy_report.get(best, (0.0, 0.0))
