@@ -121,7 +121,7 @@ class Link:
             now = time.monotonic()
             if ident != last_ident or now - last_note > 60:
                 # Diagnostics only: what the mailbox looks like while we wait.
-                self.log('Waiting: identity word %08x (want %08x or %08x), heartbeat %d' %
+                self.log('Waiting: identity word %08x (want %08x, %08x or %08x), heartbeat %d' %
                          (ident, t.IDENT_FB, t.IDENT_YUV, t.IDENT_RGB, self.box.read(36)))
                 last_note, last_ident = now, ident
             if end is not None and time.monotonic() > end:
