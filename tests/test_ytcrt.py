@@ -2669,5 +2669,43 @@ class BigPictures(unittest.TestCase):
         self.assertGreater(big, plain)                                                      # 848 x 480 is bigger than the 640 x 360 it was shrunk to
 
 
+class ConsoleCursor(unittest.TestCase):
+    def test_quiet_console_hides_the_cursor_and_stops_the_blink(self):
+        import os
+        import tempfile
+        from ytcrt import transport
+        d = tempfile.mkdtemp()
+        tty, blink = os.path.join(d, 'tty1'), os.path.join(d, 'cursor_blink')
+        open(tty, 'w').close()
+        open(blink, 'w').write('1')
+        self.assertEqual(transport.quiet_console((os.path.join(d, 'nodir', 'tty'), tty), blink), 2)     # skips a missing tty, uses the next
+        self.assertEqual(open(tty).read(), chr(27) + '[?25l')
+        self.assertEqual(open(blink).read(), '0')
+
+    def test_quiet_console_is_harmless_where_there_is_no_console(self):
+        from ytcrt import transport
+        self.assertEqual(transport.quiet_console(('/nonexistent/tty',), '/nonexistent/blink'), 0)
+
+    def test_pictures_live_at_the_far_end_of_the_framebuffer(self):
+        import mmap
+        import tempfile
+        from ytcrt import transport, yuv
+        length = 8294400                                                    # 1920 x 1080 x 4, what /dev/fb0 reports on the MiSTer
+        slots_offset = max(yuv.FB_SLOTS_OFFSET, (length - 8 * yuv.FB_SLOT_STRIDE) & ~0xFFFF)
+        self.assertGreater(slots_offset, 0x200000)                          # well below the top, where console text and its cursor are
+        self.assertEqual(slots_offset % 0x10000, 0)
+        self.assertLessEqual(slots_offset + 8 * yuv.FB_SLOT_STRIDE, length)  # and it all fits
+        tmp = tempfile.TemporaryFile()
+        tmp.truncate(slots_offset + 8 * yuv.FB_SLOT_STRIDE)
+        fb_map = mmap.mmap(tmp.fileno(), slots_offset + 8 * yuv.FB_SLOT_STRIDE)
+        view = mmap.mmap(tmp.fileno(), 8 * yuv.FB_SLOT_STRIDE, offset=slots_offset)
+        fb = transport.Framebuffer(0x22001000, length, fb_map, view, slots_offset)
+        self.assertEqual(fb.pic_base(3), 0x22001000 + slots_offset + 3 * yuv.FB_SLOT_STRIDE)
+        fb.write_planes(3, [(yuv.Y_OFF, bytes(range(256)) * 10)])           # written and checked at the new place
+        self.assertEqual(bytes(fb_map[slots_offset + 3 * yuv.FB_SLOT_STRIDE + yuv.Y_OFF:][:256]), bytes(range(256)))
+        fb.close()
+        tmp.close()
+
+
 if __name__ == '__main__':
     unittest.main()

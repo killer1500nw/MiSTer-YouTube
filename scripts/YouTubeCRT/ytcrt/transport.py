@@ -77,6 +77,27 @@ def cacheflush(start, end):
         return False
 
 
+def quiet_console(tty_paths=('/dev/tty1', '/dev/console'), blink='/sys/class/graphics/fbcon/cursor_blink'):
+    """Stop the Linux text console's cursor from blinking in the framebuffer (it flashes dashes through a picture that sits where the
+    cursor happens to be). Hides the cursor (escape code) and switches the blink off; best effort, -> how many things worked."""
+    done = 0
+    for path in tty_paths:
+        try:
+            with open(path, 'w') as tty:
+                tty.write(chr(27) + '[?25l')
+            done += 1
+            break
+        except OSError:
+            continue
+    try:
+        with open(blink, 'w') as f:
+            f.write('0')
+        done += 1
+    except OSError:
+        pass
+    return done
+
+
 class Framebuffer:
     """The Linux framebuffer (/dev/fb0, the MiSTer_fb driver) as the place pictures are written for the v0.16 core.
 
@@ -84,8 +105,11 @@ class Framebuffer:
     and the FPGA reads the same DDR. Slot n sits at yuv.fb_pic_base(start, n). After the writes a cacheflush call acts as the memory
     barrier, and a few bytes of each piece are read back through an uncached /dev/mem window before the record is published."""
 
-    def __init__(self, start, length, fb_map, view_map):
+    def __init__(self, start, length, fb_map, view_map, slots_offset=None):
         self.start, self.length = start, length
+        # The Linux text console draws into this buffer from the top (and its cursor blinks there): the pictures go at the far end,
+        # 64 KB aligned, so a console line printed by a script or the kernel cannot land in one.
+        self.slots_offset = yuv.FB_SLOTS_OFFSET if slots_offset is None else slots_offset
         self.fb_map, self.view_map = fb_map, view_map
         self.stats = [0.0, 0.0, 0.0, 0]              # seconds spent copying, in the barrier, in the read-back check; pictures written
         self.writes = 0
@@ -106,11 +130,13 @@ class Framebuffer:
             start, length = struct.unpack('<II', bytes(info[16:24]))
             if length < yuv.FB_MIN_LENGTH or start % 4096:
                 return None
+            slots_offset = max(yuv.FB_SLOTS_OFFSET, (length - 8 * yuv.FB_SLOT_STRIDE) & ~0xFFFF)
             fb_map = mmap.mmap(fd, length, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
             fdm = os.open(mem_path, os.O_RDWR | os.O_SYNC)
             view_map = mmap.mmap(fdm, 8 * yuv.FB_SLOT_STRIDE, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE,
-                                 offset=start + yuv.FB_SLOTS_OFFSET)
-            fb = cls(start, length, fb_map, view_map)
+                                 offset=start + slots_offset)
+            fb = cls(start, length, fb_map, view_map, slots_offset)
+            quiet_console()
             fb.fds = (fd, fdm)
             return fb
         except (OSError, ValueError, ImportError, struct.error):
@@ -123,11 +149,11 @@ class Framebuffer:
             return None
 
     def pic_base(self, number):
-        return yuv.fb_pic_base(self.start, number)
+        return self.start + self.slots_offset + (number % 8) * yuv.FB_SLOT_STRIDE
 
     def write_planes(self, number, pieces):
         """pieces = [(offset inside the picture slot, buffer)]: copy them into slot `number` and check that they arrived."""
-        slot_off = yuv.FB_SLOTS_OFFSET + (number % 8) * yuv.FB_SLOT_STRIDE
+        slot_off = self.slots_offset + (number % 8) * yuv.FB_SLOT_STRIDE
         done = []
         t0 = time.monotonic()
         for off, src in pieces:

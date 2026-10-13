@@ -33,7 +33,7 @@ FLAG_601, FLAG_FULL_RANGE, FLAG_DITHER = 1, 2, 4
 # v0.16 core: the picture planes can live in the Linux framebuffer (physical start from FBIOGET_FSCREENINFO, 1920x1080x4 bytes). Slot n of
 # the pictures sits at fb_start + FB_SLOTS_OFFSET + n * FB_SLOT_STRIDE: far from the top of the buffer, where console text would be drawn.
 FB_SLOT_STRIDE = 0xA0000          # 655,360 bytes: room for the planes of an 864 x 480 picture (about 622 KB with the plane gaps)
-FB_SLOTS_OFFSET = 0x100000        # 1 MB into the buffer, away from the console text at the top
+FB_SLOTS_OFFSET = 0x100000        # the lowest the slots may start; the player puts them at the far end of the buffer (see transport.Framebuffer)
 FB_MIN_LENGTH = FB_SLOTS_OFFSET + 8 * FB_SLOT_STRIDE
 
 
