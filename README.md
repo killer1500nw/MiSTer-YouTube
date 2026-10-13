@@ -1,6 +1,6 @@
 # MiSTer YouTube CRT Player
 
-Browse and watch YouTube on a MiSTer FPGA, on a CRT in 240p or 480i, with a gamepad or keyboard. Load the
+Browse and watch YouTube on a MiSTer FPGA, on a CRT in 240p or 480i, at up to **480p** video quality, with a gamepad or keyboard. Load the
 **YouTubeCRT** core and a menu appears on screen: your channels, playlists and videos, with thumbnails, resume
 and a playback bar. There is no account or login, and nothing is saved to the card except small lists and a cache.
 Video is found and decoded on the MiSTer itself (yt-dlp and ffmpeg); the FPGA core displays it and plays the audio.
@@ -13,17 +13,22 @@ This is stated up front because it is a fair thing for anyone evaluating the cod
 
 ## What it does
 
-- **Search** YouTube from the menu (type with the on-screen keyboard), with paging through the results.
+- **Search** YouTube videos and public **playlists** from the menu (on-screen or real keyboard), with paging through the results.
 - **Subscriptions**: the newest videos of all your channels together; **Channels**: one channel at a time.
 - **Playlists**, **My Videos** (single videos you list), **Watch Later**, **History** with **resume**.
 - **Play URL / ID**, **Add Channel via @handle** and **Add to Lists**: type a link or a handle on an on-screen keyboard or a real keyboard.
 - **Load more videos…** at the end of every channel and playlist, so you can scroll well past the first 15.
-- **Picture quality that adapts to your MiSTer**: Auto picks a 360p or 240p stream per video from an estimate of how
-  much the ARM can decode in time (calm 90s TV and old movies get the sharper picture), and steps down by itself if
-  the picture starts to stutter. Optional **14:9** and **Fill** crops for widescreen video on a 4:3 screen.
-- Optional **480i** output (core menu), a pause/seek bar, a speed test, and a diagnostics screen.
+- **Up to 480p video.** The ARM only decodes; the FPGA core scales the picture to the CRT (bilinear, with BT.601/709 colour),
+  so a 480p stream plays smoothly on a stock MiSTer. Auto picks a 480p, 360p or 240p stream per video from an estimate of how much
+  the ARM can decode in time and steps down by itself if the picture starts to stutter. A clip that is too heavy for the
+  **Fast** decoder setting is moved to **Fastest** (and remembered) before the picture is made smaller. Optional **14:9**
+  and **Fill** crops for widescreen video on a 4:3 screen.
+- **Made for a CRT.** 240p or interlaced 480i output (core menu), with optional analog dither, a 480i flicker filter and a
+  composite blur for the soft look of 80s and 90s TV. Nothing is added unless you switch it on.
+- A pause/seek bar, a speed test, live quality change (More panel), and a diagnostics screen.
 
-Not supported: live streams and past livestreams (YouTube serves those in segments), 60 fps, search, and sign-in.
+Not supported: live streams and past livestreams (YouTube serves those in segments), 60 fps, and sign-in. Age restricted
+videos play but take longer to start.
 
 ## Quick start
 
