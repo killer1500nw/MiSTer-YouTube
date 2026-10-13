@@ -2707,5 +2707,25 @@ class ConsoleCursor(unittest.TestCase):
         tmp.close()
 
 
+class FramebufferParallel(unittest.TestCase):
+    def test_big_pictures_are_written_by_two_threads_exactly_and_small_ones_by_one(self):
+        from ytcrt import yuv
+        t = FramebufferPictures()
+        for parallel in (True, False):
+            tmp, fb = t.make()
+            fb.parallel = parallel
+            y = bytes((i * 11) & 255 for i in range(407040))
+            u = bytes((i * 5) & 255 for i in range(101760))
+            fb.write_planes(2, [(yuv.Y_OFF, y), (0x64000, u), (0x7D000, u)])
+            slot = yuv.FB_SLOTS_OFFSET + 2 * yuv.FB_SLOT_STRIDE
+            self.assertEqual(bytes(fb.fb_map[slot + yuv.Y_OFF:slot + yuv.Y_OFF + len(y)]), y)
+            self.assertEqual(bytes(fb.fb_map[slot + 0x64000:slot + 0x64000 + len(u)]), u)
+            self.assertEqual(bytes(fb.fb_map[slot + 0x7D000:slot + 0x7D000 + len(u)]), u)
+            self.assertEqual(fb.worker is not None, parallel)               # the helper thread only exists when it is used
+            fb.write_planes(3, [(yuv.Y_OFF, bytes(1000))])                  # small: written by the caller alone
+            fb.close()
+            tmp.close()
+
+
 if __name__ == '__main__':
     unittest.main()

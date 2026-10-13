@@ -98,6 +98,27 @@ def quiet_console(tty_paths=('/dev/tty1', '/dev/console'), blink='/sys/class/gra
     return done
 
 
+def split_pieces(pieces):
+    """[(destination address, source address, bytes)] cut into two lists of about equal size (big pieces are halved)."""
+    flat = []
+    for dst, src, n in pieces:
+        if n >= PARALLEL_MIN:
+            half = (n // 2) & ~7
+            flat += [(dst, src, half), (dst + half, src + half, n - half)]
+        else:
+            flat.append((dst, src, n))
+    flat.sort(key=lambda p: -p[2])
+    mine, theirs, a, b = [], [], 0, 0
+    for p in flat:
+        if a <= b:
+            mine.append(p)
+            a += p[2]
+        else:
+            theirs.append(p)
+            b += p[2]
+    return mine, theirs
+
+
 class Framebuffer:
     """The Linux framebuffer (/dev/fb0, the MiSTer_fb driver) as the place pictures are written for the v0.16 core.
 
@@ -113,6 +134,8 @@ class Framebuffer:
         self.fb_map, self.view_map = fb_map, view_map
         self.stats = [0.0, 0.0, 0.0, 0]              # seconds spent copying, in the barrier, in the read-back check; pictures written
         self.writes = 0
+        self.parallel = True                         # a second thread writes half of every big picture (both CPU cores' write buffers)
+        self.jobs = self.done = self.worker = None
         self.base = ctypes.addressof(ctypes.c_char.from_buffer(fb_map))
         self.view = ctypes.addressof(ctypes.c_char.from_buffer(view_map))
 
@@ -156,6 +179,7 @@ class Framebuffer:
         slot_off = self.slots_offset + (number % 8) * yuv.FB_SLOT_STRIDE
         done = []
         t0 = time.monotonic()
+        jobs = []
         for off, src in pieces:
             n = len(src)
             if n <= 0:
@@ -163,8 +187,26 @@ class Framebuffer:
             if off < 0 or off + n > yuv.FB_SLOT_STRIDE:
                 raise ValueError('picture piece outside its framebuffer slot')
             addr = address_of(src)
-            ctypes.memmove(self.base + slot_off + off, addr, n)
+            jobs.append((self.base + slot_off + off, addr, n))
             done.append((off, n, addr))
+        if self.parallel and sum(j[2] for j in jobs) >= 2 * PARALLEL_MIN:
+            if self.worker is None:
+                self.jobs, self.done = queue.SimpleQueue(), queue.SimpleQueue()
+                self.worker = threading.Thread(target=self._worker_loop, name='fb-helper', daemon=True)
+                self.worker.start()
+            mine, theirs = split_pieces(jobs)
+            self.jobs.put(theirs)
+            for dst, src, n in mine:
+                ctypes.memmove(dst, src, n)
+            try:
+                result = self.done.get(timeout=5)
+            except queue.Empty:
+                raise RuntimeError('The framebuffer helper did not finish.')
+            if result is not None:
+                raise result
+        else:
+            for dst, src, n in jobs:
+                ctypes.memmove(dst, src, n)
         t1 = time.monotonic()
         last = done[-1] if done else None
         if last:                                                    # the barrier: the merged writes are drained before the header goes out
@@ -184,7 +226,21 @@ class Framebuffer:
         self.stats[2] += t3 - t2
         self.stats[3] += 1
 
+    def _worker_loop(self):
+        while True:
+            job = self.jobs.get()
+            if job is None:
+                return
+            try:
+                for dst, src, n in job:
+                    ctypes.memmove(dst, src, n)
+                self.done.put(None)
+            except Exception as exc:                     # reported to the thread that waits for it
+                self.done.put(exc)
+
     def close(self):
+        if self.jobs is not None:
+            self.jobs.put(None)
         for m in (self.fb_map, self.view_map):
             try:
                 m.close()
@@ -241,24 +297,7 @@ class Mailbox:
                 self.done.put(exc)
 
     def _split(self, pieces):
-        """[(destination address, source address, bytes)] cut into two lists of about equal size."""
-        flat = []
-        for dst, src, n in pieces:
-            if n >= PARALLEL_MIN:
-                half = (n // 2) & ~7
-                flat += [(dst, src, half), (dst + half, src + half, n - half)]
-            else:
-                flat.append((dst, src, n))
-        flat.sort(key=lambda p: -p[2])
-        mine, theirs, a, b = [], [], 0, 0
-        for p in flat:
-            if a <= b:
-                mine.append(p)
-                a += p[2]
-            else:
-                theirs.append(p)
-                b += p[2]
-        return mine, theirs
+        return split_pieces(pieces)
 
     def copy_pieces(self, pieces):
         """Copy several (offset, buffer) pieces into the mapping and verify the ends of each. With method 'parallel' the work is

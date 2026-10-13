@@ -907,6 +907,11 @@ class App:
             self.log('Record copy to the core: average %.1f ms, worst %.1f ms (%d records%s)' % (
                 avg_ms, 1000.0 * self.link.copy_max, n,
                 '; %d repeated pictures not copied, %.1f ms per full picture' % (again, full_ms) if again else ''))
+            fb = getattr(getattr(self.link, 'box', None), 'fb', None)
+            if fb is not None and fb.stats[3] and getattr(self.link.box, 'fb_active', False):
+                n_fb = fb.stats[3]
+                self.log('Framebuffer write per picture (this session): copy %.1f ms, barrier %.1f ms, read-back check %.1f ms' % (
+                    1000 * fb.stats[0] / n_fb, 1000 * fb.stats[1] / n_fb, 1000 * fb.stats[2] / n_fb))
             self._learn_copy(media, full_ms, nfull)
         self.log('Playback %s at %s of %s' % ('finished' if outcome == 'eof' else 'stopped', ui.mmss(pos_ms), ui.mmss(media.duration * 1000)))
         self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))
