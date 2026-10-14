@@ -996,6 +996,12 @@ class App:
                 n_fb = fb.stats[3]
                 self.log('Framebuffer write per picture (this session): copy %.1f ms, barrier %.1f ms, read-back check %.1f ms' % (
                     1000 * fb.stats[0] / n_fb, 1000 * fb.stats[1] / n_fb, 1000 * fb.stats[2] / n_fb))
+            parts = getattr(getattr(self.link, 'box', None), 'parts', None)
+            if parts and parts[3]:
+                self.log('A full picture takes %.1f ms: planes %.1f, audio %.1f, header %.1f, everything else %.1f' % (
+                    full_ms, 1000 * parts[0] / parts[3], 1000 * parts[1] / parts[3], 1000 * parts[2] / parts[3],
+                    max(0.0, full_ms - 1000 * sum(parts[:3]) / parts[3])))
+                parts[:] = [0.0, 0.0, 0.0, 0]
             self._learn_copy(media, full_ms, nfull)
         self.log('Playback %s at %s of %s' % ('finished' if outcome == 'eof' else 'stopped', ui.mmss(pos_ms), ui.mmss(media.duration * 1000)))
         self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))
