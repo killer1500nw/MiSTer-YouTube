@@ -12,6 +12,8 @@ from .store import RESUME_MIN_MS
 
 TEST_CLIP = 'M7kB0lis3xg'
 CPU_LOG_SECONDS = 30.0         # how often playback logs the CPU split between the player and the decoders
+MULT_STEP = 1.08                # how much more pessimistic every stream's estimate gets after one that starved (each video also
+                               # remembers its own lighter stream, so the general correction can be small)
 BOOST_MIN_CPU = 85.0           # percent of one core ffmpeg must be using for a starve on Fast to mean 'the decoder is the limit'
 EARLY_NUDGES_MS = (1200, 3000, -2000, 6000)   # where to try again, relative to the start, when the decoder crashes before the first picture
 QUALITY_SETTLE = 1.2        # seconds after the last Quality press in the More panel before the picture restarts
@@ -899,10 +901,11 @@ class App:
         if not v.get('title'):
             v['title'] = media.title                      # a typed link has no title until YouTube tells us
         cap = self.store.settings.get('cap_ids', {}).get(v['id'])
-        if q == 'Auto' and cap and media.catalog and media.cost > cap * 1.02:
-            # Auto had to step this video down before: start at the stream that worked, so the music does not stop again
-            cal0, mult0 = self.calibration()
-            media = pipeline.media_from(media.catalog[0], media.catalog[1], prof, 'Auto', cal0, mult0, self.log, max_cost=cap * 1.02)
+        cal0, mult0 = self.calibration()
+        if q == 'Auto' and cap and media.catalog and media.cost > cap * mult0 * 1.05:
+            # Auto had to step this video down before: start at the stream that worked, so the music does not stop again.
+            # (`cap` is that stream's load without the learned multiplier, so the multiplier drifting later does not push it lower.)
+            media = pipeline.media_from(media.catalog[0], media.catalog[1], prof, 'Auto', cal0, mult0, self.log, max_cost=cap * mult0 * 1.05)
             self.log('Starting at %s: this video needed a lighter stream before' % media.label)
         refresh_left, pos_ms, outcome = 1, start_ms, 'stop'
         copy0 = (self.link.copy_total, self.link.copy_count, getattr(self.link, 'full_total', 0.0),
@@ -941,7 +944,7 @@ class App:
                     self.store.set('fastest_ids', ids)     # even Fastest was not enough: forget it, the smaller picture takes over
                     boosted = False
                 if outcome == 'downgrade':                # ...and learn from it; a crash says nothing about the ARM's speed
-                    mult = min(3.0, mult * 1.25)
+                    mult = min(3.0, mult * MULT_STEP)
                     self.store.set('cost_mult', round(mult, 3))
                 smaller = pipeline.step_down(media, prof, cal, mult, self.log)
                 self.log('%s (estimated load %d%%) %s; cost multiplier now %.3f; %s' % (
@@ -953,7 +956,7 @@ class App:
                     if q == 'Auto' and outcome == 'downgrade':
                         caps = dict(self.store.settings.get('cap_ids', {}))
                         caps.pop(v['id'], None)
-                        caps[v['id']] = round(smaller.cost, 4)
+                        caps[v['id']] = round(smaller.cost / max(mult, 0.1), 4)
                         self.store.set('cap_ids', dict(list(caps.items())[-100:]))
                 continue
             if outcome == 'quality':                      # the user changed the quality from the More panel
