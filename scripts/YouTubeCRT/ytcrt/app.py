@@ -267,7 +267,7 @@ class App:
         elif name == 'Channels':
             self.push(ui.ChannelList())
         elif name == 'Watch Later':
-            self.push(ui.VideoList('Watch Later', lambda a: a.store.later,
+            self.push(ui.VideoList('Watch Later', lambda a: a.store.later, autoplay=True,
                                    hints='A:Play  Y:Remove  B:Back',
                                    empty=lambda a: ['Nothing saved yet.', 'Press Y on any video to save it.']))
         elif name == 'History':
@@ -398,7 +398,7 @@ class App:
         raw = getattr(vids, 'raw', len(vids))
         state = {'id': pid, 'videos': list(vids), 'next': 1 + raw, 'more': raw >= self.SEARCH_PAGE, 'loading': False}
         shorts = lambda a: a.store.settings['shorts'] == 'On'
-        self.push(ui.VideoList(ui.clip(name, 30), lambda a: [v for v in state['videos'] if shorts(a) or not v.get('short')],
+        self.push(ui.VideoList(ui.clip(name, 30), lambda a: [v for v in state['videos'] if shorts(a) or not v.get('short')], autoplay=True,
                                hints='A:Play  Y:Later  B:Back', empty=lambda a: ['This playlist has no videos.'],
                                more=lambda a: self._found_playlist_more(state),
                                can_more=lambda a: state['more'] and len(state['videos']) < self.SEARCH_MAX,
@@ -742,14 +742,15 @@ class App:
         return profiles.speed_for((v.get('width') or 0) * (v.get('height') or 0), speed,
                                   self.store.settings.get('speed_big'))
 
-    def start_video(self, v):
+    def start_video(self, v, queue=None):
+        """`queue`: a function returning the videos of the list this one was chosen from; the next one plays when this one ends."""
         pos = self.store.saved_pos(v['id'])
         if pos >= RESUME_MIN_MS and self.store.settings['resume'] == 'Ask':
             self.push(ui.Choice('Resume', v.get('title', ''),
                                 ['Resume at ' + ui.mmss(pos), 'Start over'],
-                                lambda i: self.play(v, pos if i == 0 else 0)))
+                                lambda i: self.play(v, pos if i == 0 else 0, queue)))
         else:
-            self.play(v, pos if pos >= RESUME_MIN_MS else 0)
+            self.play(v, pos if pos >= RESUME_MIN_MS else 0, queue)
 
     def _probe_audio(self, media, prof, at_ms):
         """After the audio decoder crashed at start: run it once more, verbosely, for two seconds and log what it says. A refused or
@@ -827,12 +828,31 @@ class App:
             self.store.mark_slow(v['id'])                  # warn about it straight away next time
         return res
 
-    def play(self, v, start_ms):
-        """Play a video. Background refreshing is paused from here until playback is over."""
+    def next_in_queue(self, v, queue):
+        """The video after `v` in the list it was chosen from, or None."""
+        try:
+            vids = queue()
+        except Exception:
+            return None
+        for i, x in enumerate(vids):
+            if x.get('id') == v['id']:
+                return vids[i + 1] if i + 1 < len(vids) else None
+        return None
+
+    def play(self, v, start_ms, queue=None):
+        """Play a video (and, from a playlist or channel, the ones after it). Background refreshing is paused from here until playback is over."""
         self.feeds.hold.set()
         pipeline.pause_background()                       # freeze any lookup already running
         try:
-            self._play(v, start_ms)
+            while True:
+                self.finished = False
+                self._play(v, start_ms)
+                nxt = self.next_in_queue(v, queue) if (queue and self.finished and self.store.settings.get('autoplay', 'On') == 'On') else None
+                if nxt is None:
+                    break
+                self.log('Playing the next video: %s' % (nxt.get('title') or nxt['id']))
+                self.toast('Next: ' + ui.clip(nxt.get('title') or '', 30))
+                v, start_ms = nxt, 0
         finally:
             self.feeds.hold.clear()
             pipeline.resume_background()
@@ -948,6 +968,7 @@ class App:
             self._learn_copy(media, full_ms, nfull)
         self.log('Playback %s at %s of %s' % ('finished' if outcome == 'eof' else 'stopped', ui.mmss(pos_ms), ui.mmss(media.duration * 1000)))
         self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))
+        self.finished = outcome == 'eof'
         self.dirty = True
 
     def _play_loop(self, v, media, prof, speed, start_ms, may_fall_back=False, can_refresh=False):
@@ -955,7 +976,7 @@ class App:
         state = {'start': start_ms, 'base': link.sent, 'paused': False, 'pause_pushed': False,
                  'osd_until': time.monotonic() + OSD_SECONDS, 'note': '', 'last': None,
                  'pending': None, 'pending_at': 0.0, 'seeking': False,
-                 'crop': self.store.settings.get('crop', 'Off'), 'more': None, 'crop_change': False,
+                 'crop': self.store.settings.get('crops', {}).get(v['id']) or self.store.settings.get('crop', 'Fill'), 'more': None, 'crop_change': False,
                  'quality': self.play_quality, 'quality_req': None, 'quality_at': 0.0,
                  'opened_at': time.monotonic(), 'starved': 0.0, 'win_start': time.monotonic(),
                  'tick': time.monotonic(), 'tier': media.tier, 'retries': 0, 'smooth_noted': False,
@@ -984,6 +1005,10 @@ class App:
             if mode == state['crop']:
                 return
             state['crop'] = mode
+            crops = dict(self.store.settings.get('crops', {}))     # remembered for this video: it opens like this next time
+            crops.pop(v['id'], None)
+            crops[v['id']] = mode
+            self.store.set('crops', dict(list(crops.items())[-200:]))
             if self.yuv:                                    # the FPGA does the crop: it takes effect on the next picture
                 state.update(note='Crop: ' + mode)
                 return

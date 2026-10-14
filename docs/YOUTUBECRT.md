@@ -152,9 +152,11 @@ next picture (the FPGA does the crop); with the v0.14 core it restarts the pictu
 
 | Crop | What you see |
 | --- | --- |
-| **Off** | The whole picture with black bars top and bottom (the original behaviour) |
-| **14:9** | Trims the sides of widescreen video to 14:9 and leaves thin black bars |
-| **Fill** | Trims widescreen to 4:3 so it fills the screen. This also removes the baked-in side bars from 4:3 shows stored in widescreen files |
+| **Fill** (default) | Trims widescreen to 4:3 so it fills the screen. This also removes the baked-in side bars from 4:3 shows stored in widescreen files, which is how most old TV, films and music videos are uploaded |
+| **14:9** | Trims the sides of widescreen video to 14:9 and leaves thin black bars, the compromise many TV stations used for widescreen material in the 90s |
+| **Off** | The whole picture with black bars top and bottom |
+
+**The crop you choose in the More panel is remembered for that video** (the last 200 videos), so it opens the same way next time. **Settings → Video crop** is the starting crop for every other video.
 
 Crops are centred and never touch a picture that is already narrower than the target (4:3 video, vertical shorts).
 
@@ -235,7 +237,8 @@ Every entry in Settings does something:
 | Setting | What it does |
 | --- | --- |
 | Stream quality | Auto / 240p / 360p / 480p: how big a YouTube stream to decode (see *Picture quality* above) |
-| Video crop | Off / 14:9 / Fill: how widescreen video is trimmed for the 4:3 screen |
+| Video crop | Fill / 14:9 / Off: how widescreen video is trimmed for the 4:3 screen (default Fill) |
+| Play next video | On / Off: when a video from a playlist, channel or Watch Later ends, the next one in that list plays |
 | Resume playback | Ask or Always resume where you stopped |
 | Show Shorts | Include YouTube Shorts in channel lists |
 | Thumbnails | The preview picture in the detail panel |

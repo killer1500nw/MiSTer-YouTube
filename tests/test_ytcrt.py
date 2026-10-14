@@ -120,7 +120,7 @@ class Profiles(unittest.TestCase):
     def test_settings_screen_lists_only_settings_that_do_something(self):
         a = type('A', (), {'store': store.Store(tempfile.mkdtemp())})()
         rows = [r[0] for r in ui.Settings().rows(a)]
-        self.assertEqual(rows, ['quality', 'crop', 'resume', 'shorts', 'thumbnails', 'decode_speed', 'bench', 'diag',
+        self.assertEqual(rows, ['quality', 'crop', 'resume', 'autoplay', 'shorts', 'thumbnails', 'decode_speed', 'bench', 'diag',
                                 'clear_later', 'clear_history'])
         self.assertNotIn('profile', rows)
         self.assertNotIn('about', rows)
@@ -601,6 +601,53 @@ class PlayPolicy(unittest.TestCase):
         self.opened.clear()
         self.run_play([FakePipe()], lambda: len(self.opened) >= 1)
         self.assertEqual(self.opened[0][0], '240p')                     # straight to the stream that worked: no second interruption
+
+    def test_crop_defaults_to_fill_and_a_videos_own_choice_is_remembered(self):
+        import threading
+        st = self.make(quality='480p', cost=0.3)
+        crops = []
+        orig = pipeline.open_pipeline
+
+        def fake_open(rt, prof, media, start_s, speed, cancel, crop='Off', target=None):
+            crops.append(crop)
+            return FakePipe()
+        pipeline.open_pipeline = fake_open
+        self.addCleanup(setattr, pipeline, 'open_pipeline', orig)
+        self.assertEqual(st.settings['crop'], 'Fill')
+        st.settings['crops'] = {'a' * 11: '14:9'}
+        for vid in ('a' * 11, 'b' * 11):
+            threading.Thread(target=lambda: (time.sleep(1.0), self.inp.push('back')), daemon=True).start()
+            self.app.play({'id': vid, 'title': 't'}, 0)
+        self.assertEqual(crops[0], '14:9')                              # this video was set to 14:9 before
+        self.assertEqual(crops[-1], 'Fill')                             # any other video: the default
+
+    def test_the_next_video_of_a_list_plays_when_one_finishes(self):
+        self.make()
+        played = []
+
+        def fake_play(v, start_ms):
+            played.append(v['id'])
+            self.app.finished = len(played) < 3                         # the third video is stopped by the user
+        self.app._play = fake_play
+        vids = [{'id': c * 11, 'title': c} for c in 'abcd']
+        self.app.play(vids[0], 0, lambda: vids)
+        self.assertEqual(played, ['a' * 11, 'b' * 11, 'c' * 11])        # a and b ended, c was stopped: no d
+        played.clear()
+        self.app.store.settings['autoplay'] = 'Off'
+        self.app.play(vids[0], 0, lambda: vids)
+        self.assertEqual(played, ['a' * 11])
+
+    def test_the_old_default_crop_becomes_fill_once(self):
+        import json
+        self.make()                                                     # (the class's tearDown expects it)
+        for old, new in (('Off', 'Fill'), ('14:9', '14:9')):
+            d = tempfile.mkdtemp()
+            Path(d, 'settings.json').write_text(json.dumps({'crop': old}))
+            self.assertEqual(store.Store(d).settings['crop'], new)
+        d = tempfile.mkdtemp()
+        st = store.Store(d)
+        st.set('crop', 'Off')                                           # chosen on purpose afterwards: kept
+        self.assertEqual(store.Store(d).settings['crop'], 'Off')
 
     def test_a_fast_arm_gets_360p_and_a_slow_one_steps_down_and_learns(self):
         st = self.make(cost=0.7)                         # calibration says 360p@452k needs ~62% of the ARM

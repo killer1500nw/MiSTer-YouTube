@@ -29,7 +29,10 @@ SETTINGS_DEFAULTS = {
     'copy_method': None,       # how pictures are copied to the v0.15 core ('memmove' | 'pwrite'), chosen by the Speed test
     'speed_x': None,           # the Speed test's result for each decoder setting {Normal, Fast, Fastest: times real time}
     'speed_big': 'Fast',       # decoder setting used for larger streams (learned by the Speed test)
-    'crop': 'Off',             # Off | 14:9 | Fill : starting crop for each video (More > Crop changes it live)
+    'crop': 'Fill',            # Fill | 14:9 | Off : starting crop for each video (More > Crop changes it live)
+    'crops': {},               # video id -> the crop chosen for that video in the More panel (newest last, at most 200)
+    'crop_v2': False,          # set once the old default (Off) has been replaced by Fill
+    'autoplay': 'On',          # On | Off : play the next video of a playlist or channel when one finishes
 }
 
 CHANNEL_ID = re.compile(r'UC[A-Za-z0-9_-]{22}')
@@ -65,6 +68,12 @@ class Store:
         self.settings = dict(SETTINGS_DEFAULTS)
         self.settings.update({k: v for k, v in _read_json(self.p_settings, {}).items()
                               if k in SETTINGS_DEFAULTS})
+        if not self.settings.get('crop_v2'):               # Off used to be the default, and nobody chose it on purpose
+            if self.settings.get('crop') == 'Off':
+                self.settings['crop'] = 'Fill'
+            self.settings['crop_v2'] = True
+            if os.path.exists(self.p_settings):
+                _write_json(self.p_settings, self.settings)
         self.history = _read_json(self.p_history, {})
         self.slow = _read_json(self.p_slow, {})        # video id -> when it was seen to need YouTube's slow security check
         self.later = _read_json(self.p_later, [])

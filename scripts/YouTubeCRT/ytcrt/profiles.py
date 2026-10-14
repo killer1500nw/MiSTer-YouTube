@@ -122,7 +122,7 @@ def speed_for(px, speed, learned):
     return speed
 
 
-CROPS = ('Off', '14:9', 'Fill')
+CROPS = ('Fill', '14:9', 'Off')          # the order the buttons cycle through: most old TV is uploaded as 4:3 inside a 16:9 frame
 QUALITIES = ('Auto', '240p', '360p', '480p')
 
 
