@@ -1,6 +1,7 @@
 """The on-screen app: menus and playback share one streaming session, so the
 GUI is simply more 320x240 frames pushed through the same DDR mailbox."""
 import subprocess
+import sys
 import threading
 import re
 import time
@@ -66,6 +67,7 @@ class App:
         getattr(link, 'use_copy_method', lambda m: None)(store.settings.get('copy_method'))      # the way the Speed test found fastest
         if store.settings.get('decode_threads'):
             pipeline.DECODE_THREADS = int(store.settings['decode_threads'])        # and the decoder thread count
+        sys.setswitchinterval(0.001)                                  # Python hands the interpreter to another thread every 5 ms by default: too slow for the picture loop
         self.play_quality = 'Auto'                                    # the quality of the video being played (the More panel can change it)
         self.yuv = getattr(link, 'kind', 'rgb') == 'yuv'              # the v0.15 core: the GUI is an overlay, pictures are YUV
         self.canvas = YuvCanvas(320, 240) if self.yuv else Canvas(320, 240)
@@ -1002,6 +1004,11 @@ class App:
                     full_ms, 1000 * parts[0] / parts[3], 1000 * parts[1] / parts[3], 1000 * parts[2] / parts[3],
                     max(0.0, full_ms - 1000 * sum(parts[:3]) / parts[3])))
                 parts[:] = [0.0, 0.0, 0.0, 0]
+                p2 = getattr(self.link, 'parts2', None)
+                if p2 and p2[2]:
+                    self.log('  ...of "everything else": %.1f ms before the writes (repeat check, header), %.1f ms after them (publishing)' % (
+                        1000 * p2[0] / p2[2], 1000 * p2[1] / p2[2]))
+                    p2[:] = [0.0, 0.0, 0]
             self._learn_copy(media, full_ms, nfull)
         self.log('Playback %s at %s of %s' % ('finished' if outcome == 'eof' else 'stopped', ui.mmss(pos_ms), ui.mmss(media.duration * 1000)))
         self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))

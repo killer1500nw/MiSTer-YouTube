@@ -50,6 +50,8 @@ class Link:
         self.settle_timeout = 5
         self.heart_timeout = 0.5       # FPGA heartbeat is ~kHz; stop writing fast if it stops
         self.copy_total = 0.0
+        self.parts2 = [0.0, 0.0, 0]                 # seconds before a picture's writes, after them; pictures counted
+        self._t_box = self._t_pre = None
         self.copy_max = 0.0
         self.copy_count = 0
         self.copy_bytes = 0
@@ -266,6 +268,12 @@ class Link:
 
     def _published(self, started, full=True):
         took = time.monotonic() - started
+        if full and getattr(self, '_t_box', None):
+            p2 = self.__dict__.setdefault('parts2', [0.0, 0.0, 0])         # seconds before the writes, after them (to here), pictures
+            p2[0] += self._t_pre
+            p2[1] += time.monotonic() - self._t_box
+            p2[2] += 1
+            self._t_box = None
         self.copy_total += took
         self.copy_count += 1
         if full:
@@ -310,7 +318,9 @@ class Link:
         else:
             try:
                 header = yuv.header_for(w, h, crop, self.interlaced, flags, overlay, None, self.box.fb.pic_base(self.sent) if use_fb else None)
+                self._t_pre = time.monotonic() - started                      # before the writes: the repeat check and the header
                 self.box.picture(self.sent, header, frame, w * h, audio, in_fb=use_fb)
+                self._t_box = time.monotonic()
             except (RuntimeError, ValueError, OSError) as exc:
                 if not use_fb:
                     raise
