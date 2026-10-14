@@ -2394,6 +2394,20 @@ class PlaylistSearch(unittest.TestCase):
         with self.assertRaises(ValueError):
             pipeline.search_playlists(rt, '   ')
 
+    def test_a_later_page_asks_yt_dlp_for_later_results(self):
+        seen = []
+        saved = pipeline.capture
+        rt = type('Rt', (), {'resolver': Path('yt-dlp'), 'ca': Path('ca')})()
+        pipeline.capture = lambda cmd, env, cancel, timeout=0, **kw: (seen.append(cmd), self.OUT.encode())[1]
+        try:
+            page = pipeline.search_playlists(rt, 'he man', limit=20, start=41)
+        finally:
+            pipeline.capture = saved
+        cmd = seen[0]
+        self.assertEqual(cmd[cmd.index('--playlist-start') + 1], '41')
+        self.assertEqual(cmd[cmd.index('--playlist-end') + 1], '80')        # over-fetches twice the page: mixes and channels are dropped
+        self.assertEqual(page.raw, 5)                                       # the next page starts at 41 + 5
+
     def make_app(self):
         a, st = ListsInTheGui.make_app(self)
         a.rt.resolver, a.rt.ca = Path('yt-dlp'), Path('ca')
@@ -2431,6 +2445,37 @@ class PlaylistSearch(unittest.TestCase):
             self.assertEqual(seen_bg, [False])                              # a fetch the user waits for must not be frozen by pause_background()
         finally:
             pipeline.search_playlists, pipeline.playlist_entries = saved
+
+
+    def test_load_more_playlists_pages_the_search(self):
+        a, st = self.make_app()
+
+        def rows(first, n, raw):
+            page = pipeline.Page({'id': 'PL%011d' % i, 'title': 'List %d' % i, 'channel': 'c', 'count': 3} for i in range(first, first + n))
+            page.raw = raw
+            return page
+        calls = []
+
+        def fake_search(rt, query, cancel=None, log=None, limit=20, start=1):
+            calls.append(start)
+            return rows(0, 12, 14) if start == 1 else rows(10, 12, 14)         # the second page repeats two playlists
+        saved = pipeline.search_playlists
+        pipeline.search_playlists = fake_search
+        try:
+            a._playlist_search_typed(a, 'he man')
+            lst = a.screen
+            self.assertIsInstance(lst, ui.FoundPlaylists)
+            self.assertTrue(lst.items(a)[-1].get('_more'))                       # a "Load more playlists..." row follows the 12
+            self.assertEqual(lst.label(a, lst.items(a)[-1]), 'Load more playlists...')
+            lst.activate(a, lst.items(a)[-1])
+            end = time.monotonic() + 5
+            while len(calls) < 2 or lst.is_loading(a):
+                self.assertLess(time.monotonic(), end)
+                time.sleep(0.02)
+            self.assertEqual(calls, [1, 15])                                     # the next page starts after the 14 results YouTube sent
+            self.assertEqual(len([r for r in lst.items(a) if not r.get('_more')]), 22)   # 12 + 12 minus the 2 repeats
+        finally:
+            pipeline.search_playlists = saved
 
 
 class CpuLog(unittest.TestCase):

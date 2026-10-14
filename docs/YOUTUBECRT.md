@@ -113,7 +113,7 @@ To import your real subscriptions, export them with Google Takeout (YouTube → 
 
 Home → **Search** (the first entry). Type what to look for with the on-screen keyboard (the space key works here) or a real keyboard, then Start / OK. The results are an ordinary video list: A plays, Y saves to Watch Later, and **Load more videos...** at the end fetches the next 20 (up to 200). A search is one yt-dlp run, so expect roughly 15 to 35 seconds on the MiSTer; B cancels. Starting a video from the results works like any other video, including the slow security check for some of them. Searches are not saved.
 
-**Search Playlists** (the second Home entry) does the same for public playlists: type what to look for, then A opens a playlist (its videos are listed like any other list, with **Load more videos...**) and Y saves it to your Playlists so it appears under Home → Playlists. Mixes that YouTube makes automatically are left out.
+**Search Playlists** (the second Home entry) does the same for public playlists: type what to look for, then A opens a playlist (its videos are listed like any other list, with **Load more videos...**) and Y saves it to your Playlists so it appears under Home → Playlists. Mixes that YouTube makes automatically are left out. The results list ends with **Load more playlists...**, which fetches the next page (up to 200 playlists).
 
 ## More than the first page
 
@@ -238,7 +238,7 @@ Every entry in Settings does something:
 | --- | --- |
 | Stream quality | Auto / 240p / 360p / 480p: how big a YouTube stream to decode (see *Picture quality* above) |
 | Video crop | Fill / 14:9 / Off: how widescreen video is trimmed for the 4:3 screen (default Fill) |
-| Play next video | On / Off: when a video from a playlist, channel or Watch Later ends, the next one in that list plays |
+| Play next video | On / Off: when a video from a playlist, channel, subscriptions or Watch Later ends, the next one in that list plays |
 | Resume playback | Ask or Always resume where you stopped |
 | Show Shorts | Include YouTube Shorts in channel lists |
 | Thumbnails | The preview picture in the detail panel |

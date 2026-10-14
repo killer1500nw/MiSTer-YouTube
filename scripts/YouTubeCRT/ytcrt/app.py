@@ -260,7 +260,7 @@ class App:
         elif name == 'Search Playlists':
             self.push(ui.TextInput('Search Playlists', 'Search YouTube playlists for...', self._playlist_search_typed, spaces=True))
         elif name == 'Subscriptions':
-            self.push(ui.VideoList('Subscriptions', lambda a: a.feeds.feed(a.store.subscriptions(), shorts(a)),
+            self.push(ui.VideoList('Subscriptions', lambda a: a.feeds.feed(a.store.subscriptions(), shorts(a)), autoplay=True,
                                    empty=lambda a: a.no_subscriptions_text() if not a.store.subscriptions()
                                    else ['Fetching videos...' if a.feeds_busy() else 'No videos found.'],
                                    status=lambda a: 'updating' if a.feeds_busy() else ''))
@@ -373,7 +373,35 @@ class App:
                 self.push(ui.TextView('Search failed', ['!' + l for l in ui.wrap(str(err), 37, 10)]))
             return
         self.log('Playlist search "%s": %d playlists' % (query[:40], len(res)))
-        self.push(ui.FoundPlaylists(query, list(res)))
+        raw = getattr(res, 'raw', len(res))
+        state = {'query': query, 'results': list(res), 'next': 1 + raw, 'more': len(res) >= self.SEARCH_PAGE // 2, 'loading': False}
+        self.push(ui.FoundPlaylists(query, state['results'], more=lambda a: self._playlist_search_more(state),
+                                    can_more=lambda a: state['more'] and len(state['results']) < self.SEARCH_MAX,
+                                    loading=lambda a: state['loading']))
+
+    def _playlist_search_more(self, state):
+        """"Load more playlists": the next page of this playlist search, in the background."""
+        if state['loading']:
+            return
+        state['loading'] = True
+        self.toast('Loading more playlists...')
+
+        def run():
+            try:
+                self.feeds.wait_turn()
+                page = pipeline.search_playlists(self.rt, state['query'], lambda: None, self.log,
+                                                 limit=self.SEARCH_PAGE, start=state['next'])
+                seen = {r['id'] for r in state['results']}
+                new = [r for r in page if r['id'] not in seen]
+                state['results'].extend(new)
+                state['next'] += getattr(page, 'raw', len(page))
+                state['more'] = bool(new) and getattr(page, 'raw', len(page)) >= self.SEARCH_PAGE // 2
+            except Exception as exc:
+                self.log('Playlist search: could not load more: ' + str(exc)[:200])
+            finally:
+                state['loading'] = False
+                self.dirty = True
+        threading.Thread(target=run, daemon=True).start()
 
     def open_found_playlist(self, row):
         """Load the first videos of a found playlist and show them like any other list (paged, up to a few hundred)."""

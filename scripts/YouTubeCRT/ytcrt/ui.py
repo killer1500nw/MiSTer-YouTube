@@ -569,30 +569,56 @@ class FoundPlaylists(ListScreen):
     detail = False
     visible = 7
 
-    def __init__(self, query, results):
+    def __init__(self, query, results, more=None, can_more=None, loading=None):
         super().__init__()
         self.title = 'Playlists: ' + clip(query, 20)
         self.results = results
+        self.more, self.can_more, self.loading = more, can_more, loading     # paging: a "Load more" row at the end
 
     def items(self, app):
+        if self.more and self.can_more and self.can_more(app):
+            return list(self.results) + [MORE_ROW]
         return self.results
 
+    def is_loading(self, app):
+        return bool(self.loading and self.loading(app))
+
+    def busy(self, app):
+        return self.is_loading(app)
+
     def label(self, app, row):
+        if row.get('_more'):
+            if self.is_loading(app):
+                return 'Loading more' + '.' * (int(time.monotonic() * 3) % 4)
+            return 'Load more playlists...'
         return clip(row['title'], 29)
 
+    def marker(self, app, row):
+        if row.get('_more'):
+            if self.is_loading(app):
+                return SPIN[int(time.monotonic() * 8) % 4], RED
+            return '+', GREEN
+        return ' ', DIM
+
     def right(self, app, row):
-        return str(row['count']) if row.get('count') else ''
+        return '' if row.get('_more') else (str(row['count']) if row.get('count') else '')
 
     def empty_text(self, app):
         return ['No playlists found.']
 
     def info(self, app, row):
-        return clip(row.get('channel') or '', 36)
+        return None if row.get('_more') else clip(row.get('channel') or '', 36)
 
     def activate(self, app, row):
+        if row.get('_more'):
+            if not self.is_loading(app):
+                self.more(app)
+            return
         app.open_found_playlist(row)
 
     def extra(self, app, row, act):
+        if row.get('_more'):
+            return False
         if act == 'alt':
             app.save_found_playlist(row)
             return True

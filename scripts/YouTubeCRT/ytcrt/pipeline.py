@@ -298,7 +298,7 @@ PLAYLIST_FILTERS = ('EgIQAw%253D%253D', 'EgIQAw%3D%3D')
 
 def parse_found_playlists(out):
     """yt-dlp --flat-playlist --print output of a playlist search -> [{'id', 'title', 'channel', 'count'}], no duplicates."""
-    found, seen = [], set()
+    found, seen = Page(), set()
     for line in out.splitlines():
         line = line.strip()
         if not line.startswith('{'):
@@ -307,6 +307,7 @@ def parse_found_playlists(out):
             e = json.loads(line)
         except ValueError:
             continue
+        found.raw += 1                                                       # every result YouTube sent, kept or not
         pid = str(e.get('id') or '')
         if not pid:                                                          # fall back to the list= part of the link
             m = re.search(r'[?&]list=([A-Za-z0-9_-]+)', str(e.get('url') or ''))
@@ -321,18 +322,19 @@ def parse_found_playlists(out):
     return found
 
 
-def search_playlists(rt, query, cancel=lambda: None, log=lambda m: None, limit=20):
-    """Search YouTube for public playlists: up to `limit` of them, via yt-dlp (listing only). -> [dict]"""
+def search_playlists(rt, query, cancel=lambda: None, log=lambda m: None, limit=20, start=1):
+    """Search YouTube for public playlists: up to `limit` of them from result number `start`, via yt-dlp (listing only).
+    -> Page of dicts; Page.raw counts the results YouTube sent (the next page starts at start + raw)."""
     query = re.sub(r'[\x00-\x1f]', ' ', str(query)).strip()[:120]
     if not query:
         raise ValueError('Nothing to search for.')
     from urllib.parse import quote_plus
     env = os.environ.copy()
     env.update(SSL_CERT_FILE=str(rt.ca), REQUESTS_CA_BUNDLE=str(rt.ca), CURL_CA_BUNDLE=str(rt.ca))
-    found = []
+    found = Page()
     for sp in PLAYLIST_FILTERS:
         cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist', '--force-ipv4', '--verbose',
-               '--playlist-end', str(limit * 2), '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
+               '--playlist-start', str(start), '--playlist-end', str(start + limit * 2 - 1), '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
                '--print', PRINT_FOUND_PLAYLIST, '--', 'https://www.youtube.com/results?search_query=%s&sp=%s' % (quote_plus(query), sp)]
         log('Searching YouTube playlists for "%s"' % query[:40])
         seen_lines = [0]
@@ -345,7 +347,9 @@ def search_playlists(rt, query, cancel=lambda: None, log=lambda m: None, limit=2
         if found:
             break
         log('Playlist search: no results with filter %s' % sp)
-    return found[:limit]
+    kept = Page(found[:limit])
+    kept.raw = found.raw
+    return kept
 
 
 def _source(fmt, info):
