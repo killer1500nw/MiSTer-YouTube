@@ -16,6 +16,7 @@ CPU_QUICK_SECONDS = 4.0        # how often the decoder's CPU use is read for the
 CPU_LOG_SECONDS = 30.0         # how often playback logs the CPU split between the player and the decoders
 MULT_STEP = 1.08                # how much more pessimistic every stream's estimate gets after one that starved (each video also
                                # remembers its own lighter stream, so the general correction can be small)
+BUSY_PUSH = 0.85               # share of a starve window the loop spent copying pictures that means 'the copy is the limit'
 BOOST_MIN_CPU = 85.0           # percent of one core ffmpeg must be using for a starve on Fast to mean 'the decoder is the limit'
 EARLY_NUDGES_MS = (1200, 3000, -2000, 6000)   # where to try again, relative to the start, when the decoder crashes before the first picture
 QUALITY_SETTLE = 1.2        # seconds after the last Quality press in the More panel before the picture restarts
@@ -946,7 +947,10 @@ class App:
                 self.log('Starved on Fast at %s: trying Fastest before a smaller picture' % media.label)
                 self.toast('Heavy clip - using the stronger decoder setting')
                 continue
-            if outcome in ('downgrade', 'crashstep'):     # the ARM could not keep up (or the decoder crashes at start): use a lighter stream
+            if outcome == 'stall' and not can_step:        # data stalled twice, but the quality is pinned: just open the decoders again
+                self.log('Restarting the decoders at the same quality')
+                continue
+            if outcome in ('downgrade', 'crashstep', 'stall'):     # the ARM could not keep up (or the decoder crashes at start): use a lighter stream
                 if boosted and outcome == 'downgrade':
                     ids = [i for i in self.store.settings.get('fastest_ids', []) if i != v['id']]
                     self.store.set('fastest_ids', ids)     # even Fastest was not enough: forget it, the smaller picture takes over
@@ -956,12 +960,12 @@ class App:
                     self.store.set('cost_mult', round(mult, 3))
                 smaller = pipeline.step_down(media, prof, cal, mult, self.log)
                 self.log('%s (estimated load %d%%) %s; cost multiplier now %.3f; %s' % (
-                    media.label, round(media.cost * 100), 'could not keep up' if outcome == 'downgrade' else 'crashed at start', mult,
+                    media.label, round(media.cost * 100), {'downgrade': 'could not keep up', 'stall': 'kept waiting for data'}.get(outcome, 'crashed at start'), mult,
                     ('switching to %s' % smaller.label) if smaller else 'nothing lighter to switch to'))
                 if smaller is not None:
                     self.toast('Too heavy for %s - using %s' % (media.label, smaller.label))
                     media = smaller
-                    if q == 'Auto' and outcome == 'downgrade':
+                    if q == 'Auto' and outcome in ('downgrade', 'stall'):
                         caps = dict(self.store.settings.get('cap_ids', {}))
                         caps.pop(v['id'], None)
                         caps[v['id']] = round(smaller.cost / max(mult, 0.1), 4)
@@ -1048,7 +1052,7 @@ class App:
             state['start'], state['base'] = at_ms, link.sent
             state['opened_at'] = time.monotonic()
             state['first_logged'] = False
-            state['starved'], state['win_start'] = 0.0, time.monotonic()
+            state['starved'], state['win_start'], state['win_push'] = 0.0, time.monotonic(), 0.0
             state['pipe_target'] = ytarget                   # the picture size this decoder produces (a crop change opens a new one)
             try:
                 return pipeline.open_pipeline(self.rt, prof, media, at_ms / 1000.0, speed, lambda: None,
@@ -1183,18 +1187,24 @@ class App:
                     self._note_smooth(media)
                 if now - state['win_start'] > STARVE_WINDOW:
                     if may_fall_back and (state['starved'] > STARVE_LIMIT or state.get('dry', 0) >= DRY_LIMIT):
-                        if (speed == 'Fast' and not state.get('hiccup_ignored') and self._decoder_load(state) < BOOST_MIN_CPU
-                                and (media.video or {}).get('height', 0) >= 400):
-                            # The decoder was not working flat out, so a stronger decoder setting would not help: a one-off (network,
-                            # start-up). Ignore it once; if it repeats the normal fall-back applies.
-                            state['hiccup_ignored'] = True
-                            self.log('Starved %.1fs (%d dropouts) at %s while ffmpeg used only %d%% of a core: ignoring it once' % (
-                                state['starved'], state.get('dry', 0), media.tier, self._decoder_load(state)))
-                        else:
-                            self.log('Starved %.1fs (%d dropouts) of the last %.0fs at %s: stepping down' %
-                                     (state['starved'], state.get('dry', 0), now - state['win_start'], media.tier))
+                        span = max(0.001, now - state['win_start'])
+                        dec, push = self._decoder_load(state), 100.0 * state.get('win_push', 0.0) / span
+                        if dec >= BOOST_MIN_CPU or push >= 100.0 * BUSY_PUSH:
+                            self.log('Starved %.1fs (%d dropouts) of the last %.0fs at %s (ffmpeg %d%% of a core, picture copy %d%% of the loop): stepping down' %
+                                     (state['starved'], state.get('dry', 0), span, media.tier, dec, push))
                             return 'downgrade', pos_ms()
-                    state['starved'], state['dry'], state['win_start'] = 0.0, 0, now
+                        # Neither the decoder nor the picture copy was busy: the data did not arrive (the network, a slow start-up),
+                        # which a smaller picture does not fix and which says nothing about the ARM. Once is ignored; a repeat steps
+                        # down to a stream that needs less data, without making every later estimate more cautious.
+                        self.log('Starved %.1fs (%d dropouts) of the last %.0fs at %s while ffmpeg used %d%% of a core and the copy %d%% of the loop: %s' %
+                                 (state['starved'], state.get('dry', 0), span, media.tier, dec, push,
+                                  'waiting for data, ignoring it once' if not state.get('stalls') else 'waiting for data again, stepping down'))
+                        if state.get('stalls'):
+                            return 'stall', pos_ms()
+                        state['stalls'] = 1
+                    else:
+                        state['stalls'] = 0                       # a clean window forgives an earlier stall
+                    state['starved'], state['dry'], state['win_start'], state['win_push'] = 0.0, 0, now, 0.0
                 if now >= next_quick:                        # how busy ffmpeg is, a few seconds at a time, for the starve decision below
                     next_quick = now + CPU_QUICK_SECONDS
                     try:
@@ -1328,6 +1338,7 @@ class App:
                 tq = time.monotonic()
                 self._present(rec, v, shown, dur_ms, False, state, prof, False, show_osd, state.get('pipe_target'))
                 loop_t['push'] += time.monotonic() - tq
+                state['win_push'] = state.get('win_push', 0.0) + (time.monotonic() - tq)
         finally:
             if loading is not None and self.screen is loading:
                 self.pop()

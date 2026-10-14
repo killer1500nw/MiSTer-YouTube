@@ -570,34 +570,44 @@ class PlayPolicy(unittest.TestCase):
         self.app.play({'id': 'v' * 11, 'title': 't'}, 0)                 # next time it starts on Fastest
         self.assertEqual(seen[2][1], 'Fastest')
 
-    def test_a_starve_while_ffmpeg_is_not_busy_is_ignored_once(self):
+    def starve_with_decoder_at(self, percent, quality='480p'):
         from ytcrt import cpu as cpumod
-        st = self.make(quality='480p', cost=0.3)
+        st = self.make(quality=quality, cost=0.3)
         st.settings['decode_speed'] = 'Normal'
-        seen = []
+        seen, lines = [], []
         real = cpumod.CpuWatch
 
-        class Idle(real):
+        class Fake(real):
             def __init__(self, *a, **k):
                 super().__init__(*a, **k)
-                self.values = {'video ffmpeg': 40.0}          # the decoder is nowhere near a full core
+                self.values = {'video ffmpeg': percent}
 
             def sample(self):
                 return ''
-        cpumod.CpuWatch = Idle
+        cpumod.CpuWatch = Fake
+        self.addCleanup(setattr, cpumod, 'CpuWatch', real)
         quick_before = self.appmod.CPU_QUICK_SECONDS
         self.appmod.CPU_QUICK_SECONDS = 0.1
         self.addCleanup(setattr, self.appmod, 'CPU_QUICK_SECONDS', quick_before)
-        self.addCleanup(setattr, cpumod, 'CpuWatch', real)
         orig = self.app._play_loop
         self.app._play_loop = lambda v, media, prof, speed, *a: (seen.append(speed), orig(v, media, prof, speed, *a))[1]
-        lines = []
         real_log = self.app.log
         self.app.log = lambda m, *a: (lines.append(m % a if a else m), real_log(m, *a))[1]
         self.run_play([FakePipe(rate=4), FakePipe()], lambda: len(self.opened) >= 2)
-        self.assertEqual(seen[0], 'Fast')
-        self.assertTrue(any('ignoring it once' in l for l in lines))           # the first starve was put down to a hiccup
-        self.assertEqual(seen[1], 'Fastest')                                    # it happened again: now the stronger setting is tried
+        return st, seen, lines
+
+    def test_a_starve_while_nothing_is_busy_is_a_stall_not_the_arms_fault(self):
+        st, seen, lines = self.starve_with_decoder_at(40.0)
+        self.assertTrue(any('waiting for data, ignoring it once' in l for l in lines))     # the first one is put down to a hiccup
+        self.assertEqual(seen[:2], ['Fast', 'Fast'])                                        # no stronger setting was tried
+        self.assertNotIn('v' * 11, st.settings.get('fastest_ids', []))
+        self.assertEqual(st.settings['cost_mult'], 1.0)                                     # and nothing was learned about the ARM
+
+    def test_a_starve_while_ffmpeg_is_busy_still_boosts_and_is_blamed_on_the_arm(self):
+        st, seen, lines = self.starve_with_decoder_at(95.0)
+        self.assertFalse(any('ignoring it once' in l for l in lines))
+        self.assertEqual(seen[:2], ['Fast', 'Fastest'])
+        self.assertIn('v' * 11, st.settings['fastest_ids'])
 
     def test_a_video_that_needed_a_lighter_stream_starts_on_it_next_time(self):
         st = self.make(cost=0.7)
