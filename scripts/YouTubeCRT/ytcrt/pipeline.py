@@ -569,9 +569,11 @@ def decoder_command(rt, profile, source, kind, start_s=0, speed='Normal', limit_
         args[args.index('-loglevel') + 1] = 'info'                    # the stream line says which colour matrix it uses
         args.insert(args.index('-nostdin') + 1, '-nostats')
         vf = 'fps=%d:start_time=0' % profile.fps
+        if target.get('crop_w'):
+            vf += r',crop=%d:ih-mod(ih\,2)' % target['crop_w']      # the sides for Fill / 14:9, centred
         if target.get('prescale'):
             vf += ',scale=%d:%d:flags=fast_bilinear' % target['prescale']
-        else:
+        elif not target.get('crop_w'):
             vf += r',crop=iw-mod(iw\,16):ih-mod(ih\,2)'
         args += ['-map', '0:v:0', '-an', '-vf', vf, '-pix_fmt', 'yuv420p', '-threads', '1', '-f', 'rawvideo']
     elif kind == 'video' and decode_only:
@@ -801,13 +803,21 @@ class RecordPipeline:
             raise RuntimeError('Pipe reader did not stop within five seconds.')
 
 
-def yuv_target(media, interlaced=True, big=False):
+def yuv_target(media, interlaced=True, big=False, crop='Off'):
     """Size of the YUV pictures for this video: its own size trimmed to a multiple of 16 x 2, or a pre-scaled size when it
     is larger than the core's row buffers (640 x 480) or the core could not step through it fast enough.
     `big` = the v0.16 core is reading pictures from the framebuffer: pictures up to 864 x 480 go in unscaled (the FPGA does the shrinking,
     which ffmpeg needs half its time for on this ARM).
-    -> {'w', 'h', 'prescale'}"""
-    w, h = yuv.aligned_size(int(media.video['width']), int(media.video['height']))
+    `crop` ('Fill', '14:9'): ffmpeg trims the sides itself (the pictures that cross the pipe and are copied to the core are then a quarter
+    smaller for 16:9 video) and the core is told not to crop again.
+    -> {'w', 'h', 'prescale', 'crop_w'}"""
+    sw, sh = int(media.video['width']), int(media.video['height'])
+    crop_w = None
+    cw = profiles.crop_width(sw, sh, crop)
+    if cw < sw - 16:                                              # a real crop: the centre cw columns, to a multiple of 16
+        crop_w = min(sw, max(16, int(round(cw / 16.0)) * 16))
+        sw = crop_w
+    w, h = yuv.aligned_size(sw, sh)
     pre = None
     max_w = yuv.BIG_MAX_W if big else yuv.MAX_W
     if w > max_w or h > yuv.MAX_H:
@@ -818,7 +828,7 @@ def yuv_target(media, interlaced=True, big=False):
     if steep:
         pre = steep
         w, h = steep
-    return {'w': w, 'h': h, 'prescale': pre}
+    return {'w': w, 'h': h, 'prescale': pre, 'crop_w': crop_w}
 
 
 def open_pipeline(rt, profile, media, start_s, speed, cancel, crop='Off', target=None):

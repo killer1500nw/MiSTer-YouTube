@@ -156,6 +156,8 @@ next picture (the FPGA does the crop); with the v0.14 core it restarts the pictu
 | **14:9** | Trims the sides of widescreen video to 14:9 and leaves thin black bars, the compromise many TV stations used for widescreen material in the 90s |
 | **Off** | The whole picture with black bars top and bottom |
 
+With the v0.16 core, ffmpeg trims the sides itself (Fill and 14:9), so a 16:9 video crosses the pipe and is copied to the core about a quarter smaller (854×480 becomes 640×480); changing the crop in the More panel therefore restarts the picture for a second or two.
+
 **The crop you choose in the More panel is remembered for that video** (the last 200 videos), so it opens the same way next time. **Settings → Video crop** is the starting crop for every other video.
 
 Crops are centred and never touch a picture that is already narrower than the target (4:3 video, vertical shorts).

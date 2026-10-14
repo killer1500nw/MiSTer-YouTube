@@ -51,9 +51,19 @@ def limit_for(cal=None):
     return LIMIT_TOTAL if cal and cal.get('copy_ms') else LIMIT
 
 
-def picture_bytes(stream, big=False):
-    """Bytes of YUV 4:2:0 the player copies to the core for one picture of this stream."""
+def crop_width(w, h, crop='Off'):
+    """Width of the centre part of a w x h picture that a crop mode keeps (never wider than the picture)."""
+    if crop == '14:9':
+        return min(float(w), h * 14 / 9.0)
+    if crop == 'Fill':
+        return min(float(w), h * 4 / 3.0)
+    return float(w)
+
+
+def picture_bytes(stream, big=False, crop='Off'):
+    """Bytes of YUV 4:2:0 the player copies to the core for one picture of this stream (ffmpeg trims the sides for a crop first)."""
     w, h = stream['width'], stream['height']
+    w = int(crop_width(w, h, crop))
     box = PICTURE_BOX_BIG if big else PICTURE_BOX
     f = min(1.0, box[0] / w, box[1] / h)
     return int(w * f) * int(h * f) * 3 // 2
@@ -65,7 +75,7 @@ def copy_scale(stream, cal):
     base = cal.get('copy_bytes')
     if cal.get('copy_fixed') or not base:
         return 1.0
-    return 0.5 + 0.5 * picture_bytes(stream, bool(cal.get('big'))) / float(base)
+    return 0.5 + 0.5 * picture_bytes(stream, bool(cal.get('big')), cal.get('crop', 'Off')) / float(base)
 
 
 def copy_cost(stream, cal, fps):

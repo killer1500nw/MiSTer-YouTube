@@ -2046,13 +2046,15 @@ class YuvPlayer(unittest.TestCase):
         self.app.play({'id': 'v' * 11, 'title': 'A test video'}, 0)
         return opened
 
-    def test_playback_sends_pictures_at_their_own_size_and_crop_needs_no_restart(self):
+    def test_playback_sends_pictures_trimmed_by_ffmpeg_and_a_crop_change_restarts_the_decoder(self):
         self.make()
         st = self.st
         st.settings['quality'] = '360p'
         steps = {'n': 0}
+        sizes = []
 
         def pipe(target):
+            sizes.append((target['w'], target['h']))
             return FakeYuvPipe(target['w'], target['h'])
 
         def done():
@@ -2060,15 +2062,17 @@ class YuvPlayer(unittest.TestCase):
             if steps['n'] == 5:
                 self.inp.push('menu')                                    # the More panel
             if steps['n'] == 8:
-                self.inp.push('ok')                                      # Crop: Off -> 14:9
-            return self.link.sent > 60 and self.link.pictures[-1][4] == '14:9'
+                self.inp.push('ok')                                      # Crop: Fill -> 14:9
+            return len(sizes) >= 2 and self.link.sent > 90 and self.link.pictures[-1][2] == sizes[-1][0]
         opened = self.play(pipe, done)
-        self.assertEqual(len(opened), 1)                                 # no decoder restart for the crop
-        self.assertEqual((opened[0][0]['w'], opened[0][0]['h']), (640, 360))
+        self.assertEqual(opened[0][0]['crop_w'], 480)                    # Fill: 640x360 -> the 4:3 centre, 480 wide
+        self.assertEqual(sizes[0], (480, 360))
+        self.assertEqual(opened[1][0]['crop_w'], 560)                    # 14:9: 360 * 14 / 9
+        self.assertEqual(sizes[1], (560, 360))
         pics = self.link.pictures
-        self.assertEqual((pics[-1][2], pics[-1][3]), (640, 360))
-        self.assertEqual(len(pics[-1][0]), 640 * 360 * 3 // 2)
-        self.assertEqual(pics[-1][4], '14:9')                            # the FPGA does the crop: only the header changed
+        self.assertEqual((pics[-1][2], pics[-1][3]), (560, 360))
+        self.assertEqual(len(pics[-1][0]), 560 * 360 * 3 // 2)
+        self.assertEqual(pics[-1][4], 'Off')                             # ffmpeg trimmed it: the core must not crop again
         self.assertIsNotNone(pics[-1][6])                                # and the More panel is an overlay, not burned in
 
     def test_the_playback_bar_is_an_overlay_that_goes_away(self):
@@ -2779,12 +2783,27 @@ class BigPictures(unittest.TestCase):
 
     def test_big_stream_goes_in_unscaled_with_the_framebuffer_and_scaled_without(self):
         media = type('M', (), {'video': {'width': 854, 'height': 480}})()
-        self.assertEqual(pipeline.yuv_target(media, True, big=True), {'w': 848, 'h': 480, 'prescale': None})
+        self.assertEqual(pipeline.yuv_target(media, True, big=True), {'w': 848, 'h': 480, 'prescale': None, 'crop_w': None})
         scaled = pipeline.yuv_target(media, True, big=False)
         self.assertLessEqual(scaled['w'], 640)
         self.assertIsNotNone(scaled['prescale'])
         wide = type('M', (), {'video': {'width': 1280, 'height': 720}})()
         self.assertLessEqual(pipeline.yuv_target(wide, True, big=True)['w'], 864)           # something bigger is still scaled down first
+
+    def test_fill_and_14_9_are_trimmed_by_ffmpeg_so_fewer_bytes_move(self):
+        media = type('M', (), {'video': {'width': 854, 'height': 480}})()
+        fill = pipeline.yuv_target(media, True, big=True, crop='Fill')
+        self.assertEqual((fill['w'], fill['h'], fill['crop_w']), (640, 480, 640))         # 854x480 -> 640x480: a quarter fewer bytes
+        wide = pipeline.yuv_target(media, True, big=True, crop='14:9')
+        self.assertEqual((wide['w'], wide['crop_w']), (752, 752))
+        self.assertIsNone(pipeline.yuv_target(media, True, big=True, crop='Off')['crop_w'])
+        square = type('M', (), {'video': {'width': 640, 'height': 480}})()
+        self.assertIsNone(pipeline.yuv_target(square, True, big=True, crop='Fill')['crop_w'])   # 4:3 stays whole
+        rt = type('Rt', (), {'ffmpeg': Path('ffmpeg'), 'ca': Path('ca')})()
+        src = {'url': 'http://x/v', 'headers': {}}
+        cmd = pipeline.decoder_command(rt, profiles.BY_KEY['240p30'], src, 'video', target=fill)
+        self.assertIn('crop=640:ih-mod(ih\,2)', cmd[cmd.index('-vf') + 1])
+        self.assertGreater(profiles.picture_bytes({'width': 854, 'height': 480}, True), profiles.picture_bytes({'width': 854, 'height': 480}, True, 'Fill'))
 
     def test_a_big_picture_is_written_where_its_header_says(self):
         from ytcrt import yuv

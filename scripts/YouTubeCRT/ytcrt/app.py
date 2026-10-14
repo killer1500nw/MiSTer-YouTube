@@ -762,6 +762,8 @@ class App:
             cal = profiles.CAL_DEFAULT
         if self.big_pictures():
             cal = dict(cal, big=True)                  # copy costs follow the real picture size, and no pre-scale is needed
+        if self.yuv:
+            cal = dict(cal, crop=self.store.settings.get('crop', 'Off'))     # ffmpeg trims the sides, so the pictures are smaller
         return cal, float(self.store.settings.get('cost_mult', 1.0))
 
     def effective_speed(self, media, speed):
@@ -819,7 +821,7 @@ class App:
         cal = self.store.settings.get('cal')
         if n < 90 or not (isinstance(cal, dict) and cal.get('copy_ms') and cal.get('copy_bytes')) or not media.video:
             return
-        per_base = avg_ms if cal.get('copy_fixed') else avg_ms / profiles.copy_scale(media.video, dict(cal, big=self.big_pictures()))
+        per_base = avg_ms if cal.get('copy_fixed') else avg_ms / profiles.copy_scale(media.video, dict(cal, big=self.big_pictures(), crop=self.store.settings.get('crop', 'Off')))
         new = round(0.7 * cal['copy_ms'] + 0.3 * min(per_base, 4.0 * cal['copy_ms']), 2)
         if abs(new - cal['copy_ms']) >= 0.1:
             self.store.set('cal', dict(cal, copy_ms=new))
@@ -1036,7 +1038,7 @@ class App:
                  'tick': time.monotonic(), 'tier': media.tier, 'retries': 0, 'smooth_noted': False,
                  'crashes': 0, 'crash_at': 0.0}
         dur_ms = media.duration * 1000
-        ytarget = pipeline.yuv_target(media, link.interlaced, self.big_pictures()) if self.yuv else None
+        ytarget = pipeline.yuv_target(media, link.interlaced, self.big_pictures(), state['crop']) if self.yuv else None
         state['flags'] = 0
 
         def pos_ms():
@@ -1047,6 +1049,7 @@ class App:
             state['opened_at'] = time.monotonic()
             state['first_logged'] = False
             state['starved'], state['win_start'] = 0.0, time.monotonic()
+            state['pipe_target'] = ytarget                   # the picture size this decoder produces (a crop change opens a new one)
             try:
                 return pipeline.open_pipeline(self.rt, prof, media, at_ms / 1000.0, speed, lambda: None,
                                               crop=state['crop'], target=ytarget)
@@ -1063,9 +1066,9 @@ class App:
             crops.pop(v['id'], None)
             crops[v['id']] = mode
             self.store.set('crops', dict(list(crops.items())[-200:]))
-            if self.yuv:                                    # the FPGA does the crop: it takes effect on the next picture
-                state.update(note='Crop: ' + mode)
-                return
+            nonlocal ytarget
+            if self.yuv:                                    # ffmpeg trims the sides: the picture size changes, so the decoders restart
+                ytarget = pipeline.yuv_target(media, link.interlaced, self.big_pictures(), mode)
             if state['pending'] is None:
                 state['pending'] = pos_ms()
             state.update(pending_at=now, crop_change=True, note='Crop: ' + mode)
@@ -1159,7 +1162,7 @@ class App:
                                  note='Applying crop...' if state['crop_change'] else 'Seeking...',
                                  crop_change=False, osd_until=now + OSD_SECONDS + 3)
                     if state['last'] is not None and link.queued < link.slots:   # immediate on-screen feedback
-                        self._present(state['last'], v, seek_to, dur_ms, False, state, prof, True, True, ytarget)
+                        self._present(state['last'], v, seek_to, dur_ms, False, state, prof, True, True, state['last_target'])
                 # Is the ARM keeping up? The FPGA queue only runs dry when the decoder falls behind.
                 dt, state['tick'] = now - state['tick'], now
                 rs = getattr(pipe, 'restarts', 0)                 # an audio stream reopened: the picture waits for it, not for the ARM
@@ -1227,7 +1230,7 @@ class App:
                     continue
                 if state['paused']:
                     if not state['pause_pushed'] and state['last'] is not None:
-                        self._present(state['last'], v, pos_ms(), dur_ms, True, state, prof, True, True, ytarget)
+                        self._present(state['last'], v, pos_ms(), dur_ms, True, state, prof, True, True, state['last_target'])
                         state['pause_pushed'] = True
                     else:
                         time.sleep(.01)
@@ -1301,9 +1304,10 @@ class App:
                 if kind == 'eof':
                     return 'eof', dur_ms
                 state['last'] = rec
+                state['last_target'] = state.get('pipe_target')
                 state['retries'] = 0
                 if self.yuv and not state.get('flags_known'):
-                    state['flags'] = pipe.decoder.colour_flags(ytarget['h'])      # matrix and range, from ffmpeg's stream line
+                    state['flags'] = pipe.decoder.colour_flags(state['pipe_target']['h'])      # matrix and range, from ffmpeg's stream line
                     state['flags_known'] = True
                 if state.get('opened_at') and not state.get('first_logged'):
                     state['first_logged'] = True
@@ -1322,7 +1326,7 @@ class App:
                     if state['note']:
                         state['note'] = ''
                 tq = time.monotonic()
-                self._present(rec, v, shown, dur_ms, False, state, prof, False, show_osd, ytarget)
+                self._present(rec, v, shown, dur_ms, False, state, prof, False, show_osd, state.get('pipe_target'))
                 loop_t['push'] += time.monotonic() - tq
         finally:
             if loading is not None and self.screen is loading:
@@ -1343,7 +1347,8 @@ class App:
         if silent:
             audio = self.silence
         overlay = self._osd_overlay(v, pos, dur, paused, state) if osd else None
-        self.link.push_picture(frame, audio, target['w'], target['h'], state['crop'], state.get('flags', 0), overlay)
+        self.link.push_picture(frame, audio, target['w'], target['h'], 'Off' if target.get('crop_w') else state['crop'],
+                               state.get('flags', 0), overlay)
 
     def _osd_overlay(self, v, pos, dur, paused, state):
         """The overlay buffer holding the playback bar for this moment: drawn again only when what it shows changes."""
