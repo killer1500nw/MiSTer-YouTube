@@ -2056,8 +2056,34 @@ class YuvPlayer(unittest.TestCase):
         self.app.play({'id': 'v' * 11, 'title': 'A test video'}, 0)
         return opened
 
-    def test_playback_sends_pictures_trimmed_by_ffmpeg_and_a_crop_change_restarts_the_decoder(self):
+    def test_playback_sends_pictures_at_their_own_size_and_crop_needs_no_restart(self):
         self.make()
+        st = self.st
+        st.settings['quality'] = '360p'
+        steps = {'n': 0}
+
+        def pipe(target):
+            return FakeYuvPipe(target['w'], target['h'])
+
+        def done():
+            steps['n'] += 1
+            if steps['n'] == 5:
+                self.inp.push('menu')                                    # the More panel
+            if steps['n'] == 8:
+                self.inp.push('ok')                                      # Crop: Fill -> 14:9
+            return self.link.sent > 60 and self.link.pictures[-1][4] == '14:9'
+        opened = self.play(pipe, done)
+        self.assertEqual(len(opened), 1)                                 # no decoder restart for the crop
+        self.assertEqual((opened[0][0]['w'], opened[0][0]['h']), (640, 360))
+        pics = self.link.pictures
+        self.assertEqual((pics[-1][2], pics[-1][3]), (640, 360))
+        self.assertEqual(pics[-1][4], '14:9')                            # the FPGA does the crop: only the header changed
+        self.assertIsNotNone(pics[-1][6])
+
+    def test_with_ffmpeg_crop_pictures_are_trimmed_and_a_crop_change_restarts_the_decoder(self):
+        self.make()
+        profiles.FFMPEG_CROP = True
+        self.addCleanup(setattr, profiles, 'FFMPEG_CROP', False)
         st = self.st
         st.settings['quality'] = '360p'
         steps = {'n': 0}
@@ -2801,6 +2827,8 @@ class BigPictures(unittest.TestCase):
         self.assertLessEqual(pipeline.yuv_target(wide, True, big=True)['w'], 864)           # something bigger is still scaled down first
 
     def test_fill_and_14_9_are_trimmed_by_ffmpeg_so_fewer_bytes_move(self):
+        profiles.FFMPEG_CROP = True
+        self.addCleanup(setattr, profiles, 'FFMPEG_CROP', False)
         media = type('M', (), {'video': {'width': 854, 'height': 480}})()
         fill = pipeline.yuv_target(media, True, big=True, crop='Fill')
         self.assertEqual((fill['w'], fill['h'], fill['crop_w']), (640, 480, 640))         # 854x480 -> 640x480: a quarter fewer bytes

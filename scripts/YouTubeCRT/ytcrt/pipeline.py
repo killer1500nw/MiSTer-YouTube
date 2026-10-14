@@ -814,7 +814,7 @@ def yuv_target(media, interlaced=True, big=False, crop='Off'):
     sw, sh = int(media.video['width']), int(media.video['height'])
     crop_w = None
     cw = profiles.crop_width(sw, sh, crop)
-    if cw < sw - 16:                                              # a real crop: the centre cw columns, to a multiple of 16
+    if profiles.FFMPEG_CROP and cw < sw - 16:                     # a real crop: the centre cw columns, to a multiple of 16
         crop_w = min(sw, max(16, int(round(cw / 16.0)) * 16))
         sw = crop_w
     w, h = yuv.aligned_size(sw, sh)

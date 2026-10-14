@@ -1,7 +1,6 @@
 """The on-screen app: menus and playback share one streaming session, so the
 GUI is simply more 320x240 frames pushed through the same DDR mailbox."""
 import subprocess
-import sys
 import threading
 import re
 import time
@@ -16,6 +15,7 @@ CPU_QUICK_SECONDS = 4.0        # how often the decoder's CPU use is read for the
 CPU_LOG_SECONDS = 30.0         # how often playback logs the CPU split between the player and the decoders
 MULT_STEP = 1.08                # how much more pessimistic every stream's estimate gets after one that starved (each video also
                                # remembers its own lighter stream, so the general correction can be small)
+STALL_RESTARTS = 3             # how often a data stall reopens the decoders before Auto gives in and steps down
 BUSY_PUSH = 0.85               # share of a starve window the loop spent copying pictures that means 'the copy is the limit'
 BOOST_MIN_CPU = 85.0           # percent of one core ffmpeg must be using for a starve on Fast to mean 'the decoder is the limit'
 EARLY_NUDGES_MS = (1200, 3000, -2000, 6000)   # where to try again, relative to the start, when the decoder crashes before the first picture
@@ -69,7 +69,6 @@ class App:
         getattr(link, 'use_copy_method', lambda m: None)(store.settings.get('copy_method'))      # the way the Speed test found fastest
         if store.settings.get('decode_threads'):
             pipeline.DECODE_THREADS = int(store.settings['decode_threads'])        # and the decoder thread count
-        sys.setswitchinterval(0.001)                                  # Python hands the interpreter to another thread every 5 ms by default: too slow for the picture loop
         self.play_quality = 'Auto'                                    # the quality of the video being played (the More panel can change it)
         self.yuv = getattr(link, 'kind', 'rgb') == 'yuv'              # the v0.15 core: the GUI is an overlay, pictures are YUV
         self.canvas = YuvCanvas(320, 240) if self.yuv else Canvas(320, 240)
@@ -921,6 +920,7 @@ class App:
             if parts:
                 parts[:] = [0.0] * len(parts)             # the menu's own pictures must not count towards this video's averages
         boosted = speed == 'Normal' and v['id'] in self.store.settings.get('fastest_ids', [])
+        stall_restarts = 0
         while True:
             cal, mult = self.calibration()
             can_step = q == 'Auto' and pipeline.step_down(media, prof, cal, mult) is not None
@@ -947,8 +947,14 @@ class App:
                 self.log('Starved on Fast at %s: trying Fastest before a smaller picture' % media.label)
                 self.toast('Heavy clip - using the stronger decoder setting')
                 continue
-            if outcome == 'stall' and not can_step:        # data stalled twice, but the quality is pinned: just open the decoders again
-                self.log('Restarting the decoders at the same quality')
+            if outcome == 'stall' and stall_restarts < STALL_RESTARTS:
+                # The data stopped arriving (twice in a row) while the ARM was not busy. A smaller picture would not bring it
+                # back, so open a fresh connection at the same quality and position.
+                stall_restarts += 1
+                self.log('Reconnecting the decoders at the same quality (%d of %d)' % (stall_restarts, STALL_RESTARTS))
+                self.toast('Reconnecting...')
+                continue
+            if outcome == 'stall' and not can_step:
                 continue
             if outcome in ('downgrade', 'crashstep', 'stall'):     # the ARM could not keep up (or the decoder crashes at start): use a lighter stream
                 if boosted and outcome == 'downgrade':
@@ -1071,8 +1077,12 @@ class App:
             crops[v['id']] = mode
             self.store.set('crops', dict(list(crops.items())[-200:]))
             nonlocal ytarget
-            if self.yuv:                                    # ffmpeg trims the sides: the picture size changes, so the decoders restart
-                ytarget = pipeline.yuv_target(media, link.interlaced, self.big_pictures(), mode)
+            if self.yuv:
+                new_target = pipeline.yuv_target(media, link.interlaced, self.big_pictures(), mode)
+                if new_target == ytarget:                   # the FPGA does the crop: it takes effect on the next picture
+                    state.update(note='Crop: ' + mode)
+                    return
+                ytarget = new_target                        # ffmpeg trims the sides: the picture size changes, so the decoders restart
             if state['pending'] is None:
                 state['pending'] = pos_ms()
             state.update(pending_at=now, crop_change=True, note='Crop: ' + mode)
