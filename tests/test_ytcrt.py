@@ -581,7 +581,13 @@ class PlayPolicy(unittest.TestCase):
             def __init__(self, *a, **k):
                 super().__init__(*a, **k)
                 self.values = {'video ffmpeg': 40.0}          # the decoder is nowhere near a full core
+
+            def sample(self):
+                return ''
         cpumod.CpuWatch = Idle
+        quick_before = self.appmod.CPU_QUICK_SECONDS
+        self.appmod.CPU_QUICK_SECONDS = 0.1
+        self.addCleanup(setattr, self.appmod, 'CPU_QUICK_SECONDS', quick_before)
         self.addCleanup(setattr, cpumod, 'CpuWatch', real)
         orig = self.app._play_loop
         self.app._play_loop = lambda v, media, prof, speed, *a: (seen.append(speed), orig(v, media, prof, speed, *a))[1]

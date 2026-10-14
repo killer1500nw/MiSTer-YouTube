@@ -12,6 +12,7 @@ from .gfx import Canvas, YuvCanvas
 from .store import RESUME_MIN_MS
 
 TEST_CLIP = 'M7kB0lis3xg'
+CPU_QUICK_SECONDS = 4.0        # how often the decoder's CPU use is read for the 'is the decoder the limit' decision (cheap: /proc)
 CPU_LOG_SECONDS = 30.0         # how often playback logs the CPU split between the player and the decoders
 MULT_STEP = 1.08                # how much more pessimistic every stream's estimate gets after one that starved (each video also
                                # remembers its own lighter stream, so the general correction can be small)
@@ -913,6 +914,9 @@ class App:
         copy0 = (self.link.copy_total, self.link.copy_count, getattr(self.link, 'full_total', 0.0),
                  getattr(self.link, 'full_count', 0), getattr(self.link, 'repeats', 0))
         self.link.copy_max = 0.0
+        for parts in (getattr(getattr(self.link, 'box', None), 'parts', None), getattr(self.link, 'parts2', None)):
+            if parts:
+                parts[:] = [0.0] * len(parts)             # the menu's own pictures must not count towards this video's averages
         boosted = speed == 'Normal' and v['id'] in self.store.settings.get('fastest_ids', [])
         while True:
             cal, mult = self.calibration()
@@ -1015,6 +1019,12 @@ class App:
         self.finished = outcome == 'eof'
         self.dirty = True
 
+    @staticmethod
+    def _decoder_load(state):
+        """How much of a core ffmpeg used over the last few seconds (percent); 100 when it is not known yet."""
+        recent = state.get('video_recent')
+        return sum(recent) / len(recent) if recent else 100.0
+
     def _play_loop(self, v, media, prof, speed, start_ms, may_fall_back=False, can_refresh=False):
         link, fps = self.link, prof.fps
         state = {'start': start_ms, 'base': link.sent, 'paused': False, 'pause_pushed': False,
@@ -1087,6 +1097,7 @@ class App:
         pipe = open_pipe(start_ms)
         next_save = time.monotonic() + 10
         cpuw, next_cpu = cpu.CpuWatch({}), time.monotonic() + 12.0          # the first sample early: a stream that struggles steps down soon
+        quick, next_quick = cpu.CpuWatch({}), time.monotonic() + CPU_QUICK_SECONDS
         loop_t = {'since': time.monotonic(), 'wait': 0.0, 'push': 0.0, 'poll': 0.0, 'keys': 0.0}
 
         def starting_lines():
@@ -1169,18 +1180,29 @@ class App:
                     self._note_smooth(media)
                 if now - state['win_start'] > STARVE_WINDOW:
                     if may_fall_back and (state['starved'] > STARVE_LIMIT or state.get('dry', 0) >= DRY_LIMIT):
-                        if (speed == 'Fast' and not state.get('hiccup_ignored') and cpuw.values.get('video ffmpeg', 100.0) < BOOST_MIN_CPU
+                        if (speed == 'Fast' and not state.get('hiccup_ignored') and self._decoder_load(state) < BOOST_MIN_CPU
                                 and (media.video or {}).get('height', 0) >= 400):
                             # The decoder was not working flat out, so a stronger decoder setting would not help: a one-off (network,
                             # start-up). Ignore it once; if it repeats the normal fall-back applies.
                             state['hiccup_ignored'] = True
                             self.log('Starved %.1fs (%d dropouts) at %s while ffmpeg used only %d%% of a core: ignoring it once' % (
-                                state['starved'], state.get('dry', 0), media.tier, cpuw.values.get('video ffmpeg', 0)))
+                                state['starved'], state.get('dry', 0), media.tier, self._decoder_load(state)))
                         else:
                             self.log('Starved %.1fs (%d dropouts) of the last %.0fs at %s: stepping down' %
                                      (state['starved'], state.get('dry', 0), now - state['win_start'], media.tier))
                             return 'downgrade', pos_ms()
                     state['starved'], state['dry'], state['win_start'] = 0.0, 0, now
+                if now >= next_quick:                        # how busy ffmpeg is, a few seconds at a time, for the starve decision below
+                    next_quick = now + CPU_QUICK_SECONDS
+                    try:
+                        procs = getattr(getattr(pipe, 'decoder', None), 'procs', {}) or {}
+                        quick.named = {'video ffmpeg': getattr(procs.get('video'), 'pid', None)}
+                        quick.sample()
+                        reading = quick.values.get('video ffmpeg')
+                        if reading is not None and reading >= 0:       # (a restarted decoder is a new process: its first reading is void)
+                            state['video_recent'] = (state.get('video_recent', []) + [reading])[-2:]
+                    except Exception:
+                        pass
                 if now >= next_cpu:                          # where the ARM's time goes (percent of one core; both busy = 200)
                     next_cpu = now + CPU_LOG_SECONDS
                     span = max(0.001, now - loop_t['since'])
