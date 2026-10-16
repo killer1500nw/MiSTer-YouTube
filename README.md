@@ -3,7 +3,8 @@
 Browse and watch YouTube on a MiSTer FPGA, on a CRT in 240p or 480i, at up to **480p** video quality, with a gamepad or keyboard. Load the
 **YouTubeCRT** core and a menu appears on screen: your channels, playlists and videos, with thumbnails, resume
 and a playback bar. There is no account or login, and nothing is saved to the card except small lists and a cache.
-Video is found and decoded on the MiSTer itself (yt-dlp and ffmpeg); the FPGA core displays it and plays the audio.
+Video is found on the MiSTer itself (yt-dlp and ffmpeg). Either the MiSTer's ARM decodes it and the FPGA core displays it and plays the
+audio (the **YouTubeCRT** core, up to 480p), or, with the optional **H264 core**, the FPGA decodes it (up to **720p**, with the ARM almost idle).
 
 ## How this code was written
 
@@ -43,6 +44,21 @@ Run the same script again at any time to update; your lists and settings are kep
 so there is no separate offline package.
 
 Full instructions, controls and every setting: [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md).
+
+### Better video with the H264 core (optional)
+
+The ARM in a MiSTer is slow, and decoding 480p video uses all of it. A different FPGA core, the **MiSTer H264 core**
+([owenb321/MiSTer_h264_decoder](https://github.com/owenb321/MiSTer_h264_decoder), GPL-3.0, a separate project that this one
+does not ship), decodes H.264 video in the FPGA. With it this player only repackages YouTube's video (no decoding), so playback
+uses about 5% of one ARM core instead of all of them, and videos play at up to **720p** (when YouTube offers 720p at 30 fps
+or less) with full-quality decoding.
+
+1. Install the player as above, then install the H264 core from its releases page (extract its zip to the SD card root).
+2. Load **Other → YouTube (H264)** (the installer creates this entry when the core is on the card). The YouTube menu appears over the core.
+
+What changes: Stream quality has a 720p choice, Auto means "the best H.264 stream the core can play", the crop options still work
+(Fill, 14:9, Off), and the YouTubeCRT core's own extras (240p output, composite blur, flicker filter) are replaced by the H264 core's
+(480i/576i/480p/576p, anti-twitter, analog dither). Details and limits: [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md#the-h264-core).
 
 ## What you can play: links, IDs, playlists and channels
 

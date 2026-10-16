@@ -308,6 +308,7 @@ class Mailbox:
         self.cached = cached
         self.cached_base = ctypes.addressof(ctypes.c_char.from_buffer(cached)) if cached is not None else None
         self.method = 'memmove'
+        self.parts = [0.0, 0.0, 0.0, 0]  # seconds in a full picture's planes, audio and header writes; pictures counted
         self.fb = None                  # a Framebuffer, when the v0.16 core and /dev/fb0 allow pictures to go there
         self.jobs = self.done = self.worker = None
 
@@ -449,6 +450,7 @@ class Mailbox:
         if len(frame) != ysize + 2 * csize:
             raise ValueError('Incorrect picture size.')
         view = memoryview(frame)
+        t0 = time.monotonic()
         if in_fb:
             head = yuv.parse_header(header)
             self.fb.write_planes(number, [(yuv.Y_OFF, view[:ysize]), (head['u_off'], view[ysize:ysize + csize]),
@@ -456,8 +458,15 @@ class Mailbox:
         else:
             self.copy_pieces([(base + yuv.Y_OFF, view[:ysize]), (base + yuv.U_OFF, view[ysize:ysize + csize]),
                               (base + yuv.V_OFF, view[ysize + csize:])])
+        t1 = time.monotonic()
         self.copy_in(base + yuv.AUDIO_OFF, ctypes.create_string_buffer(bytes(audio), yuv.AUDIO_BYTES))
+        t2 = time.monotonic()
         self.copy_in(base, ctypes.create_string_buffer(bytes(header), yuv.HEADER_BYTES))     # the header last
+        t3 = time.monotonic()
+        self.parts[0] += t1 - t0                      # where a full picture's time goes: planes, audio, header
+        self.parts[1] += t2 - t1
+        self.parts[2] += t3 - t2
+        self.parts[3] += 1
 
     def picture_again(self, number, header, audio):
         """v0.15 core: a record that shows the picture of the slot named in `header` again: only the audio and the header

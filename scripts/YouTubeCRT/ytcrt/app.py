@@ -11,7 +11,13 @@ from .gfx import Canvas, YuvCanvas
 from .store import RESUME_MIN_MS
 
 TEST_CLIP = 'M7kB0lis3xg'
+CPU_QUICK_SECONDS = 4.0        # how often the decoder's CPU use is read for the 'is the decoder the limit' decision (cheap: /proc)
 CPU_LOG_SECONDS = 30.0         # how often playback logs the CPU split between the player and the decoders
+MULT_STEP = 1.08                # how much more pessimistic every stream's estimate gets after one that starved (each video also
+                               # remembers its own lighter stream, so the general correction can be small)
+STALL_RESTARTS = 3             # how often a data stall reopens the decoders before Auto gives in and steps down
+BUSY_PUSH = 0.85               # share of a starve window the loop spent copying pictures that means 'the copy is the limit'
+BOOST_MIN_CPU = 85.0           # percent of one core ffmpeg must be using for a starve on Fast to mean 'the decoder is the limit'
 EARLY_NUDGES_MS = (1200, 3000, -2000, 6000)   # where to try again, relative to the start, when the decoder crashes before the first picture
 QUALITY_SETTLE = 1.2        # seconds after the last Quality press in the More panel before the picture restarts
 COPY_BUSY_FB = 2.5            # the framebuffer copy: 0.75 ms idle; under load it slows down too, but far less than the uncached region
@@ -57,6 +63,22 @@ class Job:
         self.done = True
 
 
+def signed32(v):
+    return v - (1 << 32) if v >> 31 else v
+
+
+def audio_delta(prev, cur):
+    """What the core's audio counters did between two looks, as text: 'late +4800 frames, underruns +1'."""
+    names = ('late +%d frames', 'silence +%d frames', 'underruns +%d', 'slip dropped +%d', 'slip repeated +%d')
+    mods = (1 << 32, 1 << 32, 1 << 16, 1 << 16, 1 << 16)
+    parts = []
+    for name, mod, p, c in zip(names, mods, prev, cur):
+        d = (c - p) % mod
+        if d:
+            parts.append(name % d)
+    return ', '.join(parts) or 'no change'
+
+
 class App:
     def __init__(self, link, store, feeds, rt, inputs, log=print):
         self.link, self.store, self.feeds, self.rt, self.inputs, self.log = link, store, feeds, rt, inputs, log
@@ -64,7 +86,8 @@ class App:
         if store.settings.get('decode_threads'):
             pipeline.DECODE_THREADS = int(store.settings['decode_threads'])        # and the decoder thread count
         self.play_quality = 'Auto'                                    # the quality of the video being played (the More panel can change it)
-        self.yuv = getattr(link, 'kind', 'rgb') == 'yuv'              # the v0.15 core: the GUI is an overlay, pictures are YUV
+        self.h264 = getattr(link, 'kind', 'rgb') == 'h264'            # the H264 core: the FPGA decodes, the GUI is a framebuffer overlay
+        self.yuv = getattr(link, 'kind', 'rgb') in ('yuv', 'h264')    # an overlay core: the GUI is a YUV overlay (the H264 link converts it)
         self.canvas = YuvCanvas(320, 240) if self.yuv else Canvas(320, 240)
         self.stack = []
         self.dirty = True
@@ -259,14 +282,14 @@ class App:
         elif name == 'Search Playlists':
             self.push(ui.TextInput('Search Playlists', 'Search YouTube playlists for...', self._playlist_search_typed, spaces=True))
         elif name == 'Subscriptions':
-            self.push(ui.VideoList('Subscriptions', lambda a: a.feeds.feed(a.store.subscriptions(), shorts(a)),
+            self.push(ui.VideoList('Subscriptions', lambda a: a.feeds.feed(a.store.subscriptions(), shorts(a)), autoplay=True,
                                    empty=lambda a: a.no_subscriptions_text() if not a.store.subscriptions()
                                    else ['Fetching videos...' if a.feeds_busy() else 'No videos found.'],
                                    status=lambda a: 'updating' if a.feeds_busy() else ''))
         elif name == 'Channels':
             self.push(ui.ChannelList())
         elif name == 'Watch Later':
-            self.push(ui.VideoList('Watch Later', lambda a: a.store.later,
+            self.push(ui.VideoList('Watch Later', lambda a: a.store.later, autoplay=True,
                                    hints='A:Play  Y:Remove  B:Back',
                                    empty=lambda a: ['Nothing saved yet.', 'Press Y on any video to save it.']))
         elif name == 'History':
@@ -372,7 +395,35 @@ class App:
                 self.push(ui.TextView('Search failed', ['!' + l for l in ui.wrap(str(err), 37, 10)]))
             return
         self.log('Playlist search "%s": %d playlists' % (query[:40], len(res)))
-        self.push(ui.FoundPlaylists(query, list(res)))
+        raw = getattr(res, 'raw', len(res))
+        state = {'query': query, 'results': list(res), 'next': 1 + raw, 'more': len(res) >= self.SEARCH_PAGE // 2, 'loading': False}
+        self.push(ui.FoundPlaylists(query, state['results'], more=lambda a: self._playlist_search_more(state),
+                                    can_more=lambda a: state['more'] and len(state['results']) < self.SEARCH_MAX,
+                                    loading=lambda a: state['loading']))
+
+    def _playlist_search_more(self, state):
+        """"Load more playlists": the next page of this playlist search, in the background."""
+        if state['loading']:
+            return
+        state['loading'] = True
+        self.toast('Loading more playlists...')
+
+        def run():
+            try:
+                self.feeds.wait_turn()
+                page = pipeline.search_playlists(self.rt, state['query'], lambda: None, self.log,
+                                                 limit=self.SEARCH_PAGE, start=state['next'])
+                seen = {r['id'] for r in state['results']}
+                new = [r for r in page if r['id'] not in seen]
+                state['results'].extend(new)
+                state['next'] += getattr(page, 'raw', len(page))
+                state['more'] = bool(new) and getattr(page, 'raw', len(page)) >= self.SEARCH_PAGE // 2
+            except Exception as exc:
+                self.log('Playlist search: could not load more: ' + str(exc)[:200])
+            finally:
+                state['loading'] = False
+                self.dirty = True
+        threading.Thread(target=run, daemon=True).start()
 
     def open_found_playlist(self, row):
         """Load the first videos of a found playlist and show them like any other list (paged, up to a few hundred)."""
@@ -397,7 +448,7 @@ class App:
         raw = getattr(vids, 'raw', len(vids))
         state = {'id': pid, 'videos': list(vids), 'next': 1 + raw, 'more': raw >= self.SEARCH_PAGE, 'loading': False}
         shorts = lambda a: a.store.settings['shorts'] == 'On'
-        self.push(ui.VideoList(ui.clip(name, 30), lambda a: [v for v in state['videos'] if shorts(a) or not v.get('short')],
+        self.push(ui.VideoList(ui.clip(name, 30), lambda a: [v for v in state['videos'] if shorts(a) or not v.get('short')], autoplay=True,
                                hints='A:Play  Y:Later  B:Back', empty=lambda a: ['This playlist has no videos.'],
                                more=lambda a: self._found_playlist_more(state),
                                can_more=lambda a: state['more'] and len(state['videos']) < self.SEARCH_MAX,
@@ -688,6 +739,8 @@ class App:
         self.store.set('copy_method', getattr(self.link.box, 'method', None) if self.link.kind == 'yuv' else None)
         self.store.set('speed_big', best_speed)
         self.store.set('speed_x', {sp: round(x, 3) for sp, x in results})
+        self.store.set('cap_ids', {})                       # what was remembered about single videos belongs to the old measurement
+        self.store.set('fastest_ids', [])
         if len(threads) > 1:
             best_n = max(threads, key=lambda n: threads[n])
             if threads[best_n] > 1.08 * threads[2]:                  # only a clear win changes it
@@ -726,6 +779,8 @@ class App:
             cal = profiles.CAL_DEFAULT
         if self.big_pictures():
             cal = dict(cal, big=True)                  # copy costs follow the real picture size, and no pre-scale is needed
+        if self.yuv:
+            cal = dict(cal, crop=self.store.settings.get('crop', 'Off'))     # ffmpeg trims the sides, so the pictures are smaller
         return cal, float(self.store.settings.get('cost_mult', 1.0))
 
     def effective_speed(self, media, speed):
@@ -739,14 +794,15 @@ class App:
         return profiles.speed_for((v.get('width') or 0) * (v.get('height') or 0), speed,
                                   self.store.settings.get('speed_big'))
 
-    def start_video(self, v):
+    def start_video(self, v, queue=None):
+        """`queue`: a function returning the videos of the list this one was chosen from; the next one plays when this one ends."""
         pos = self.store.saved_pos(v['id'])
         if pos >= RESUME_MIN_MS and self.store.settings['resume'] == 'Ask':
             self.push(ui.Choice('Resume', v.get('title', ''),
                                 ['Resume at ' + ui.mmss(pos), 'Start over'],
-                                lambda i: self.play(v, pos if i == 0 else 0)))
+                                lambda i: self.play(v, pos if i == 0 else 0, queue)))
         else:
-            self.play(v, pos if pos >= RESUME_MIN_MS else 0)
+            self.play(v, pos if pos >= RESUME_MIN_MS else 0, queue)
 
     def _probe_audio(self, media, prof, at_ms):
         """After the audio decoder crashed at start: run it once more, verbosely, for two seconds and log what it says. A refused or
@@ -782,7 +838,7 @@ class App:
         cal = self.store.settings.get('cal')
         if n < 90 or not (isinstance(cal, dict) and cal.get('copy_ms') and cal.get('copy_bytes')) or not media.video:
             return
-        per_base = avg_ms if cal.get('copy_fixed') else avg_ms / profiles.copy_scale(media.video, dict(cal, big=self.big_pictures()))
+        per_base = avg_ms if cal.get('copy_fixed') else avg_ms / profiles.copy_scale(media.video, dict(cal, big=self.big_pictures(), crop=self.store.settings.get('crop', 'Off')))
         new = round(0.7 * cal['copy_ms'] + 0.3 * min(per_base, 4.0 * cal['copy_ms']), 2)
         if abs(new - cal['copy_ms']) >= 0.1:
             self.store.set('cal', dict(cal, copy_ms=new))
@@ -824,12 +880,31 @@ class App:
             self.store.mark_slow(v['id'])                  # warn about it straight away next time
         return res
 
-    def play(self, v, start_ms):
-        """Play a video. Background refreshing is paused from here until playback is over."""
+    def next_in_queue(self, v, queue):
+        """The video after `v` in the list it was chosen from, or None."""
+        try:
+            vids = queue()
+        except Exception:
+            return None
+        for i, x in enumerate(vids):
+            if x.get('id') == v['id']:
+                return vids[i + 1] if i + 1 < len(vids) else None
+        return None
+
+    def play(self, v, start_ms, queue=None):
+        """Play a video (and, from a playlist or channel, the ones after it). Background refreshing is paused from here until playback is over."""
         self.feeds.hold.set()
         pipeline.pause_background()                       # freeze any lookup already running
         try:
-            self._play(v, start_ms)
+            while True:
+                self.finished = False
+                self._play(v, start_ms)
+                nxt = self.next_in_queue(v, queue) if (queue and self.finished and self.store.settings.get('autoplay', 'On') == 'On') else None
+                if nxt is None:
+                    break
+                self.log('Playing the next video: %s' % (nxt.get('title') or nxt['id']))
+                self.toast('Next: ' + ui.clip(nxt.get('title') or '', 30))
+                v, start_ms = nxt, 0
         finally:
             self.feeds.hold.clear()
             pipeline.resume_background()
@@ -837,6 +912,8 @@ class App:
     def _play(self, v, start_ms):
         if self.missing_tools():
             return
+        if self.h264:
+            return self._play_h264(v, start_ms)
         prof, speed = self.profile(), self.store.settings['decode_speed']
         q = self.store.settings.get('quality', 'Auto')
         self.play_quality = q
@@ -847,11 +924,22 @@ class App:
             return
         if not v.get('title'):
             v['title'] = media.title                      # a typed link has no title until YouTube tells us
+        cap = self.store.settings.get('cap_ids', {}).get(v['id'])
+        cal0, mult0 = self.calibration()
+        if q == 'Auto' and cap and media.catalog and media.cost > cap * mult0 * 1.05:
+            # Auto had to step this video down before: start at the stream that worked, so the music does not stop again.
+            # (`cap` is that stream's load without the learned multiplier, so the multiplier drifting later does not push it lower.)
+            media = pipeline.media_from(media.catalog[0], media.catalog[1], prof, 'Auto', cal0, mult0, self.log, max_cost=cap * mult0 * 1.05)
+            self.log('Starting at %s: this video needed a lighter stream before' % media.label)
         refresh_left, pos_ms, outcome = 1, start_ms, 'stop'
         copy0 = (self.link.copy_total, self.link.copy_count, getattr(self.link, 'full_total', 0.0),
                  getattr(self.link, 'full_count', 0), getattr(self.link, 'repeats', 0))
         self.link.copy_max = 0.0
+        for parts in (getattr(getattr(self.link, 'box', None), 'parts', None), getattr(self.link, 'parts2', None)):
+            if parts:
+                parts[:] = [0.0] * len(parts)             # the menu's own pictures must not count towards this video's averages
         boosted = speed == 'Normal' and v['id'] in self.store.settings.get('fastest_ids', [])
+        stall_restarts = 0
         while True:
             cal, mult = self.calibration()
             can_step = q == 'Auto' and pipeline.step_down(media, prof, cal, mult) is not None
@@ -878,21 +966,35 @@ class App:
                 self.log('Starved on Fast at %s: trying Fastest before a smaller picture' % media.label)
                 self.toast('Heavy clip - using the stronger decoder setting')
                 continue
-            if outcome in ('downgrade', 'crashstep'):     # the ARM could not keep up (or the decoder crashes at start): use a lighter stream
+            if outcome == 'stall' and stall_restarts < STALL_RESTARTS:
+                # The data stopped arriving (twice in a row) while the ARM was not busy. A smaller picture would not bring it
+                # back, so open a fresh connection at the same quality and position.
+                stall_restarts += 1
+                self.log('Reconnecting the decoders at the same quality (%d of %d)' % (stall_restarts, STALL_RESTARTS))
+                self.toast('Reconnecting...')
+                continue
+            if outcome == 'stall' and not can_step:
+                continue
+            if outcome in ('downgrade', 'crashstep', 'stall'):     # the ARM could not keep up (or the decoder crashes at start): use a lighter stream
                 if boosted and outcome == 'downgrade':
                     ids = [i for i in self.store.settings.get('fastest_ids', []) if i != v['id']]
                     self.store.set('fastest_ids', ids)     # even Fastest was not enough: forget it, the smaller picture takes over
                     boosted = False
                 if outcome == 'downgrade':                # ...and learn from it; a crash says nothing about the ARM's speed
-                    mult = min(3.0, mult * 1.25)
+                    mult = min(3.0, mult * MULT_STEP)
                     self.store.set('cost_mult', round(mult, 3))
                 smaller = pipeline.step_down(media, prof, cal, mult, self.log)
                 self.log('%s (estimated load %d%%) %s; cost multiplier now %.3f; %s' % (
-                    media.label, round(media.cost * 100), 'could not keep up' if outcome == 'downgrade' else 'crashed at start', mult,
+                    media.label, round(media.cost * 100), {'downgrade': 'could not keep up', 'stall': 'kept waiting for data'}.get(outcome, 'crashed at start'), mult,
                     ('switching to %s' % smaller.label) if smaller else 'nothing lighter to switch to'))
                 if smaller is not None:
                     self.toast('Too heavy for %s - using %s' % (media.label, smaller.label))
                     media = smaller
+                    if q == 'Auto' and outcome in ('downgrade', 'stall'):
+                        caps = dict(self.store.settings.get('cap_ids', {}))
+                        caps.pop(v['id'], None)
+                        caps[v['id']] = round(smaller.cost / max(mult, 0.1), 4)
+                        self.store.set('cap_ids', dict(list(caps.items())[-100:]))
                 continue
             if outcome == 'quality':                      # the user changed the quality from the More panel
                 q = self.play_quality
@@ -931,23 +1033,331 @@ class App:
                 n_fb = fb.stats[3]
                 self.log('Framebuffer write per picture (this session): copy %.1f ms, barrier %.1f ms, read-back check %.1f ms' % (
                     1000 * fb.stats[0] / n_fb, 1000 * fb.stats[1] / n_fb, 1000 * fb.stats[2] / n_fb))
+            parts = getattr(getattr(self.link, 'box', None), 'parts', None)
+            if parts and parts[3]:
+                self.log('A full picture takes %.1f ms: planes %.1f, audio %.1f, header %.1f, everything else %.1f' % (
+                    full_ms, 1000 * parts[0] / parts[3], 1000 * parts[1] / parts[3], 1000 * parts[2] / parts[3],
+                    max(0.0, full_ms - 1000 * sum(parts[:3]) / parts[3])))
+                parts[:] = [0.0, 0.0, 0.0, 0]
+                p2 = getattr(self.link, 'parts2', None)
+                if p2 and p2[2]:
+                    self.log('  ...of "everything else": %.1f ms before the writes (repeat check, header), %.1f ms after them (publishing)' % (
+                        1000 * p2[0] / p2[2], 1000 * p2[1] / p2[2]))
+                    p2[:] = [0.0, 0.0, 0]
             self._learn_copy(media, full_ms, nfull)
         self.log('Playback %s at %s of %s' % ('finished' if outcome == 'eof' else 'stopped', ui.mmss(pos_ms), ui.mmss(media.duration * 1000)))
         self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))
+        self.finished = outcome == 'eof'
         self.dirty = True
+
+    def _play_h264(self, v, start_ms):
+        """Play a video on the H264 core: ffmpeg only repackages the H.264 and decodes the audio; the FPGA does the rest."""
+        prof = self.profile()
+        q = self.store.settings.get('quality', 'Auto')
+        self.play_quality = q
+        self.log('Play %s "%s" (H264 core) quality=%s resume=%dms' % (v['id'], v.get('title', '')[:60], q, start_ms))
+        media = self._resolve(v, prof, q)
+        if media is None:
+            return
+        if not v.get('title'):
+            v['title'] = media.title
+        self.finished = False
+        pos_ms, outcome = start_ms, 'stop'
+        refresh_left = 1
+        while True:
+            try:
+                media = pipeline.h264_media(media, q)
+            except ValueError as exc:
+                self.log('Cannot play on the H264 core: %s' % exc)
+                self.push(ui.TextView('Cannot play', ['!' + l for l in ui.wrap(str(exc), 37, 14)]))
+                return
+            self.log('H264 core: %dx%d %s fps %s kbps (%s)%s' % (media.video['width'], media.video['height'], media.video.get('fps'),
+                                                               round(media.tbr or 0), media.video['format_id'],
+                                                               ('; ' + media.why) if media.why else ''))
+            try:
+                outcome, pos_ms = self._h264_loop(v, media, pos_ms)
+            except Quit:
+                raise
+            except pipeline.PlaybackError as exc:
+                self.log('Playback error: ' + ' | '.join(str(exc).splitlines())[:600])
+                self.push(ui.TextView('Playback stopped', ['!' + l for l in ui.wrap(str(exc), 37, 14)]))
+                return
+            if outcome == 'quality':
+                q = self.play_quality
+                continue
+            if outcome == 'refresh' and refresh_left > 0:
+                refresh_left -= 1
+                pipeline.forget(self.rt, v['id'])
+                fresh = self._resolve(v, prof, q)
+                if fresh is None:
+                    return
+                media = fresh
+                continue
+            break
+        self.log('Playback %s at %s of %s' % ('finished' if outcome == 'eof' else 'stopped', ui.mmss(pos_ms), ui.mmss(media.duration * 1000)))
+        self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))
+        self.finished = outcome == 'eof'
+        self.dirty = True
+
+    def _h264_crop(self, mode):
+        """Fill / 14:9 / Off -> the core's Analog Aspect (3 Crop, 2 Letterbox). The core has no 14:9: it shows Fill instead."""
+        try:
+            self.link.ring.request_settings(analog_aspect=3 if mode == 'Fill' else 2)        # 14:9 is cut in the stream, then letterboxed
+        except Exception as exc:
+            self.log('Could not change the core\'s aspect: %s' % exc)
+
+    def _h264_loop(self, v, media, start_ms):
+        """The play loop for the H264 core. -> (outcome, position in ms)."""
+        from . import h264feed
+        link, ring = self.link, self.link.ring
+        dur_ms = media.duration * 1000
+        now = time.monotonic()
+        state = {'paused': False, 'pending': None, 'pending_at': 0.0, 'seeking': False, 'note': '', 'osd_until': now + OSD_SECONDS,
+                 'more': None, 'crop': self.store.settings.get('crops', {}).get(v['id']) or self.store.settings.get('crop', 'Fill'),
+                 'quality': self.play_quality, 'tier': media.tier, 'flags': 0, 'quality_req': None, 'quality_at': 0.0}
+        self._h264_crop(state['crop'])
+        feed = {'feeder': None, 'thread': None, 'stop': None, 'result': None, 'error': None}
+        position = {'ms': start_ms}
+
+        def stop_feed():
+            if feed['feeder'] is not None:
+                feed['stop'].set()
+                feed['feeder'].close()
+                feed['thread'].join(timeout=5)
+                feed['feeder'] = None
+
+        def start_feed(at_ms):
+            stop_feed()
+            ring.new_session()                                     # drops whatever the core had not read and resets its display
+            ring.set_pause(False)
+            f = h264feed.Feeder(ring, lambda s: h264feed.video_copy_command(self.rt, media.video, s),
+                                (lambda s: h264feed.audio_pcm_command(self.rt, media.audio, s)) if media.audio else None, log=self.log,
+                                duration_s=media.duration)
+            stop = threading.Event()
+            f.crop = (14, 9) if state['crop'] == '14:9' else None          # only 14:9 is made in the stream; Fill and Off are the core's own setting
+            state['crop_core_mode'] = None
+            self._h264_crop(state['crop'])                                  # (a fresh stream starts with the crop at once)
+            feed.update(feeder=f, stop=stop, result=None, error=None)
+
+            def work():
+                try:
+                    feed['result'] = f.run(stop=stop.is_set, first_timeout=90.0)
+                except Exception as exc:
+                    feed['error'] = exc
+            f.start(at_ms / 1000.0)
+            feed['thread'] = threading.Thread(target=work, daemon=True)
+            feed['thread'].start()
+            position['ms'] = at_ms
+            state.update(seeking=True, opened_at=time.monotonic())
+
+        def lines():
+            f = feed['feeder']
+            tail = (f.errors[-1][1].strip().splitlines() or [''])[-1] if f is not None and f.errors else ''
+            return [ui.clip(v.get('title', ''), 33), 'Starting... %ds' % (time.monotonic() - state['opened_at']),
+                    '%s, %d kbps (H264 core)' % (media.label, round(media.tbr or 0)),
+                    ui.clip(media.why or pipeline.safe_text(tail), 33)]
+
+        def set_crop(mode, now):
+            if mode == state['crop']:
+                return
+            previous = state['crop']
+            state['crop'] = mode
+            crops = dict(self.store.settings.get('crops', {}))
+            crops.pop(v['id'], None)
+            crops[v['id']] = mode
+            self.store.set('crops', dict(list(crops.items())[-200:]))
+            state['note'] = 'Crop: ' + mode
+            if '14:9' in (mode, previous) and feed['feeder'] is not None:
+                # 14:9 is a rewritten sequence header: it shows from the next keyframe after what is already queued. No restart: the
+                # core's own aspect is changed at the same moment (see the loop), so the shape never goes wrong in between.
+                feed['feeder'].set_crop((14, 9) if mode == '14:9' else None)
+                state['crop_core_mode'] = mode
+            else:
+                self._h264_crop(mode)                                      # Fill <-> Off: the core's own setting, at once
+
+        def more_key(act, now):
+            m = state['more']
+            if act in ('back', 'menu'):
+                state['more'] = None
+            elif act == 'down':
+                m['sel'] = (m['sel'] + 1) % 4
+            elif act == 'up':
+                m['sel'] = (m['sel'] - 1) % 4
+            elif m['sel'] == 0 and act in ('left', 'right', 'ok'):
+                step = -1 if act == 'left' else 1
+                set_crop(profiles.CROPS[(profiles.CROPS.index(state['crop']) + step) % len(profiles.CROPS)], now)
+            elif m['sel'] == 1 and act in ('left', 'right', 'ok'):
+                step = -1 if act == 'left' else 1
+                state['quality'] = profiles.next_quality(state['quality'], step, h264=True)
+                state.update(quality_req=state['quality'], quality_at=now, note='Quality: ' + state['quality'])
+            elif m['sel'] == 2 and act in ('left', 'right', 'ok'):
+                state['note'] = 'Saved' if self.store.toggle_later(v) else 'Removed'
+            elif m['sel'] == 3 and act == 'ok':
+                state['more'] = None
+            state['osd_until'] = now + OSD_SECONDS
+
+        loading = ui.Message('Starting', lines, spinner=True, on_back=False)
+        state['opened_at'] = now
+        self.push(loading)
+        shown_osd = False
+        next_save = now + 10
+        next_stats = now + 15.0
+        audio_prev, audio_logged = None, 0.0
+        try:
+            start_feed(start_ms)
+            while True:
+                if loading is not None:
+                    self.loading_frame()
+                link.health()
+                now = time.monotonic()
+                act = self.inputs.get(0.02)
+                if act and state['more'] is not None:
+                    more_key(act, now)
+                    act = None
+                if act == 'back':
+                    return 'stop', position['ms']
+                if act in ('left', 'right', 'pgup', 'pgdn'):
+                    d = {'left': -SEEK_SMALL, 'right': SEEK_SMALL, 'pgup': -SEEK_BIG, 'pgdn': SEEK_BIG}[act]
+                    basepos = state['pending'] if state['pending'] is not None else position['ms']
+                    target = max(0, basepos + d * 1000)
+                    if dur_ms:
+                        target = min(target, max(0, dur_ms - 2000))
+                    state.update(pending=target, pending_at=now, osd_until=now + OSD_SECONDS, note=('>> ' if d > 0 else '<< ') + ui.mmss(target))
+                elif act == 'ok' and loading is not None:
+                    pass                                   # nothing to pause yet: a pause now would hold the core before its first picture
+                elif act == 'ok':
+                    state['paused'] = not state['paused']
+                    ring.set_pause(state['paused'])
+                    state['osd_until'] = now + OSD_SECONDS
+                elif act == 'alt':
+                    state['note'] = 'Saved' if self.store.toggle_later(v) else 'Removed'
+                    state['osd_until'] = now + OSD_SECONDS
+                elif act == 'menu':
+                    state.update(more={'sel': 0}, osd_until=now + OSD_SECONDS)
+                elif act:
+                    state['osd_until'] = now + OSD_SECONDS
+                if (state['quality_req'] is not None and now - state['quality_at'] > QUALITY_SETTLE and state['pending'] is None
+                        and state['quality_req'] != self.play_quality):
+                    self.play_quality, state['quality_req'] = state['quality_req'], None
+                    return 'quality', position['ms']
+                if state['pending'] is not None and now - state['pending_at'] > SEEK_SETTLE:
+                    target, state['pending'] = state['pending'], None
+                    state.update(paused=False, note='Seeking...', osd_until=now + OSD_SECONDS + 3)
+                    start_feed(target)
+                # what the core says: the position, and whether a picture is on the screen
+                st = ring.status()
+                a = st['audio']
+                counters = (a['late'], a['silence'], a['underruns'], a['slip_drop'], a['slip_repeat'])
+                if audio_prev is None:
+                    audio_prev = counters
+                elif counters != audio_prev and now - audio_logged > 1.0:
+                    audio_logged = now
+                    delta = audio_delta(audio_prev, counters)
+                    audio_prev = counters
+                    lead = feed['feeder'].take_lead() if feed['feeder'] else {}
+                    self.log('AUDIO ISSUE at clock %s: %s; audio queued %d records, A/V offset %d; written ahead of the clock (min/mean ms): '
+                             'audio %s, video %s' % (ui.mmss(position['ms']), delta, a['queued'], signed32(a['offset']),
+                                                     lead.get('audio'), lead.get('video')))
+                if now >= next_stats:
+                    next_stats = now + 15.0
+                    lead = feed['feeder'].take_lead() if feed['feeder'] else {}
+                    self.log('H264 core: clock %s, %d pictures, late %d, starved %d; audio queued %d, played %d, silence %d, late %d, underruns %d, '
+                             'A/V offset %d; fed %d pictures %d audio; written ahead of the clock (min/mean ms): audio %s, video %s' % (
+                                 ui.mmss(position['ms']), st['pictures_seen'], st['late'], st['starved'], a['queued'], a['played'],
+                                 a['silence'], a['late'], a['underruns'], signed32(a['offset']),
+                                 feed['feeder'].stats['au'] if feed['feeder'] else 0, feed['feeder'].stats['audio'] if feed['feeder'] else 0,
+                                 lead.get('audio'), lead.get('video')))
+                if st['state'] == 5:
+                    raise pipeline.PlaybackError('The H264 core stopped: ' + ring.state_text(st))
+                f = feed['feeder']
+                if (state.get('crop_core_mode') and f is not None and f.crop_switch_pts is not None
+                        and st['stc'] >= f.crop_switch_pts):
+                    self._h264_crop(state['crop_core_mode'])               # the keyframe with the new crop is on the screen now
+                    self.log('Crop %s shown from %s' % (state['crop_core_mode'], ui.mmss(st['stc'] // 90)))
+                    state['crop_core_mode'] = None
+                    f.crop_switch_pts = None
+                if st['state'] in (3, 4) and st['pictures_seen'] > 0:
+                    position['ms'] = min(dur_ms or 1 << 60, st['stc'] // 90)
+                    if loading is not None:
+                        if self.screen is loading:
+                            self.pop()
+                        loading = None
+                        self.log('First picture %.1f s after starting' % (now - state['opened_at']))
+                        link.hide_overlay()
+                        shown_osd = False
+                    if state['seeking']:
+                        state.update(seeking=False, note='', osd_until=now + 1.5)
+                # the playback bar
+                if loading is None:
+                    show_osd = now < state['osd_until'] or state['more'] is not None
+                    if show_osd:
+                        self._osd_overlay(v, position['ms'] if state['pending'] is None else state['pending'], dur_ms,
+                                          state['paused'], state)
+                        shown_osd = True
+                    elif shown_osd:
+                        link.hide_overlay()
+                        self.osd_sig = None
+                        shown_osd = False
+                if now >= next_save and not state['paused']:
+                    next_save = now + 10
+                    self.store.record_play(v, position['ms'], dur_ms, force=False)
+                if feed['error'] is not None:
+                    exc = feed['error']
+                    feed['error'] = None
+                    msg = str(exc)
+                    if ('before the first picture' in msg or 'No video arrived' in msg) and state.get('early', 0) < len(EARLY_NUDGES_MS):
+                        # ffmpeg crashes at certain seek positions: start a little before or after instead
+                        state['early_base'] = state.get('early_base', position['ms'])
+                        at = max(0, state['early_base'] + EARLY_NUDGES_MS[state['early']])
+                        state['early'] += 1
+                        self.log('The video cannot start at %s (%s); trying %s (%d of %d)' % (
+                            ui.mmss(state['early_base']), ' | '.join(msg.splitlines())[:100], ui.mmss(at), state['early'], len(EARLY_NUDGES_MS)))
+                        state.update(note='Reconnecting...', osd_until=now + OSD_SECONDS + 3)
+                        start_feed(at)
+                        continue
+                    if '403' in msg and not state.get('retried_403'):
+                        state['retried_403'] = True
+                        self.log('YouTube refused the stream (403); asking for fresh stream URLs')
+                        return 'refresh', position['ms']
+                    raise pipeline.PlaybackError(msg)
+                if feed['result'] == 'ended':
+                    return 'eof', dur_ms
+        finally:
+            f = feed['feeder']
+            if f is not None:
+                for kind, text in f.errors[-4:]:
+                    self.log('ffmpeg (%s) said: %s' % (kind, ' | '.join(text.strip().splitlines())[-300:]))
+                if f.audio_restarts:
+                    self.log('The audio was reopened %d time(s)' % f.audio_restarts)
+            stop_feed()
+            try:
+                ring.set_pause(False)
+                ring.new_session()                  # the core still holds seconds of picture and sound: a new session drops them at once
+            except Exception as exc:
+                self.log('Could not flush the core: %s' % exc)
+            link.hide_overlay()
+            self.osd_sig = None
+            if loading is not None and self.screen is loading:
+                self.pop()
+
+    @staticmethod
+    def _decoder_load(state):
+        """How much of a core ffmpeg used over the last few seconds (percent); 100 when it is not known yet."""
+        recent = state.get('video_recent')
+        return sum(recent) / len(recent) if recent else 100.0
 
     def _play_loop(self, v, media, prof, speed, start_ms, may_fall_back=False, can_refresh=False):
         link, fps = self.link, prof.fps
         state = {'start': start_ms, 'base': link.sent, 'paused': False, 'pause_pushed': False,
                  'osd_until': time.monotonic() + OSD_SECONDS, 'note': '', 'last': None,
                  'pending': None, 'pending_at': 0.0, 'seeking': False,
-                 'crop': self.store.settings.get('crop', 'Off'), 'more': None, 'crop_change': False,
+                 'crop': self.store.settings.get('crops', {}).get(v['id']) or self.store.settings.get('crop', 'Fill'), 'more': None, 'crop_change': False,
                  'quality': self.play_quality, 'quality_req': None, 'quality_at': 0.0,
                  'opened_at': time.monotonic(), 'starved': 0.0, 'win_start': time.monotonic(),
                  'tick': time.monotonic(), 'tier': media.tier, 'retries': 0, 'smooth_noted': False,
                  'crashes': 0, 'crash_at': 0.0}
         dur_ms = media.duration * 1000
-        ytarget = pipeline.yuv_target(media, link.interlaced, self.big_pictures()) if self.yuv else None
+        ytarget = pipeline.yuv_target(media, link.interlaced, self.big_pictures(), state['crop']) if self.yuv else None
         state['flags'] = 0
 
         def pos_ms():
@@ -957,7 +1367,8 @@ class App:
             state['start'], state['base'] = at_ms, link.sent
             state['opened_at'] = time.monotonic()
             state['first_logged'] = False
-            state['starved'], state['win_start'] = 0.0, time.monotonic()
+            state['starved'], state['win_start'], state['win_push'] = 0.0, time.monotonic(), 0.0
+            state['pipe_target'] = ytarget                   # the picture size this decoder produces (a crop change opens a new one)
             try:
                 return pipeline.open_pipeline(self.rt, prof, media, at_ms / 1000.0, speed, lambda: None,
                                               crop=state['crop'], target=ytarget)
@@ -970,9 +1381,17 @@ class App:
             if mode == state['crop']:
                 return
             state['crop'] = mode
-            if self.yuv:                                    # the FPGA does the crop: it takes effect on the next picture
-                state.update(note='Crop: ' + mode)
-                return
+            crops = dict(self.store.settings.get('crops', {}))     # remembered for this video: it opens like this next time
+            crops.pop(v['id'], None)
+            crops[v['id']] = mode
+            self.store.set('crops', dict(list(crops.items())[-200:]))
+            nonlocal ytarget
+            if self.yuv:
+                new_target = pipeline.yuv_target(media, link.interlaced, self.big_pictures(), mode)
+                if new_target == ytarget:                   # the FPGA does the crop: it takes effect on the next picture
+                    state.update(note='Crop: ' + mode)
+                    return
+                ytarget = new_target                        # ffmpeg trims the sides: the picture size changes, so the decoders restart
             if state['pending'] is None:
                 state['pending'] = pos_ms()
             state.update(pending_at=now, crop_change=True, note='Crop: ' + mode)
@@ -993,7 +1412,7 @@ class App:
                 # Quality for this video only. It applies about a second after the last press (so cycling through the
                 # choices does not restart the picture each time), at the same position.
                 step = -1 if act == 'left' else 1
-                state['quality'] = profiles.QUALITIES[(profiles.QUALITIES.index(state['quality']) + step) % len(profiles.QUALITIES)]
+                state['quality'] = profiles.next_quality(state['quality'], step)
                 state.update(quality_req=state['quality'], quality_at=now, note='Quality: ' + state['quality'])
             elif m['sel'] == 2 and act in ('left', 'right', 'ok'):
                 state['note'] = 'Saved' if self.store.toggle_later(v) else 'Removed'
@@ -1004,6 +1423,7 @@ class App:
         pipe = open_pipe(start_ms)
         next_save = time.monotonic() + 10
         cpuw, next_cpu = cpu.CpuWatch({}), time.monotonic() + 12.0          # the first sample early: a stream that struggles steps down soon
+        quick, next_quick = cpu.CpuWatch({}), time.monotonic() + CPU_QUICK_SECONDS
         loop_t = {'since': time.monotonic(), 'wait': 0.0, 'push': 0.0, 'poll': 0.0, 'keys': 0.0}
 
         def starting_lines():
@@ -1065,7 +1485,7 @@ class App:
                                  note='Applying crop...' if state['crop_change'] else 'Seeking...',
                                  crop_change=False, osd_until=now + OSD_SECONDS + 3)
                     if state['last'] is not None and link.queued < link.slots:   # immediate on-screen feedback
-                        self._present(state['last'], v, seek_to, dur_ms, False, state, prof, True, True, ytarget)
+                        self._present(state['last'], v, seek_to, dur_ms, False, state, prof, True, True, state['last_target'])
                 # Is the ARM keeping up? The FPGA queue only runs dry when the decoder falls behind.
                 dt, state['tick'] = now - state['tick'], now
                 rs = getattr(pipe, 'restarts', 0)                 # an audio stream reopened: the picture waits for it, not for the ARM
@@ -1086,10 +1506,35 @@ class App:
                     self._note_smooth(media)
                 if now - state['win_start'] > STARVE_WINDOW:
                     if may_fall_back and (state['starved'] > STARVE_LIMIT or state.get('dry', 0) >= DRY_LIMIT):
-                        self.log('Starved %.1fs (%d dropouts) of the last %.0fs at %s: stepping down' %
-                                 (state['starved'], state.get('dry', 0), now - state['win_start'], media.tier))
-                        return 'downgrade', pos_ms()
-                    state['starved'], state['dry'], state['win_start'] = 0.0, 0, now
+                        span = max(0.001, now - state['win_start'])
+                        dec, push = self._decoder_load(state), 100.0 * state.get('win_push', 0.0) / span
+                        if dec >= BOOST_MIN_CPU or push >= 100.0 * BUSY_PUSH:
+                            self.log('Starved %.1fs (%d dropouts) of the last %.0fs at %s (ffmpeg %d%% of a core, picture copy %d%% of the loop): stepping down' %
+                                     (state['starved'], state.get('dry', 0), span, media.tier, dec, push))
+                            return 'downgrade', pos_ms()
+                        # Neither the decoder nor the picture copy was busy: the data did not arrive (the network, a slow start-up),
+                        # which a smaller picture does not fix and which says nothing about the ARM. Once is ignored; a repeat steps
+                        # down to a stream that needs less data, without making every later estimate more cautious.
+                        self.log('Starved %.1fs (%d dropouts) of the last %.0fs at %s while ffmpeg used %d%% of a core and the copy %d%% of the loop: %s' %
+                                 (state['starved'], state.get('dry', 0), span, media.tier, dec, push,
+                                  'waiting for data, ignoring it once' if not state.get('stalls') else 'waiting for data again, stepping down'))
+                        if state.get('stalls'):
+                            return 'stall', pos_ms()
+                        state['stalls'] = 1
+                    else:
+                        state['stalls'] = 0                       # a clean window forgives an earlier stall
+                    state['starved'], state['dry'], state['win_start'], state['win_push'] = 0.0, 0, now, 0.0
+                if now >= next_quick:                        # how busy ffmpeg is, a few seconds at a time, for the starve decision below
+                    next_quick = now + CPU_QUICK_SECONDS
+                    try:
+                        procs = getattr(getattr(pipe, 'decoder', None), 'procs', {}) or {}
+                        quick.named = {'video ffmpeg': getattr(procs.get('video'), 'pid', None)}
+                        quick.sample()
+                        reading = quick.values.get('video ffmpeg')
+                        if reading is not None and reading >= 0:       # (a restarted decoder is a new process: its first reading is void)
+                            state['video_recent'] = (state.get('video_recent', []) + [reading])[-2:]
+                    except Exception:
+                        pass
                 if now >= next_cpu:                          # where the ARM's time goes (percent of one core; both busy = 200)
                     next_cpu = now + CPU_LOG_SECONDS
                     span = max(0.001, now - loop_t['since'])
@@ -1114,7 +1559,7 @@ class App:
                     continue
                 if state['paused']:
                     if not state['pause_pushed'] and state['last'] is not None:
-                        self._present(state['last'], v, pos_ms(), dur_ms, True, state, prof, True, True, ytarget)
+                        self._present(state['last'], v, pos_ms(), dur_ms, True, state, prof, True, True, state['last_target'])
                         state['pause_pushed'] = True
                     else:
                         time.sleep(.01)
@@ -1188,9 +1633,10 @@ class App:
                 if kind == 'eof':
                     return 'eof', dur_ms
                 state['last'] = rec
+                state['last_target'] = state.get('pipe_target')
                 state['retries'] = 0
                 if self.yuv and not state.get('flags_known'):
-                    state['flags'] = pipe.decoder.colour_flags(ytarget['h'])      # matrix and range, from ffmpeg's stream line
+                    state['flags'] = pipe.decoder.colour_flags(state['pipe_target']['h'])      # matrix and range, from ffmpeg's stream line
                     state['flags_known'] = True
                 if state.get('opened_at') and not state.get('first_logged'):
                     state['first_logged'] = True
@@ -1209,8 +1655,9 @@ class App:
                     if state['note']:
                         state['note'] = ''
                 tq = time.monotonic()
-                self._present(rec, v, shown, dur_ms, False, state, prof, False, show_osd, ytarget)
+                self._present(rec, v, shown, dur_ms, False, state, prof, False, show_osd, state.get('pipe_target'))
                 loop_t['push'] += time.monotonic() - tq
+                state['win_push'] = state.get('win_push', 0.0) + (time.monotonic() - tq)
         finally:
             if loading is not None and self.screen is loading:
                 self.pop()
@@ -1230,7 +1677,8 @@ class App:
         if silent:
             audio = self.silence
         overlay = self._osd_overlay(v, pos, dur, paused, state) if osd else None
-        self.link.push_picture(frame, audio, target['w'], target['h'], state['crop'], state.get('flags', 0), overlay)
+        self.link.push_picture(frame, audio, target['w'], target['h'], 'Off' if target.get('crop_w') else state['crop'],
+                               state.get('flags', 0), overlay)
 
     def _osd_overlay(self, v, pos, dur, paused, state):
         """The overlay buffer holding the playback bar for this moment: drawn again only when what it shows changes."""

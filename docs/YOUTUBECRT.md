@@ -64,6 +64,47 @@ The daemon only *reads* one memory word twice a second while another core is loa
 writing within half a second if the core's heartbeat stops. Its log is
 `/media/fat/YouTubeNative/YouTube-crt-daemon.txt` (overwritten each boot).
 
+## The H264 core
+
+The player can run on a second core, the **MiSTer H264 core** by owenb321
+([github.com/owenb321/MiSTer_h264_decoder](https://github.com/owenb321/MiSTer_h264_decoder), release 1.1 or later; GPL-3.0-or-later,
+a separate project that is not part of this repository). It decodes H.264 in the FPGA, so the ARM only repackages the video and decodes
+the sound. That frees the ARM completely (about 5% of one core during playback) and allows sharper pictures than the ARM can decode.
+
+**Install.** Download the core's zip from its releases page and extract it to the SD card root (it adds `_Other/H264_*.rbf` and its own
+programs). Run this player's `Install_YouTube_CRT.sh` again: it adds **Other → YouTube (H264)** (a `.mgl` file in `_Other`). If that entry
+does not show up, `Scripts → YouTubeCRT → YouTube_H264` loads the core. Load it, and the YouTube menu appears over the core's picture.
+Do not run the H264 core's own video player at the same time: only one program can feed the core.
+
+**What is different.**
+
+| | YouTubeCRT core | H264 core |
+| --- | --- | --- |
+| Who decodes | the ARM (ffmpeg) | the FPGA |
+| Best picture | 480p | 720p (YouTube's H.264 at 30 fps or less) |
+| ARM use while playing | all of it | about 5% of one core |
+| Speed test, decoder speed | used | not used |
+| Output | 240p or 480i | 480i/576i or 480p/576p (the core's menu: F12) |
+| Extras | composite blur, flicker filter, dither | the core's anti-twitter and dither |
+
+**Stream quality** gets a 720p choice. **Auto** picks the biggest H.264 stream the core can decode in real time (at most 3,600
+macroblocks and 108,000 macroblocks a second, which is 720p30 or 480p60). YouTube often offers its 720p H.264 only at 60 fps, which the
+core cannot play in real time; then you get 480p and the Starting screen says why ("720p is 60 fps here; the core plays up to 30").
+
+**Crop** (X, then Crop): **Fill** and **Off** are the core's own setting and change at once. **14:9** is made in the video: the player
+rewrites the cropping fields of the stream's sequence header, so the core shows a 14:9 picture with thin bars. It shows from the next
+keyframe after the few seconds already queued (several seconds, with no pause or jump). Your choice is remembered for each video.
+
+**How the player talks to the core.** Video and sound go into a ring buffer in shared memory with presentation times (the core's
+documented interface, version 1.1); the sound is written ahead of the picture it belongs with, with about 3 seconds of both in hand
+before a video starts. The menu is drawn into the Linux framebuffer, which the core draws over its picture. Pad and keyboard events come
+from the core's input region.
+
+**Troubleshooting.** The log (`/media/fat/YouTubeNative/YouTube-crt-log.txt`) has an `H264 core:` line every 15 seconds with the
+core's own counters (late and starved pictures, audio queued, played, late and underruns), and an `AUDIO ISSUE` line whenever sound is
+dropped or an underrun happens. `The audio cannot start at ...; trying ...` means ffmpeg crashed at that position (some seek positions
+do) and the player retried a little earlier or later.
+
 ## Adding channels, playlists and single videos
 
 Everything lives in **one file**, `/media/fat/YouTubeNative/ytcrt/subscriptions.txt` (created on first run). One entry
@@ -113,7 +154,7 @@ To import your real subscriptions, export them with Google Takeout (YouTube → 
 
 Home → **Search** (the first entry). Type what to look for with the on-screen keyboard (the space key works here) or a real keyboard, then Start / OK. The results are an ordinary video list: A plays, Y saves to Watch Later, and **Load more videos...** at the end fetches the next 20 (up to 200). A search is one yt-dlp run, so expect roughly 15 to 35 seconds on the MiSTer; B cancels. Starting a video from the results works like any other video, including the slow security check for some of them. Searches are not saved.
 
-**Search Playlists** (the second Home entry) does the same for public playlists: type what to look for, then A opens a playlist (its videos are listed like any other list, with **Load more videos...**) and Y saves it to your Playlists so it appears under Home → Playlists. Mixes that YouTube makes automatically are left out.
+**Search Playlists** (the second Home entry) does the same for public playlists: type what to look for, then A opens a playlist (its videos are listed like any other list, with **Load more videos...**) and Y saves it to your Playlists so it appears under Home → Playlists. Mixes that YouTube makes automatically are left out. The results list ends with **Load more playlists...**, which fetches the next page (up to 200 playlists).
 
 ## More than the first page
 
@@ -152,9 +193,13 @@ next picture (the FPGA does the crop); with the v0.14 core it restarts the pictu
 
 | Crop | What you see |
 | --- | --- |
-| **Off** | The whole picture with black bars top and bottom (the original behaviour) |
-| **14:9** | Trims the sides of widescreen video to 14:9 and leaves thin black bars |
-| **Fill** | Trims widescreen to 4:3 so it fills the screen. This also removes the baked-in side bars from 4:3 shows stored in widescreen files |
+| **Fill** (default) | Trims widescreen to 4:3 so it fills the screen. This also removes the baked-in side bars from 4:3 shows stored in widescreen files, which is how most old TV, films and music videos are uploaded |
+| **14:9** | Trims the sides of widescreen video to 14:9 and leaves thin black bars, the compromise many TV stations used for widescreen material in the 90s |
+| **Off** | The whole picture with black bars top and bottom |
+
+With the v0.16 core, ffmpeg trims the sides itself (Fill and 14:9), so a 16:9 video crosses the pipe and is copied to the core about a quarter smaller (854×480 becomes 640×480); changing the crop in the More panel therefore restarts the picture for a second or two.
+
+**The crop you choose in the More panel is remembered for that video** (the last 200 videos), so it opens the same way next time. **Settings → Video crop** is the starting crop for every other video.
 
 Crops are centred and never touch a picture that is already narrower than the target (4:3 video, vertical shorts).
 
@@ -205,6 +250,8 @@ predicted to need at most 72% of the ARM, which leaves room for the player's own
 * Busy footage (game capture, sports) can still need **360p** or **240p**.
 * A **24 or 25 fps** source has 20% fewer frames than 30 fps, so it is estimated 20% cheaper.
 
+**Auto remembers each video.** When Auto has to step a video down to a lighter stream, it saves that choice (the last 100 videos), and the next time you play the video it starts on the stream that worked, so a music video does not stutter and switch a second time. A video that needed the **Fastest** decoder setting is remembered the same way. Running the **Speed test** clears both lists, because they belong to the old measurement.
+
 Settings → **Stream quality**:
 
 | Setting | Behaviour |
@@ -233,7 +280,8 @@ Every entry in Settings does something:
 | Setting | What it does |
 | --- | --- |
 | Stream quality | Auto / 240p / 360p / 480p: how big a YouTube stream to decode (see *Picture quality* above) |
-| Video crop | Off / 14:9 / Fill: how widescreen video is trimmed for the 4:3 screen |
+| Video crop | Fill / 14:9 / Off: how widescreen video is trimmed for the 4:3 screen (default Fill) |
+| Play next video | On / Off: when a video from a playlist, channel, subscriptions or Watch Later ends, the next one in that list plays |
 | Resume playback | Ask or Always resume where you stopped |
 | Show Shorts | Include YouTube Shorts in channel lists |
 | Thumbnails | The preview picture in the detail panel |

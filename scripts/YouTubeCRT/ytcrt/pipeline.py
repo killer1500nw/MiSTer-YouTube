@@ -298,7 +298,7 @@ PLAYLIST_FILTERS = ('EgIQAw%253D%253D', 'EgIQAw%3D%3D')
 
 def parse_found_playlists(out):
     """yt-dlp --flat-playlist --print output of a playlist search -> [{'id', 'title', 'channel', 'count'}], no duplicates."""
-    found, seen = [], set()
+    found, seen = Page(), set()
     for line in out.splitlines():
         line = line.strip()
         if not line.startswith('{'):
@@ -307,6 +307,7 @@ def parse_found_playlists(out):
             e = json.loads(line)
         except ValueError:
             continue
+        found.raw += 1                                                       # every result YouTube sent, kept or not
         pid = str(e.get('id') or '')
         if not pid:                                                          # fall back to the list= part of the link
             m = re.search(r'[?&]list=([A-Za-z0-9_-]+)', str(e.get('url') or ''))
@@ -321,18 +322,19 @@ def parse_found_playlists(out):
     return found
 
 
-def search_playlists(rt, query, cancel=lambda: None, log=lambda m: None, limit=20):
-    """Search YouTube for public playlists: up to `limit` of them, via yt-dlp (listing only). -> [dict]"""
+def search_playlists(rt, query, cancel=lambda: None, log=lambda m: None, limit=20, start=1):
+    """Search YouTube for public playlists: up to `limit` of them from result number `start`, via yt-dlp (listing only).
+    -> Page of dicts; Page.raw counts the results YouTube sent (the next page starts at start + raw)."""
     query = re.sub(r'[\x00-\x1f]', ' ', str(query)).strip()[:120]
     if not query:
         raise ValueError('Nothing to search for.')
     from urllib.parse import quote_plus
     env = os.environ.copy()
     env.update(SSL_CERT_FILE=str(rt.ca), REQUESTS_CA_BUNDLE=str(rt.ca), CURL_CA_BUNDLE=str(rt.ca))
-    found = []
+    found = Page()
     for sp in PLAYLIST_FILTERS:
         cmd = [rt.resolver, '--ignore-config', '--no-cache-dir', '--flat-playlist', '--force-ipv4', '--verbose',
-               '--playlist-end', str(limit * 2), '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
+               '--playlist-start', str(start), '--playlist-end', str(start + limit * 2 - 1), '--socket-timeout', '20', '--retries', '1', '--compat-options', 'no-certifi',
                '--print', PRINT_FOUND_PLAYLIST, '--', 'https://www.youtube.com/results?search_query=%s&sp=%s' % (quote_plus(query), sp)]
         log('Searching YouTube playlists for "%s"' % query[:40])
         seen_lines = [0]
@@ -345,7 +347,9 @@ def search_playlists(rt, query, cancel=lambda: None, log=lambda m: None, limit=2
         if found:
             break
         log('Playlist search: no results with filter %s' % sp)
-    return found[:limit]
+    kept = Page(found[:limit])
+    kept.raw = found.raw
+    return kept
 
 
 def _source(fmt, info):
@@ -412,19 +416,64 @@ def choose_streams(info, formats, profile, quality='Auto', cal=None, mult=1.0, m
                                                                 rank[0].get('tbr') or 0, round(cost(rank[0]) * 100))
     else:
         video = rank[0]
-    muxed = video.get('acodec') not in (None, 'none')
-    audio = None
-    if muxed:
-        audio = video
-    else:
-        auds = [f for f in playable if f.get('acodec') not in (None, 'none') and f.get('vcodec') in (None, 'none')]
-        if auds:     # AAC in m4a first, and the ~130 kbps "medium" track: light to decode, plenty for this DAC
-            audio = max(auds, key=lambda f: (f.get('language_preference') or 0,        # the original / default language, not an auto-dub
-                                            (f.get('acodec') or '').startswith('mp4a'), f.get('ext') == 'm4a',
-                                            'drc' not in str(f.get('format_id')),      # not the loudness-compressed copy
-                                            -abs((f.get('tbr') or 130) - 130)))
+    audio = _pick_audio(video, playable)
     return (_source(video, info), (_source(audio, info) if audio else None),
             profiles.label_for(video['width'], video['height']), profiles.predicted_cost(video, cal, mult), why)
+
+
+def _pick_audio(video, playable):
+    """The audio stream for a video: the video itself when it is muxed, else the best audio-only stream (or None)."""
+    if video.get('acodec') not in (None, 'none'):
+        return video
+    auds = [f for f in playable if f.get('acodec') not in (None, 'none') and f.get('vcodec') in (None, 'none')]
+    if auds:     # AAC in m4a first, and the ~130 kbps "medium" track: light to decode, plenty for this DAC
+        return max(auds, key=lambda f: (f.get('language_preference') or 0,        # the original / default language, not an auto-dub
+                                        (f.get('acodec') or '').startswith('mp4a'), f.get('ext') == 'm4a',
+                                        'drc' not in str(f.get('format_id')),      # not the loudness-compressed copy
+                                        -abs((f.get('tbr') or 130) - 130)))
+    return None
+
+
+H264_BOX = {'240p': 240, '360p': 360, '480p': 480, '720p': 720, 'Auto': 720}      # the shorter side allowed; Auto = the best the H264 core plays
+H264_MAX_MBS = 3600                                                  # 1280x720
+H264_MB_RATE = 108000                                                # macroblocks a second the core decodes in real time (720p30, 854x480@60)
+H264_PROFILES = (0x4D, 0x64)                                         # Main and High: what the core decodes (Baseline is CAVLC)
+
+
+def h264_media(media, quality='Auto'):
+    """The streams the H264 core can play for an already resolved video: the biggest H.264 (Main/High) stream within its limits and the
+    quality setting. Nothing is predicted about the ARM: the FPGA decodes. -> Media, or raises ValueError."""
+    info, formats = media.catalog
+    playable = [f for f in formats if f.get('protocol') in ('https', 'http') and str(f.get('url', '')).startswith(('https://', 'http://'))]
+
+    def usable(f):
+        code = str(f.get('vcodec') or '')
+        if not code.startswith('avc1') or not f.get('width') or not f.get('height'):
+            return False
+        try:
+            profile = int(code.split('.')[1][:2], 16)
+        except (IndexError, ValueError):
+            return False
+        mbs = -(-f['width'] // 16) * -(-f['height'] // 16)
+        return profile in H264_PROFILES and mbs <= H264_MAX_MBS and mbs * (f.get('fps') or 30) <= H264_MB_RATE
+    pool = [f for f in playable if usable(f)]
+    if not pool:
+        raise ValueError('This video has no H.264 stream the H264 core can play.')
+    box = H264_BOX.get(quality, 720)
+    fit = [f for f in pool if min(f['width'], f['height']) <= box] or [min(pool, key=_area)]
+    fit = [f for f in fit if f.get('acodec') in (None, 'none')] or fit
+    video = max(fit, key=lambda f: (_area(f), f.get('tbr') or 0))
+    audio = _pick_audio(video, playable)
+    why = ''
+    if quality != 'Auto' and min(video['width'], video['height']) < box:
+        # The size that was asked for exists, but not in a form the core can play in real time (YouTube's 720p H.264 is often 60 fps)
+        bigger = [f for f in playable if (f.get('vcodec') or '').startswith('avc1') and f.get('width') and f.get('height')
+                  and min(f['width'], f['height']) == box]
+        if bigger:
+            why = '%s is %d fps here; the core plays up to 30' % (profiles.label_for(bigger[0]['width'], bigger[0]['height']),
+                                                                 max((f.get('fps') or 0) for f in bigger))
+    return Media(media.id, media.title, media.duration, _source(video, info), _source(audio, info) if audio else None,
+                 profiles.label_for(video['width'], video['height']), media.catalog, why, 0.0)
 
 
 def _client(src):
@@ -565,9 +614,11 @@ def decoder_command(rt, profile, source, kind, start_s=0, speed='Normal', limit_
         args[args.index('-loglevel') + 1] = 'info'                    # the stream line says which colour matrix it uses
         args.insert(args.index('-nostdin') + 1, '-nostats')
         vf = 'fps=%d:start_time=0' % profile.fps
+        if target.get('crop_w'):
+            vf += r',crop=%d:ih-mod(ih\,2)' % target['crop_w']      # the sides for Fill / 14:9, centred
         if target.get('prescale'):
             vf += ',scale=%d:%d:flags=fast_bilinear' % target['prescale']
-        else:
+        elif not target.get('crop_w'):
             vf += r',crop=iw-mod(iw\,16):ih-mod(ih\,2)'
         args += ['-map', '0:v:0', '-an', '-vf', vf, '-pix_fmt', 'yuv420p', '-threads', '1', '-f', 'rawvideo']
     elif kind == 'video' and decode_only:
@@ -797,13 +848,21 @@ class RecordPipeline:
             raise RuntimeError('Pipe reader did not stop within five seconds.')
 
 
-def yuv_target(media, interlaced=True, big=False):
+def yuv_target(media, interlaced=True, big=False, crop='Off'):
     """Size of the YUV pictures for this video: its own size trimmed to a multiple of 16 x 2, or a pre-scaled size when it
     is larger than the core's row buffers (640 x 480) or the core could not step through it fast enough.
     `big` = the v0.16 core is reading pictures from the framebuffer: pictures up to 864 x 480 go in unscaled (the FPGA does the shrinking,
     which ffmpeg needs half its time for on this ARM).
-    -> {'w', 'h', 'prescale'}"""
-    w, h = yuv.aligned_size(int(media.video['width']), int(media.video['height']))
+    `crop` ('Fill', '14:9'): ffmpeg trims the sides itself (the pictures that cross the pipe and are copied to the core are then a quarter
+    smaller for 16:9 video) and the core is told not to crop again.
+    -> {'w', 'h', 'prescale', 'crop_w'}"""
+    sw, sh = int(media.video['width']), int(media.video['height'])
+    crop_w = None
+    cw = profiles.crop_width(sw, sh, crop)
+    if profiles.FFMPEG_CROP and cw < sw - 16:                     # a real crop: the centre cw columns, to a multiple of 16
+        crop_w = min(sw, max(16, int(round(cw / 16.0)) * 16))
+        sw = crop_w
+    w, h = yuv.aligned_size(sw, sh)
     pre = None
     max_w = yuv.BIG_MAX_W if big else yuv.MAX_W
     if w > max_w or h > yuv.MAX_H:
@@ -814,7 +873,7 @@ def yuv_target(media, interlaced=True, big=False):
     if steep:
         pre = steep
         w, h = steep
-    return {'w': w, 'h': h, 'prescale': pre}
+    return {'w': w, 'h': h, 'prescale': pre, 'crop_w': crop_w}
 
 
 def open_pipeline(rt, profile, media, start_s, speed, cancel, crop='Off', target=None):

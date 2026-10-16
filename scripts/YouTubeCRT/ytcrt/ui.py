@@ -378,8 +378,9 @@ class VideoList(ListScreen):
     """Rows are video dicts. Subclasses supply `videos(app)`."""
 
     def __init__(self, title, source, hints='A:Play  Y:Later  B:Back', empty=None, status=None, refresh=None,
-                 more=None, can_more=None, loading=None, remove=None):
+                 more=None, can_more=None, loading=None, remove=None, autoplay=False):
         super().__init__()
+        self.autoplay = autoplay                                              # when a video ends, play the next one in this list
         self.title, self.source, self.hints = title, source, hints
         self._empty, self._status, self.refresh = empty, status, refresh
         self.more, self.can_more, self.loading = more, can_more, loading      # paging: a "Load more" row at the end
@@ -450,7 +451,8 @@ class VideoList(ListScreen):
             if not (self.loading and self.loading(app)):
                 self.more(app)
             return
-        app.start_video(v)
+        queue = (lambda: [x for x in self.items(app) if not x.get('_more')]) if self.autoplay else None
+        app.start_video(v, queue)
 
     def extra(self, app, v, act):
         if act == 'menu' and self.refresh:
@@ -497,6 +499,7 @@ class ChannelList(ListScreen):
             return
         app.push(VideoList(name, lambda a: a.feeds.channel_videos(cid, a.store.settings['shorts'] == 'On'),
                            empty=lambda a: ['No videos found for this channel yet.'],
+                           autoplay=True,
                            more=lambda a: a.load_more('channel', cid),
                            can_more=lambda a: a.feeds.can_load_more('channel', cid),
                            loading=lambda a: a.feeds.is_loading('channel', cid)))
@@ -545,6 +548,7 @@ class PlaylistList(ListScreen):
             return
         app.push(VideoList(name, lambda a: a.feeds.playlist_videos(pid, a.store.settings['shorts'] == 'On'),
                            hints='A:Play  Y:Later  B:Back', empty=lambda a: ['This playlist has no videos.'],
+                           autoplay=True,
                            more=lambda a: a.load_more('playlist', pid),
                            can_more=lambda a: a.feeds.can_load_more('playlist', pid),
                            loading=lambda a: a.feeds.is_loading('playlist', pid)))
@@ -565,30 +569,56 @@ class FoundPlaylists(ListScreen):
     detail = False
     visible = 7
 
-    def __init__(self, query, results):
+    def __init__(self, query, results, more=None, can_more=None, loading=None):
         super().__init__()
         self.title = 'Playlists: ' + clip(query, 20)
         self.results = results
+        self.more, self.can_more, self.loading = more, can_more, loading     # paging: a "Load more" row at the end
 
     def items(self, app):
+        if self.more and self.can_more and self.can_more(app):
+            return list(self.results) + [MORE_ROW]
         return self.results
 
+    def is_loading(self, app):
+        return bool(self.loading and self.loading(app))
+
+    def busy(self, app):
+        return self.is_loading(app)
+
     def label(self, app, row):
+        if row.get('_more'):
+            if self.is_loading(app):
+                return 'Loading more' + '.' * (int(time.monotonic() * 3) % 4)
+            return 'Load more playlists...'
         return clip(row['title'], 29)
 
+    def marker(self, app, row):
+        if row.get('_more'):
+            if self.is_loading(app):
+                return SPIN[int(time.monotonic() * 8) % 4], RED
+            return '+', GREEN
+        return ' ', DIM
+
     def right(self, app, row):
-        return str(row['count']) if row.get('count') else ''
+        return '' if row.get('_more') else (str(row['count']) if row.get('count') else '')
 
     def empty_text(self, app):
         return ['No playlists found.']
 
     def info(self, app, row):
-        return clip(row.get('channel') or '', 36)
+        return None if row.get('_more') else clip(row.get('channel') or '', 36)
 
     def activate(self, app, row):
+        if row.get('_more'):
+            if not self.is_loading(app):
+                self.more(app)
+            return
         app.open_found_playlist(row)
 
     def extra(self, app, row, act):
+        if row.get('_more'):
+            return False
         if act == 'alt':
             app.save_found_playlist(row)
             return True
@@ -681,9 +711,11 @@ class Settings(ListScreen):
     def rows(self, app):
         s = app.store.settings
         return [
-            ('quality', 'Stream quality', s['quality'], ('Auto', '240p', '360p', '480p')),
-            ('crop', 'Video crop', s['crop'], ('Off', '14:9', 'Fill')),
+            ('quality', 'Stream quality', s['quality'],
+             ('Auto', '240p', '360p', '480p', '720p') if getattr(app, 'h264', False) else ('Auto', '240p', '360p', '480p')),
+            ('crop', 'Video crop', s['crop'], ('Fill', '14:9', 'Off')),
             ('resume', 'Resume playback', s['resume'], ('Ask', 'Always')),
+            ('autoplay', 'Play next video', s['autoplay'], ('On', 'Off')),
             ('shorts', 'Show Shorts', s['shorts'], ('On', 'Off')),
             ('thumbnails', 'Thumbnails', s['thumbnails'], ('On', 'Off')),
             ('decode_speed', 'Decoder speed', s['decode_speed'], ('Normal', 'Fast', 'Fastest')),

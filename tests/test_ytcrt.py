@@ -120,7 +120,7 @@ class Profiles(unittest.TestCase):
     def test_settings_screen_lists_only_settings_that_do_something(self):
         a = type('A', (), {'store': store.Store(tempfile.mkdtemp())})()
         rows = [r[0] for r in ui.Settings().rows(a)]
-        self.assertEqual(rows, ['quality', 'crop', 'resume', 'shorts', 'thumbnails', 'decode_speed', 'bench', 'diag',
+        self.assertEqual(rows, ['quality', 'crop', 'resume', 'autoplay', 'shorts', 'thumbnails', 'decode_speed', 'bench', 'diag',
                                 'clear_later', 'clear_history'])
         self.assertNotIn('profile', rows)
         self.assertNotIn('about', rows)
@@ -569,6 +569,101 @@ class PlayPolicy(unittest.TestCase):
         self.assertEqual(st.settings['fastest_ids'], ['v' * 11])
         self.app.play({'id': 'v' * 11, 'title': 't'}, 0)                 # next time it starts on Fastest
         self.assertEqual(seen[2][1], 'Fastest')
+
+    def starve_with_decoder_at(self, percent, quality='480p'):
+        from ytcrt import cpu as cpumod
+        st = self.make(quality=quality, cost=0.3)
+        st.settings['decode_speed'] = 'Normal'
+        seen, lines = [], []
+        real = cpumod.CpuWatch
+
+        class Fake(real):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self.values = {'video ffmpeg': percent}
+
+            def sample(self):
+                return ''
+        cpumod.CpuWatch = Fake
+        self.addCleanup(setattr, cpumod, 'CpuWatch', real)
+        quick_before = self.appmod.CPU_QUICK_SECONDS
+        self.appmod.CPU_QUICK_SECONDS = 0.1
+        self.addCleanup(setattr, self.appmod, 'CPU_QUICK_SECONDS', quick_before)
+        orig = self.app._play_loop
+        self.app._play_loop = lambda v, media, prof, speed, *a: (seen.append(speed), orig(v, media, prof, speed, *a))[1]
+        real_log = self.app.log
+        self.app.log = lambda m, *a: (lines.append(m % a if a else m), real_log(m, *a))[1]
+        self.run_play([FakePipe(rate=4), FakePipe()], lambda: len(self.opened) >= 2)
+        return st, seen, lines
+
+    def test_a_starve_while_nothing_is_busy_is_a_stall_not_the_arms_fault(self):
+        st, seen, lines = self.starve_with_decoder_at(40.0)
+        self.assertTrue(any('waiting for data, ignoring it once' in l for l in lines))     # the first one is put down to a hiccup
+        self.assertEqual(seen[:2], ['Fast', 'Fast'])                                        # no stronger setting was tried
+        self.assertNotIn('v' * 11, st.settings.get('fastest_ids', []))
+        self.assertEqual(st.settings['cost_mult'], 1.0)                                     # and nothing was learned about the ARM
+
+    def test_a_starve_while_ffmpeg_is_busy_still_boosts_and_is_blamed_on_the_arm(self):
+        st, seen, lines = self.starve_with_decoder_at(95.0)
+        self.assertFalse(any('ignoring it once' in l for l in lines))
+        self.assertEqual(seen[:2], ['Fast', 'Fastest'])
+        self.assertIn('v' * 11, st.settings['fastest_ids'])
+
+    def test_a_video_that_needed_a_lighter_stream_starts_on_it_next_time(self):
+        st = self.make(cost=0.7)
+        self.run_play([FakePipe(rate=4), FakePipe()], lambda: len(self.opened) >= 2)
+        self.assertEqual([t for t, _ in self.opened], ['360p', '240p'])
+        self.assertIn('v' * 11, st.settings['cap_ids'])
+        self.opened.clear()
+        self.run_play([FakePipe()], lambda: len(self.opened) >= 1)
+        self.assertEqual(self.opened[0][0], '240p')                     # straight to the stream that worked: no second interruption
+
+    def test_crop_defaults_to_fill_and_a_videos_own_choice_is_remembered(self):
+        import threading
+        st = self.make(quality='480p', cost=0.3)
+        crops = []
+        orig = pipeline.open_pipeline
+
+        def fake_open(rt, prof, media, start_s, speed, cancel, crop='Off', target=None):
+            crops.append(crop)
+            return FakePipe()
+        pipeline.open_pipeline = fake_open
+        self.addCleanup(setattr, pipeline, 'open_pipeline', orig)
+        self.assertEqual(st.settings['crop'], 'Fill')
+        st.settings['crops'] = {'a' * 11: '14:9'}
+        for vid in ('a' * 11, 'b' * 11):
+            threading.Thread(target=lambda: (time.sleep(1.0), self.inp.push('back')), daemon=True).start()
+            self.app.play({'id': vid, 'title': 't'}, 0)
+        self.assertEqual(crops[0], '14:9')                              # this video was set to 14:9 before
+        self.assertEqual(crops[-1], 'Fill')                             # any other video: the default
+
+    def test_the_next_video_of_a_list_plays_when_one_finishes(self):
+        self.make()
+        played = []
+
+        def fake_play(v, start_ms):
+            played.append(v['id'])
+            self.app.finished = len(played) < 3                         # the third video is stopped by the user
+        self.app._play = fake_play
+        vids = [{'id': c * 11, 'title': c} for c in 'abcd']
+        self.app.play(vids[0], 0, lambda: vids)
+        self.assertEqual(played, ['a' * 11, 'b' * 11, 'c' * 11])        # a and b ended, c was stopped: no d
+        played.clear()
+        self.app.store.settings['autoplay'] = 'Off'
+        self.app.play(vids[0], 0, lambda: vids)
+        self.assertEqual(played, ['a' * 11])
+
+    def test_the_old_default_crop_becomes_fill_once(self):
+        import json
+        self.make()                                                     # (the class's tearDown expects it)
+        for old, new in (('Off', 'Fill'), ('14:9', '14:9')):
+            d = tempfile.mkdtemp()
+            Path(d, 'settings.json').write_text(json.dumps({'crop': old}))
+            self.assertEqual(store.Store(d).settings['crop'], new)
+        d = tempfile.mkdtemp()
+        st = store.Store(d)
+        st.set('crop', 'Off')                                           # chosen on purpose afterwards: kept
+        self.assertEqual(store.Store(d).settings['crop'], 'Off')
 
     def test_a_fast_arm_gets_360p_and_a_slow_one_steps_down_and_learns(self):
         st = self.make(cost=0.7)                         # calibration says 360p@452k needs ~62% of the ARM
@@ -1975,15 +2070,45 @@ class YuvPlayer(unittest.TestCase):
             if steps['n'] == 5:
                 self.inp.push('menu')                                    # the More panel
             if steps['n'] == 8:
-                self.inp.push('ok')                                      # Crop: Off -> 14:9
+                self.inp.push('ok')                                      # Crop: Fill -> 14:9
             return self.link.sent > 60 and self.link.pictures[-1][4] == '14:9'
         opened = self.play(pipe, done)
         self.assertEqual(len(opened), 1)                                 # no decoder restart for the crop
         self.assertEqual((opened[0][0]['w'], opened[0][0]['h']), (640, 360))
         pics = self.link.pictures
         self.assertEqual((pics[-1][2], pics[-1][3]), (640, 360))
-        self.assertEqual(len(pics[-1][0]), 640 * 360 * 3 // 2)
         self.assertEqual(pics[-1][4], '14:9')                            # the FPGA does the crop: only the header changed
+        self.assertIsNotNone(pics[-1][6])
+
+    def test_with_ffmpeg_crop_pictures_are_trimmed_and_a_crop_change_restarts_the_decoder(self):
+        self.make()
+        profiles.FFMPEG_CROP = True
+        self.addCleanup(setattr, profiles, 'FFMPEG_CROP', False)
+        st = self.st
+        st.settings['quality'] = '360p'
+        steps = {'n': 0}
+        sizes = []
+
+        def pipe(target):
+            sizes.append((target['w'], target['h']))
+            return FakeYuvPipe(target['w'], target['h'])
+
+        def done():
+            steps['n'] += 1
+            if steps['n'] == 5:
+                self.inp.push('menu')                                    # the More panel
+            if steps['n'] == 8:
+                self.inp.push('ok')                                      # Crop: Fill -> 14:9
+            return len(sizes) >= 2 and self.link.sent > 90 and self.link.pictures[-1][2] == sizes[-1][0]
+        opened = self.play(pipe, done)
+        self.assertEqual(opened[0][0]['crop_w'], 480)                    # Fill: 640x360 -> the 4:3 centre, 480 wide
+        self.assertEqual(sizes[0], (480, 360))
+        self.assertEqual(opened[1][0]['crop_w'], 560)                    # 14:9: 360 * 14 / 9
+        self.assertEqual(sizes[1], (560, 360))
+        pics = self.link.pictures
+        self.assertEqual((pics[-1][2], pics[-1][3]), (560, 360))
+        self.assertEqual(len(pics[-1][0]), 560 * 360 * 3 // 2)
+        self.assertEqual(pics[-1][4], 'Off')                             # ffmpeg trimmed it: the core must not crop again
         self.assertIsNotNone(pics[-1][6])                                # and the More panel is an overlay, not burned in
 
     def test_the_playback_bar_is_an_overlay_that_goes_away(self):
@@ -2315,6 +2440,20 @@ class PlaylistSearch(unittest.TestCase):
         with self.assertRaises(ValueError):
             pipeline.search_playlists(rt, '   ')
 
+    def test_a_later_page_asks_yt_dlp_for_later_results(self):
+        seen = []
+        saved = pipeline.capture
+        rt = type('Rt', (), {'resolver': Path('yt-dlp'), 'ca': Path('ca')})()
+        pipeline.capture = lambda cmd, env, cancel, timeout=0, **kw: (seen.append(cmd), self.OUT.encode())[1]
+        try:
+            page = pipeline.search_playlists(rt, 'he man', limit=20, start=41)
+        finally:
+            pipeline.capture = saved
+        cmd = seen[0]
+        self.assertEqual(cmd[cmd.index('--playlist-start') + 1], '41')
+        self.assertEqual(cmd[cmd.index('--playlist-end') + 1], '80')        # over-fetches twice the page: mixes and channels are dropped
+        self.assertEqual(page.raw, 5)                                       # the next page starts at 41 + 5
+
     def make_app(self):
         a, st = ListsInTheGui.make_app(self)
         a.rt.resolver, a.rt.ca = Path('yt-dlp'), Path('ca')
@@ -2352,6 +2491,766 @@ class PlaylistSearch(unittest.TestCase):
             self.assertEqual(seen_bg, [False])                              # a fetch the user waits for must not be frozen by pause_background()
         finally:
             pipeline.search_playlists, pipeline.playlist_entries = saved
+
+
+    def test_load_more_playlists_pages_the_search(self):
+        a, st = self.make_app()
+
+        def rows(first, n, raw):
+            page = pipeline.Page({'id': 'PL%011d' % i, 'title': 'List %d' % i, 'channel': 'c', 'count': 3} for i in range(first, first + n))
+            page.raw = raw
+            return page
+        calls = []
+
+        def fake_search(rt, query, cancel=None, log=None, limit=20, start=1):
+            calls.append(start)
+            return rows(0, 12, 14) if start == 1 else rows(10, 12, 14)         # the second page repeats two playlists
+        saved = pipeline.search_playlists
+        pipeline.search_playlists = fake_search
+        try:
+            a._playlist_search_typed(a, 'he man')
+            lst = a.screen
+            self.assertIsInstance(lst, ui.FoundPlaylists)
+            self.assertTrue(lst.items(a)[-1].get('_more'))                       # a "Load more playlists..." row follows the 12
+            self.assertEqual(lst.label(a, lst.items(a)[-1]), 'Load more playlists...')
+            lst.activate(a, lst.items(a)[-1])
+            end = time.monotonic() + 5
+            while len(calls) < 2 or lst.is_loading(a):
+                self.assertLess(time.monotonic(), end)
+                time.sleep(0.02)
+            self.assertEqual(calls, [1, 15])                                     # the next page starts after the 14 results YouTube sent
+            self.assertEqual(len([r for r in lst.items(a) if not r.get('_more')]), 22)   # 12 + 12 minus the 2 repeats
+        finally:
+            pipeline.search_playlists = saved
+
+
+class H264Ring(unittest.TestCase):
+    """The H264 core's ring interface, against a bytearray that a tiny fake core answers for."""
+
+    def make(self, version=0x101):
+        from ytcrt import h264ring as hr
+        self.hr = hr
+        self.region = bytearray(hr.REGION_LEN)
+        self.words = memoryview(self.region).cast('I')
+        self.words[0], self.words[1] = hr.MAGIC & 0xFFFFFFFF, hr.MAGIC >> 32
+        self.words[2] = version
+        self.beat = 1
+
+        def core():
+            self.beat += 1
+            self.words[6] = self.beat                      # the heartbeat (word 3) and its tail copy (word 31)
+            self.words[62] = self.beat
+            nonce = self.words[66]                         # word 33
+            if nonce and self.words[11] != nonce:          # a new session: acknowledge it, reading from the current write index
+                self.words[11] = nonce
+                self.words[10] = self.words[64]
+            elif self.consume:
+                self.words[10] = self.words[64]            # and it reads everything that was written
+        self.consume = True
+        self.ring = hr.Ring(self.region, tick=core)
+        core()
+        return self.ring
+
+    def record(self, at):
+        """(type, flags, seq, length, pts, sync, payload) of the record at ring byte `at`."""
+        w = self.words
+        i = (self.hr.RING_OFFSET + at) // 4
+        w0, w1 = w[i] | (w[i + 1] << 32), w[i + 2] | (w[i + 3] << 32)
+        length = w0 >> 32
+        raw = bytes(self.region[self.hr.RING_OFFSET + at + 16:self.hr.RING_OFFSET + at + 16 + length])
+        return w0 & 0xFF, (w0 >> 8) & 0xFF, (w0 >> 16) & 0xFFFF, length, w1 & ((1 << 33) - 1), w1 >> 48, raw
+
+    def test_it_attaches_to_a_running_core_and_refuses_the_wrong_one(self):
+        ring = self.make()
+        self.assertTrue(ring.alive(1.0))
+        ring = self.make(version=0x100)                      # 1.0: older than the 1.1 this player is built for
+        with self.assertRaises(self.hr.RingError):
+            ring.alive(1.0)
+        ring = self.make(version=0x200)
+        with self.assertRaises(self.hr.RingError):
+            ring.alive(1.0)
+        ring = self.make()
+        self.words[0] = 0                                    # no core: no magic
+        with self.assertRaises(self.hr.RingError):
+            ring.alive(0.1)
+
+    def test_a_session_starts_with_a_nonce_and_continues_at_the_cores_read_index(self):
+        ring = self.make()
+        self.words[64] = 0x1235                              # a stale, misaligned write index from some earlier run
+        ring.new_session()
+        self.assertTrue(ring.session)
+        self.assertEqual(self.words[64], 0x1230)             # rounded down to 16
+        self.assertEqual(ring.w, 0x1230)
+        self.assertEqual(self.words[66], ring.nonce)
+
+    def test_an_access_unit_is_written_with_its_header_payload_padding_and_index(self):
+        ring = self.make()
+        ring.new_session()
+        start = ring.w
+        au = bytes([0, 0, 0, 1, 0x65]) + bytes(range(30))   # 35 bytes -> padded to 48
+        ring.write_au(au, pts=90000)
+        rtype, flags, seq, length, pts, sync, raw = self.record(start)
+        self.assertEqual((rtype, flags, seq, length, pts, sync), (2, 1, 0, 35, 90000, 0x5248))
+        self.assertEqual(raw, au)
+        self.assertEqual(ring.w, start + 16 + 48)
+        self.assertEqual(self.words[64], start + 64)         # the write index publishes it
+        ring.write_audio(bytes(8), pts=0)
+        rtype, flags, seq, length, pts, sync, raw = self.record(start + 64)
+        self.assertEqual((rtype, flags, seq, length), (3, 1, 1, 8))      # the next sequence number, audio takes only PTS_VALID
+        ring.write_au(au)                                    # no time stamp: no PTS flag
+        self.assertEqual(self.record(start + 64 + 32)[1], 0)
+
+    def test_a_record_that_would_cross_the_ring_end_is_preceded_by_a_pad(self):
+        ring = self.make()
+        ring.new_session()
+        size = self.hr.RING_SIZE
+        ring.w = size - 96                                   # 96 bytes left before the end
+        self.words[64] = ring.w
+        self.words[10] = ring.w                              # nothing unread
+        ring.write_au(bytes(200), pts=1)                     # 16 + 208 > 96
+        rtype, flags, seq, length, pts, sync, raw = self.record(size - 96)
+        self.assertEqual((rtype, length), (1, 80))           # a PAD that ends exactly at the ring's end
+        rtype, flags, seq2, length, pts, sync, raw = self.record(0)
+        self.assertEqual((rtype, length, seq2), (2, 200, seq + 1))
+        self.assertEqual(ring.w & 0xFFFFFFFF, size + 16 + 208)
+
+    def test_a_full_ring_makes_the_writer_wait_and_then_give_up(self):
+        ring = self.make()
+        ring.new_session()
+        self.consume = False                                 # the core reads nothing
+        self.words[10] = ring.w
+        big = bytes(0x300000)
+        self.assertTrue(ring.try_write(2, big, 0))
+        self.assertTrue(ring.try_write(2, big, 1))
+        self.assertFalse(ring.try_write(2, big, 2))          # 8 MB are full
+        t = [0.0]
+        ring.clock = lambda: t.__setitem__(0, t[0] + 1.0) or t[0]
+        with self.assertRaises(self.hr.RingError):
+            ring.write_au(big, 3, timeout=3.0)
+
+    def test_pause_and_volume_share_one_word_and_a_bad_record_is_refused_here(self):
+        ring = self.make()
+        ring.new_session()
+        ring.set_volume(20)
+        ring.set_pause(True)
+        self.assertEqual(self.words[68], 1 | (20 << 8))      # word 34
+        ring.set_pause(False)
+        self.assertEqual(self.words[68], 20 << 8)
+        with self.assertRaises(self.hr.RingError):
+            ring.write_audio(bytes(7))                       # whole 4-byte frames only
+        with self.assertRaises(self.hr.RingError):
+            ring.write_au(b'')
+
+    def test_the_status_copy_is_consistent_and_names_the_state(self):
+        ring = self.make()
+        self.words[8], self.words[9] = 5 | (2 << 8), 0       # word 4: state ERROR (5), error code 2
+        st = ring.status()
+        self.assertEqual((st['state'], st['error']), (5, 2))
+        self.assertIn('error', ring.state_text(st))
+
+
+class TsVideoReader(unittest.TestCase):
+    """The MPEG-TS reader that turns ffmpeg's stream copy into one access unit per record."""
+
+    @staticmethod
+    def pts_bytes(marker, value):
+        return bytes([(marker << 4) | (((value >> 30) & 7) << 1) | 1, (value >> 22) & 0xFF, (((value >> 15) & 0x7F) << 1) | 1,
+                      (value >> 7) & 0xFF, ((value & 0x7F) << 1) | 1])
+
+    def packets(self, pid, payload, first=True):
+        """TS packets carrying `payload`, the last one padded with an adaptation field."""
+        out = []
+        for i in range(0, len(payload), 184):
+            chunk = payload[i:i + 184]
+            pusi = 0x40 if (first and i == 0) else 0
+            if len(chunk) == 184:
+                out.append(bytes([0x47, pusi | (pid >> 8), pid & 0xFF, 0x10]) + chunk)
+            else:
+                fill = 184 - len(chunk)
+                if fill == 1:
+                    af = bytes([0])
+                else:
+                    af = bytes([fill - 1, 0]) + bytes([255]) * (fill - 2)
+                out.append(bytes([0x47, pusi | (pid >> 8), pid & 0xFF, 0x30]) + af + chunk)
+        return out
+
+    def stream(self, units, pmt_pid=0x1000, video_pid=0x100):
+        pat = bytes([0, 0, 0xB0, 13, 0, 1, 0xC1, 0, 0, 0, 1, 0xE0 | (pmt_pid >> 8), pmt_pid & 0xFF, 0, 0, 0, 0])
+        pmt = bytes([0, 2, 0xB0, 23, 0, 1, 0xC1, 0, 0, 0xE0 | (video_pid >> 8), video_pid & 0xFF, 0xF0, 0,
+                     0x0F, 0xE1, 0x01, 0xF0, 0,                       # an audio stream first (AAC, ADTS) ...
+                     0x1B, 0xE0 | (video_pid >> 8), video_pid & 0xFF, 0xF0, 0, 0, 0, 0])
+        pkts = self.packets(0, pat) + self.packets(pmt_pid, pmt)
+        for pts, dts, au in units:
+            if dts is None:
+                head = bytes([0, 0, 1, 0xE0, 0, 0, 0x80, 0x80, 5]) + self.pts_bytes(2, pts)
+            else:
+                head = bytes([0, 0, 1, 0xE0, 0, 0, 0x80, 0xC0, 10]) + self.pts_bytes(3, pts) + self.pts_bytes(1, dts)
+            pkts += self.packets(video_pid, head + au)
+        return b''.join(pkts)
+
+    def test_access_units_come_out_whole_with_their_time_stamps(self):
+        from ytcrt import tsdemux
+        small = bytes([0, 0, 1, 9, 0x10]) + bytes(range(40))
+        big = bytes([0, 0, 0, 1, 0x65]) + bytes((i * 7) & 255 for i in range(700))     # spans several TS packets
+        data = self.stream([(90000 + 3750, 90000, big), (90000 + 7500, 90000 + 3750, small), ((1 << 33) - 5, (1 << 33) - 9, small)])
+        r = tsdemux.TsVideo()
+        got = r.feed(data[:1000]) + r.feed(data[1000:])         # fed in two uneven pieces
+        got += r.flush()
+        self.assertEqual([g[0] for g in got], [93750, 97500, (1 << 33) - 5])
+        self.assertEqual([g[1] for g in got], [90000, 93750, (1 << 33) - 9])
+        self.assertEqual([g[2] for g in got], [big, small, small])
+        self.assertEqual(r.video_pid, 0x100)
+
+    def test_a_unit_without_a_decode_time_uses_its_presentation_time_and_noise_before_a_sync_byte_is_skipped(self):
+        from ytcrt import tsdemux
+        au = bytes([0, 0, 1, 9, 0x10, 1, 2, 3])
+        data = bytes([0, 1, 2]) + self.stream([(5000, None, au), (8750, None, au)])
+        r = tsdemux.TsVideo()
+        got = r.feed(data) + r.flush()
+        self.assertEqual([(g[0], g[1]) for g in got], [(5000, 5000), (8750, 8750)])
+        self.assertGreaterEqual(r.skipped, 1)
+
+
+class H264Feeder(unittest.TestCase):
+    """The feeder: fake ffmpeg processes in, records in a fake ring out."""
+
+    class Proc:
+        def __init__(self, data):
+            import io
+            self.stdout, self.stderr = io.BytesIO(data), io.BytesIO(b'')
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return 0
+
+    def setUp(self):
+        self.ring_test = H264Ring('test_it_attaches_to_a_running_core_and_refuses_the_wrong_one')
+        self.ts = TsVideoReader('test_access_units_come_out_whole_with_their_time_stamps')
+
+    def run_feeder(self, units, audio_frames, first_start=0.0):
+        from ytcrt import h264feed
+        ring = self.ring_test.make()
+        self.ring_test.words[8] = 3                            # word 4: the core is PLAYING
+        ring.new_session()
+        self.started = []
+        video_bytes = self.ts.stream(units)
+        pcm = bytes((i * 3) & 127 for i in range(audio_frames * 4))
+
+        def spawn(cmd, **kw):
+            self.started.append(cmd)
+            return self.Proc(video_bytes if cmd[0] == 'V' else pcm)
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], lambda s: ['A', s], log=lambda m: None, spawn=spawn)
+        feeder.start(first_start)
+        done = []
+
+        def tick():
+            self.ring_test.words[14] = min(feeder.last_pts, (1 << 32) - 1)    # the core's clock follows what has been written
+            if feeder.stats['au'] == len(units) and not done:
+                done.append(1)
+                self.ring_test.words[8] = 4                    # the core has shown the last picture
+        result = feeder.run(stop=lambda: False, tick=tick, first_timeout=5.0)
+        return ring, feeder, result
+
+    def records(self, ring, start=0):
+        out, at = [], start
+        while at < ring.w:
+            rtype, flags, seq, length, pts, sync, raw = self.ring_test.record(at & (ring.hr.RING_SIZE - 1) if hasattr(ring, 'hr') else at)
+            out.append((rtype, flags, seq, length, pts))
+            at += 16 + ((length + 15) & ~15)
+        return out
+
+    def test_video_and_audio_are_interleaved_in_time_order_and_the_last_unit_ends_the_stream(self):
+        au = bytes([0, 0, 0, 1, 9, 0xF0]) + bytes(100)
+        # ten access units half a second apart, starting 58.9 s into the source (a seek lands on the keyframe before the wanted time)
+        base = int(58.9 * 90000)
+        units = [(base + i * 45000, base + i * 45000 - 3750, au) for i in range(10)]
+        ring, feeder, result = self.run_feeder(units, audio_frames=48000 * 6)
+        self.assertEqual(result, 'ended')
+        self.assertEqual([c[0] for c in self.started], ['V', 'A'])
+        self.assertAlmostEqual(self.started[1][1], 58.9, places=3)         # the audio starts where the video does
+        recs = self.records(ring)
+        videos = [r for r in recs if r[0] == 2]
+        audios = [r for r in recs if r[0] == 3]
+        self.assertEqual([v[4] for v in videos], [u[0] for u in units])
+        self.assertEqual(videos[-1][1], 1 | 4)                              # PTS_VALID | END_OF_STREAM on the last access unit only
+        self.assertTrue(all(v[1] == 1 for v in videos[:-1]))
+        self.assertEqual(audios[0][4], base)                                # the first audio chunk is stamped with the video's start
+        self.assertEqual(audios[1][4], base + 4800 * 90000 // 48000)       # 100 ms later
+        self.assertTrue(all(a[3] == 19200 for a in audios))
+        # audio never runs more than a second ahead of the newest video written before it (until the video is finished)
+        newest = units[0][0]                                                  # (the writer counts the first picture's time before it is written)
+        for r in recs:
+            if r[0] == 2:
+                newest = max(newest, r[4])
+            elif r[0] == 3 and newest < videos[-1][4]:
+                self.assertLessEqual(r[4], newest + 90000)
+        self.assertEqual(feeder.stats['au'], 10)
+        # and the sound sits in the ring at least 0.6 s before the picture it goes with (the core reads in order)
+        newest_audio = None
+        for r in recs:
+            if r[0] == 3:
+                newest_audio = r[4] + 9000
+            elif r[0] == 2 and newest_audio is not None and r[4] + 54000 <= audios[-1][4]:
+                self.assertGreaterEqual(newest_audio, r[4] + 54000)
+
+    def test_a_crop_change_takes_effect_at_the_next_keyframe_without_a_restart(self):
+        import io
+        import threading
+        from ytcrt import h264feed, h264sps
+        sps = SpsCropping.S480
+        key = bytes([0, 0, 0, 1, 9, 0xF0, 0, 0, 0, 1]) + sps + bytes([0, 0, 0, 1, 0x65, 0x88, 0x84])
+        plain = bytes([0, 0, 0, 1, 9, 0xF0, 0, 0, 0, 1, 0x41, 0x9A, 0x24, 0x6C])
+        units = [(i * 3750, i * 3750, key if i in (0, 4) else plain) for i in range(8)]
+        whole = self.ts.stream(units)
+        split = len(self.ts.stream(units[:4]))            # the stream up to the second keyframe, then the rest
+        release = threading.Event()
+
+        class TwoParts:
+            def __init__(self):
+                self.stdout, self.stderr = self, io.BytesIO(b'')
+                self.calls = 0
+
+            def read(self, n):
+                self.calls += 1
+                if self.calls == 1:
+                    return whole[:split]
+                if self.calls == 2:
+                    release.wait(5)
+                    return whole[split:]
+                return b''
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+        ring = self.ring_test.make()
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], None, log=lambda m: None, spawn=lambda cmd, **kw: TwoParts())
+        feeder.start(0)
+        got = [feeder.vq.get(timeout=5) for _ in range(3)]          # the first keyframe and two more pictures, as they were
+        feeder.set_crop((14, 9))                                     # now the viewer picks 14:9
+        self.assertIsNone(feeder.crop_switch_pts)
+        release.set()
+        rest = []
+        while True:
+            item = feeder.vq.get(timeout=5)
+            if item is None:
+                break
+            rest.append(item)
+
+        def width(au):
+            start = au.find(bytes([0, 0, 1, 0x67]))
+            end = au.find(bytes([0, 0, 0, 1, 0x65]), start)
+            return h264sps.visible(h264sps.parse(au[start + 3:end]))[0]
+        self.assertEqual(width(got[0][1]), 854)                      # the keyframe already queued keeps its header
+        keyframes = [au for pts, au in rest if pts == 4 * 3750]
+        self.assertEqual(width(keyframes[0]), 744)                   # the next keyframe carries 14:9
+        self.assertEqual(feeder.crop_switch_pts, 4 * 3750)           # and says when the picture changes shape
+        feeder.close()
+
+    def test_14_9_rewrites_the_sequence_header_of_the_pictures_it_writes(self):
+        from ytcrt import h264feed, h264sps
+        sps = SpsCropping.S480
+        keyframe = bytes([0, 0, 0, 1, 9, 0xF0, 0, 0, 0, 1]) + sps + bytes([0, 0, 0, 1, 0x65, 0x88, 0x84, 0x10, 0x20])
+        plain = bytes([0, 0, 0, 1, 9, 0xF0, 0, 0, 0, 1, 0x41, 0x9A, 0x24, 0x6C])
+        ring = self.ring_test.make()
+        self.ring_test.words[8] = 3
+        ring.new_session()
+        video_bytes = self.ts.stream([(0, 0, keyframe)] + [(i * 3750, i * 3750, plain) for i in range(1, 6)])
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], None, log=lambda m: None, spawn=lambda cmd, **kw: self.Proc(video_bytes))
+        feeder.crop = (14, 9)
+        feeder.start(0)
+        done = []
+
+        def tick():
+            self.ring_test.words[14] = min(feeder.last_pts, (1 << 32) - 1)
+            if feeder.stats['au'] == 6 and not done:
+                done.append(1)
+                self.ring_test.words[8] = 4
+        self.assertEqual(feeder.run(stop=lambda: False, tick=tick, first_timeout=5.0), 'ended')
+        first = [r for r in self.records(ring) if r[0] == 2][0]
+        written = bytes(self.ring_test.region[self.ring_test.hr.RING_OFFSET + 0:self.ring_test.hr.RING_OFFSET + 16 + first[3]][16:])
+        start = written.find(bytes([0, 0, 1, 0x67]))
+        sps_out = written[start + 3:written.find(bytes([0, 0, 0, 1, 0x65]))]
+        self.assertEqual(h264sps.visible(h264sps.parse(sps_out))[0], 744)       # the 854-wide picture is now 14:9 (744 x 480)
+        self.assertTrue(written.endswith(bytes([0, 0, 0, 1, 0x65, 0x88, 0x84, 0x10, 0x20])))     # the picture itself is untouched
+
+    def test_audio_that_ends_early_is_reopened_where_it_stopped_and_stays_in_step(self):
+        from ytcrt import h264feed
+        ring = self.ring_test.make()
+        self.ring_test.words[8] = 3
+        ring.new_session()
+        au = bytes([0, 0, 0, 1, 9, 0xF0]) + bytes(50)
+        units = [(i * 90000, i * 90000, au) for i in range(10)]           # ten seconds of video, one access unit a second
+        video_bytes = self.ts.stream(units)
+        second = 48000 * 4
+        spawned = []
+
+        def spawn(cmd, **kw):
+            spawned.append(cmd)
+            if cmd[0] == 'V':
+                return self.Proc(video_bytes)
+            return self.Proc(bytes(4 * second) if len([c for c in spawned if c[0] == 'A']) == 1 else bytes(6 * second))
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], lambda s: ['A', s], log=lambda m: None, spawn=spawn, duration_s=10)
+        feeder.start(0)
+        done = []
+
+        def tick():
+            self.ring_test.words[14] = min(feeder.last_pts, (1 << 32) - 1)
+            if feeder.stats['au'] == len(units) and feeder.stats['audio'] >= 100 and not done:
+                done.append(1)
+                self.ring_test.words[8] = 4
+        self.assertEqual(feeder.run(stop=lambda: False, tick=tick, first_timeout=5.0), 'ended')
+        audio_starts = [c[1] for c in spawned if c[0] == 'A']
+        self.assertEqual(len(audio_starts), 2)
+        self.assertAlmostEqual(audio_starts[1], 4.0, places=2)             # reopened where the first one stopped
+        self.assertEqual(feeder.audio_restarts, 1)
+        recs = self.records(ring)
+        pts = [r[4] for r in recs if r[0] == 3]
+        self.assertEqual(pts, [i * 9000 for i in range(100)])             # 100 ms apart across the join: nothing missing, nothing doubled
+
+    def test_nothing_is_written_until_the_first_sound_is_ready(self):
+        import io
+        import threading
+        from ytcrt import h264feed
+        ring = self.ring_test.make()
+        self.ring_test.words[8] = 3
+        ring.new_session()
+        au = bytes([0, 0, 0, 1, 9, 0xF0]) + bytes(50)
+        units = [(i * 3750, i * 3750, au) for i in range(6)]
+        video_bytes = self.ts.stream(units)
+        release = threading.Event()
+
+        class SlowAudio:
+            def __init__(self):
+                self.stdout, self.stderr = self, io.BytesIO(b'')
+                self.given = False
+
+            def read(self, n):
+                release.wait(5)                             # the audio ffmpeg is still connecting
+                if self.given:
+                    return b''
+                self.given = True
+                return bytes(19200)
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        def spawn(cmd, **kw):
+            return self.Proc(video_bytes) if cmd[0] == 'V' else SlowAudio()
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], lambda s: ['A', s], log=lambda m: None, spawn=spawn)
+        feeder.start(0)
+        result = []
+
+        def tick():
+            self.ring_test.words[14] = min(feeder.last_pts, (1 << 32) - 1)
+            if feeder.stats['au'] == len(units) and not result:
+                result.append(1)
+                self.ring_test.words[8] = 4
+        worker = threading.Thread(target=lambda: result.append(feeder.run(stop=lambda: False, tick=tick, first_timeout=5.0)), daemon=True)
+        worker.start()
+        import time as _t
+        _t.sleep(0.5)
+        self.assertEqual(ring.sent['au'] + ring.sent['audio'], 0)          # the picture is waiting for the sound (all of this short clip)
+        release.set()
+        worker.join(5)
+        recs = self.records(ring)
+        self.assertEqual([r[0] for r in recs[:2]].count(3), 1)             # the first sound went in with the first pictures
+        self.assertEqual(feeder.stats['au'], 6)
+
+    def test_audio_counter_changes_are_described_and_wrap_correctly(self):
+        from ytcrt import app as appmod
+        self.assertEqual(appmod.audio_delta((100, 0, 5, 0, 0), (4900, 0, 6, 0, 0)), 'late +4800 frames, underruns +1')
+        self.assertEqual(appmod.audio_delta((0, 0, 65535, 0, 0), (0, 0, 1, 0, 0)), 'underruns +2')      # the 16-bit counter wrapped
+        self.assertEqual(appmod.audio_delta((1, 2, 3, 4, 5), (1, 2, 3, 4, 5)), 'no change')
+        self.assertEqual(appmod.signed32(0xFFFFFFFF), -1)
+
+    def test_how_far_ahead_of_the_clock_records_are_written_is_tracked(self):
+        from ytcrt import h264feed
+        ring = self.ring_test.make()
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], None, log=lambda m: None)
+        feeder.first_pts, feeder.stc = 90000, 90000
+        feeder._lead('audio', 90000 + 450)                   # 5 ms ahead
+        feeder._lead('audio', 90000 - 450)                   # 5 ms late
+        feeder._lead('video', 90000 + 90000)                 # a second ahead
+        got = feeder.take_lead()
+        self.assertEqual(got['audio'], (-5, 0))
+        self.assertEqual(got['video'], (1000, 1000))
+        self.assertEqual(feeder.take_lead(), {'audio': None, 'video': None})
+
+    def audio_feeder(self, audio_results, duration=10):
+        """A feeder with ten seconds of video whose audio processes give `audio_results` in turn (bytes, or b'' for a crash)."""
+        from ytcrt import h264feed
+        ring = self.ring_test.make()
+        self.ring_test.words[8] = 3
+        ring.new_session()
+        au = bytes([0, 0, 0, 1, 9, 0xF0]) + bytes(50)
+        units = [(i * 90000, i * 90000, au) for i in range(10)]
+        video_bytes = self.ts.stream(units)
+        starts, results = [], list(audio_results)
+
+        def spawn(cmd, **kw):
+            if cmd[0] == 'V':
+                return self.Proc(video_bytes)
+            starts.append(cmd[1])
+            return self.Proc(results.pop(0) if results else b'')
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], lambda s: ['A', s], log=lambda m: None, spawn=spawn, duration_s=duration)
+        feeder.start(0)
+        done = []
+
+        def tick():
+            self.ring_test.words[14] = min(feeder.last_pts, (1 << 32) - 1)
+            if feeder.stats['au'] == len(units) and not done:
+                done.append(1)
+                self.ring_test.words[8] = 4
+        return ring, feeder, starts, feeder.run(stop=lambda: False, tick=tick, first_timeout=5.0)
+
+    def test_audio_that_crashes_where_it_starts_is_tried_a_little_later(self):
+        import time as real_time
+        from ytcrt import h264feed
+        saved = real_time.sleep
+        real_time.sleep = lambda s: None
+        try:
+            ring, feeder, starts, result = self.audio_feeder([b'', bytes(4 * 48000 * 9)])
+        finally:
+            real_time.sleep = saved
+        self.assertEqual(result, 'ended')
+        self.assertEqual([round(s, 1) for s in starts], [0.0, 1.2])           # the crash at 0.0, then 1.2 s later
+        pts = [r[4] for r in self.records(ring) if r[0] == 3]
+        self.assertEqual(pts[0], int(1.2 * 90000))                             # the sound starts at the position that worked
+        self.assertEqual(feeder.audio_restarts, 0)                             # (a crash at the start is not an 'ended early')
+
+    def test_audio_that_cannot_start_anywhere_is_given_up_not_retried_for_ever(self):
+        import time as real_time
+        saved = real_time.sleep
+        real_time.sleep = lambda s: None
+        try:
+            ring, feeder, starts, result = self.audio_feeder([])
+        finally:
+            real_time.sleep = saved
+        self.assertEqual(result, 'ended')                                      # the picture plays on without sound
+        self.assertEqual(len(starts), 1 + 4)                                   # the start and the four nudges, then it stops trying
+        self.assertEqual([r for r in self.records(ring) if r[0] == 3], [])
+
+    def test_a_video_that_never_arrives_is_reported(self):
+        from ytcrt import h264feed
+        ring = self.ring_test.make()
+        ring.new_session()
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], None, log=lambda m: None, spawn=lambda cmd, **kw: self.Proc(b''))
+        feeder.start(0)
+        with self.assertRaises(RuntimeError):
+            feeder.run(stop=lambda: False, first_timeout=2.0)
+
+    def test_the_ffmpeg_commands_copy_the_video_and_decode_the_audio_on_the_sources_time_line(self):
+        from ytcrt import h264feed
+        rt = type('Rt', (), {'ffmpeg': Path('ffmpeg'), 'ca': Path('ca')})()
+        src = {'url': 'https://example.test/v', 'headers': {'User-Agent': 'x'}}
+        v = h264feed.video_copy_command(rt, src, 12.5)
+        self.assertIn('copy', v)
+        self.assertIn('-copyts', v)
+        self.assertLess(v.index('-ss'), v.index('-i'))
+        self.assertEqual(v[v.index('-f') + 1], 'mpegts')
+        self.assertNotIn('libx264', v)
+        a = h264feed.audio_pcm_command(rt, src, 12.5)
+        self.assertEqual(a[a.index('-ar') + 1], '48000')
+        self.assertEqual(a[a.index('-ac') + 1], '2')
+        self.assertEqual(a[a.index('-f') + 1], 's16le')
+
+
+class H264Streams(unittest.TestCase):
+    """Which streams the H264 core is given."""
+
+    def media(self, *videos):
+        info = {'id': 'v' * 11, 'title': 't', 'duration': 100}
+        formats = list(videos) + AUDIO
+        return pipeline.Media('v' * 11, 't', 100, None, None, '', (info, formats))
+
+    def test_720p_can_be_chosen_on_the_h264_core_only(self):
+        self.assertEqual(profiles.next_quality('480p', 1, h264=True), '720p')
+        self.assertEqual(profiles.next_quality('720p', 1, h264=True), 'Auto')
+        self.assertEqual(profiles.next_quality('Auto', -1, h264=True), '720p')
+        self.assertEqual(profiles.next_quality('480p', 1), 'Auto')                 # the player's own cores top out at 480p
+        self.assertEqual(profiles.next_quality('720p', 1), '240p')                 # a 720p left over from the H264 core is treated as Auto
+        a = type('A', (), {'store': store.Store(tempfile.mkdtemp()), 'h264': True})()
+        choices = [r for r in ui.Settings().rows(a) if r[0] == 'quality'][0][3]
+        self.assertEqual(choices[-1], '720p')
+        a.h264 = False
+        self.assertNotIn('720p', [r for r in ui.Settings().rows(a) if r[0] == 'quality'][0][3])
+        m = pipeline.Media('v' * 11, 't', 100, None, None, '', ({'id': 'v'}, [stream(854, 480, 500), stream(1280, 720, 1400)] + AUDIO))
+        self.assertEqual(pipeline.h264_media(m, '720p').label, '720p')
+
+    def test_the_h264_play_loops_more_panel_cycles_through_720p_and_the_old_loops_does_not(self):
+        import inspect
+        from ytcrt import app as appmod
+        self.assertIn("next_quality(state['quality'], step, h264=True)", inspect.getsource(appmod.App._h264_loop))
+        old = inspect.getsource(appmod.App._play_loop)
+        self.assertIn("next_quality(state['quality'], step)", old)
+        self.assertNotIn('h264=True', old)
+
+    def test_a_pause_press_before_the_first_picture_is_ignored(self):
+        import inspect
+        from ytcrt import app as appmod
+        src = inspect.getsource(appmod.App._h264_loop)
+        self.assertIn("elif act == 'ok' and loading is not None:", src)
+        self.assertLess(src.index("elif act == 'ok' and loading is not None:"), src.index("ring.set_pause(state['paused'])"))
+
+    def test_leaving_a_video_flushes_what_the_core_has_queued(self):
+        import inspect
+        from ytcrt import app as appmod
+        src = inspect.getsource(appmod.App._h264_loop)
+        tail = src[src.rindex('finally:'):]
+        self.assertIn('ring.new_session()', tail)               # otherwise the picture and sound play on for the 8 s that were queued
+        self.assertLess(tail.index('stop_feed()'), tail.index('ring.new_session()'))       # (after the feeder thread has stopped)
+        self.assertIn('ring.set_pause(False)', tail)
+
+    def test_a_quality_that_only_exists_too_fast_for_the_core_is_explained(self):
+        fast = stream(1280, 720, 1900, fps=60, fid='298')
+        m = self.media(stream(854, 480, 400), fast)
+        got = pipeline.h264_media(m, '720p')
+        self.assertEqual(got.label, '480p')                              # the core cannot play 720p60 ...
+        self.assertIn('720p is 60 fps', got.why)                         # ... and the player says why
+        self.assertEqual(pipeline.h264_media(m, 'Auto').why, '')          # (Auto just picks the best it can: nothing to explain)
+        ok = self.media(stream(854, 480, 400), stream(1280, 720, 1400, fps=24))
+        self.assertEqual(pipeline.h264_media(ok, '720p').why, '')
+
+    def test_the_biggest_h264_stream_within_the_cores_limits_wins_and_auto_means_720p(self):
+        m = self.media(stream(426, 240, 220), stream(854, 480, 500), stream(1280, 720, 1400), stream(1920, 1080, 3000),
+                       stream(1280, 720, 1500, fid='vp9', vcodec='vp09.00.31.08'))
+        got = pipeline.h264_media(m, 'Auto')
+        self.assertEqual((got.video['width'], got.video['height']), (1280, 720))
+        self.assertEqual(got.video['format_id'], '1280x720')              # the avc1 one, not the VP9
+        self.assertEqual(got.audio['format_id'], '140')                  # AAC, not the loudness-compressed copy or Opus
+        self.assertEqual(got.label, '720p')
+        self.assertEqual(pipeline.h264_media(m, '480p').label, '480p')   # the quality setting still caps it
+        self.assertEqual(pipeline.h264_media(m, '360p').label, '240p')   # nothing at 360: the nearest below
+
+    def test_streams_past_the_cores_speed_or_profile_are_not_offered(self):
+        fast = stream(1280, 720, 3000, fps=60, fid='720p60')                  # 3,600 macroblocks x 60: twice what it decodes
+        baseline = stream(854, 480, 500, fid='baseline', vcodec='avc1.42C01E')   # CAVLC
+        ok = stream(854, 480, 500, fid='main')
+        got = pipeline.h264_media(self.media(fast, baseline, ok), 'Auto')
+        self.assertEqual(got.video['format_id'], 'main')
+        with self.assertRaises(ValueError):
+            pipeline.h264_media(self.media(fast, baseline), 'Auto')
+        with self.assertRaises(ValueError):
+            pipeline.h264_media(self.media(stream(854, 480, 500, vcodec='vp09.00.31.08')), 'Auto')
+
+
+class H264Overlay(unittest.TestCase):
+    """The menu's YUV overlay as a doubled ARGB page for the core, and MiSTer's controls as the player's input words."""
+
+    def test_luma_zero_is_transparent_and_pixels_are_doubled_in_both_directions(self):
+        from ytcrt import h264link
+        argb = h264link.Argb(8, 4)
+        y = bytearray(8 * 4)
+        u, v = bytearray([128]) * 8, bytearray([128]) * 8
+        for x in range(4):
+            y[x] = 235                                         # white, left half of the top row
+        page, changed = argb.render(y, u, v)
+        self.assertEqual(changed, 4)
+        self.assertEqual(bytes(page[0:4]), bytes([255, 255, 255, 255]))      # B G R A: opaque white
+        self.assertEqual(bytes(page[4:8]), bytes([255, 255, 255, 255]))      # ... doubled across
+        self.assertEqual(bytes(page[2560:2564]), bytes([255, 255, 255, 255]))   # ... and down (a 640-wide ARGB row is 2,560 bytes)
+        self.assertEqual(bytes(page[16 * 4 // 2:16 * 4 // 2 + 4]), bytes(4)) if False else None
+        self.assertEqual(bytes(page[8 * 4:8 * 4 + 4]), bytes(4))             # luma 0 further right: fully transparent
+        again, changed = argb.render(y, u, v)
+        self.assertEqual(changed, 0)                                         # the same picture: no row is converted or copied again
+
+    def test_the_cores_pad_and_key_events_look_like_the_players_own_core_words(self):
+        from ytcrt import h264link, h264ring as hr
+        ring = H264Ring('test_it_attaches_to_a_running_core_and_refuses_the_wrong_one').make()
+        words = ring.words
+
+        def set_events(events, count):
+            for i, ev in enumerate(events):
+                n = count - len(events) + i
+                entry = n % 32
+                idx = 2 * (56 + entry // 4) + (entry % 4) // 2
+                shift = 16 * ((entry % 4) % 2)
+                words[idx] = (words[idx] & ~(0xFFFF << shift)) | (ev << shift)
+            words[97] = count                                   # word 48 high: the events queued so far
+        box = h264link.H264Box(ring)
+        words[98] = 0x0010                                      # word 49: pad 0, A pressed
+        words[99] = 0                                           # (and its sticks)
+        set_events([(1 << 9) | 0x1C, 0x1C], 2)                  # key A pressed, key A released
+        words[142] = words[96]                                  # word 71's low half equals word 48's: a consistent copy
+        self.assertEqual(box.read(40) & 0xFFF, 0x10)
+        self.assertEqual(box.read(48) & 0xFFFF, 0x1C)           # newest event first (the release)
+        self.assertEqual((box.read(48) >> 16) & 0xFFFF, (1 << 9) | 0x1C)
+        self.assertEqual(box.read(52) >> 16, 2)                 # the sequence number the player's input code watches
+        self.assertEqual(box.read(44), 0)
+
+
+class SpsCropping(unittest.TestCase):
+    """Cropping an H.264 stream by rewriting its sequence parameter set, tried on headers taken from real YouTube videos."""
+    S480 = bytes.fromhex('674d401ee8806c1ef3780b5010101400000fa40002ee003c58b448')            # 854x480, itag 135 (Limp Bizkit)
+    S720 = bytes.fromhex('674d401fe8802802dd80b5010101400000fa40002ee003c60c4480')            # 1280x720, itag 136
+    S3 = bytes.fromhex('674d401fe8806c1ef3780b50101014000003000400000300f03c60c448')          # 854x480 with 0x03 escape bytes in it
+
+    def tail_bits(self, info):
+        r = info['rbsp']
+        return [(r[p >> 3] >> (7 - (p & 7))) & 1 for p in range(info['vui_bit'], info['stop_bit'] + 1)]
+
+    def test_the_sizes_and_the_existing_crop_of_real_headers_are_read(self):
+        from ytcrt import h264sps
+        info = h264sps.parse(self.S480)
+        self.assertEqual((info['width'], info['height']), (864, 480))      # coded in whole macroblocks ...
+        self.assertEqual(h264sps.visible(info), (854, 480))                # ... with 10 columns cropped away by the stream itself
+        self.assertEqual(h264sps.visible(h264sps.parse(self.S720)), (1280, 720))
+        self.assertEqual(h264sps.visible(h264sps.parse(self.S3)), (854, 480))      # (the escape bytes are handled)
+
+    def test_the_visible_picture_is_cut_to_the_wanted_shape_and_the_rest_of_the_header_is_untouched(self):
+        from ytcrt import h264sps
+        for sps, wide, high in ((self.S480, 854, 480), (self.S720, 1280, 720), (self.S3, 854, 480)):
+            before = h264sps.parse(sps)
+            for aspect, ratio in (((4, 3), 4 / 3.0), ((14, 9), 14 / 9.0)):
+                new = h264sps.crop_to(sps, aspect)
+                after = h264sps.parse(new)
+                vw, vh = h264sps.visible(after)
+                self.assertEqual(vh, high)                                  # the height is not touched
+                self.assertLessEqual(vw, int(high * ratio))                 # no wider than asked ...
+                self.assertGreater(vw, int(high * ratio) - 8)               # ... and not much narrower
+                self.assertEqual(vw % 4, 0)
+                self.assertEqual(self.tail_bits(after), self.tail_bits(before))      # the VUI after the crop fields is identical, bit for bit
+                self.assertEqual((after['width'], after['height']), (before['width'], before['height']))
+        self.assertEqual(h264sps.visible(h264sps.parse(h264sps.crop_to(self.S480, (4, 3)))), (640, 480))
+        self.assertEqual(h264sps.visible(h264sps.parse(h264sps.crop_to(self.S720, (4, 3)))), (960, 720))
+
+    def test_a_picture_already_that_narrow_is_left_alone_and_cropping_twice_changes_nothing_more(self):
+        from ytcrt import h264sps
+        once = h264sps.crop_to(self.S480, (4, 3))
+        self.assertEqual(h264sps.crop_to(once, (4, 3)), once)
+        self.assertEqual(h264sps.crop_to(once, (14, 9)), once)               # 4:3 is narrower than 14:9: not widened
+        self.assertEqual(h264sps.crop_to(bytes([0x65, 0x88, 0x84]), (4, 3)), bytes([0x65, 0x88, 0x84]))        # not an SPS: unchanged
+
+    def test_escaping_round_trips(self):
+        from ytcrt import h264sps
+        raw = bytes([0, 0, 0, 0, 1, 0, 0, 2, 0, 0, 3, 5, 0, 0])
+        self.assertEqual(h264sps.unescape(h264sps.escape(raw)), raw)
+        self.assertNotIn(bytes([0, 0, 0]), h264sps.escape(raw))
+
+    def test_only_the_sps_of_an_access_unit_changes(self):
+        from ytcrt import h264sps
+        aud = bytes([0, 0, 0, 1, 9, 0xF0])
+        pps = bytes([0, 0, 0, 1, 0x68, 0xEE, 0x3C, 0x80])
+        slice_ = bytes([0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0x1F, 0xFF, 0xAA])
+        au = aud + bytes([0, 0, 0, 1]) + self.S480 + pps + slice_
+        out = h264sps.crop_access_unit(au, (4, 3))
+        self.assertTrue(out.startswith(aud + bytes([0, 0, 0, 1])))
+        self.assertTrue(out.endswith(pps + slice_))                          # the parameter set and the picture are exactly as they were
+        self.assertNotEqual(out, au)
+        start = len(aud) + 4
+        sps_out = out[start:len(out) - len(pps) - len(slice_)]
+        self.assertEqual(h264sps.visible(h264sps.parse(sps_out)), (640, 480))
+        plain = aud + slice_
+        self.assertIs(h264sps.crop_access_unit(plain, (4, 3)), plain)        # no SPS (most access units): returned as it is
+        self.assertIs(h264sps.crop_access_unit(au, None), au)
 
 
 class CpuLog(unittest.TestCase):
@@ -2649,12 +3548,29 @@ class BigPictures(unittest.TestCase):
 
     def test_big_stream_goes_in_unscaled_with_the_framebuffer_and_scaled_without(self):
         media = type('M', (), {'video': {'width': 854, 'height': 480}})()
-        self.assertEqual(pipeline.yuv_target(media, True, big=True), {'w': 848, 'h': 480, 'prescale': None})
+        self.assertEqual(pipeline.yuv_target(media, True, big=True), {'w': 848, 'h': 480, 'prescale': None, 'crop_w': None})
         scaled = pipeline.yuv_target(media, True, big=False)
         self.assertLessEqual(scaled['w'], 640)
         self.assertIsNotNone(scaled['prescale'])
         wide = type('M', (), {'video': {'width': 1280, 'height': 720}})()
         self.assertLessEqual(pipeline.yuv_target(wide, True, big=True)['w'], 864)           # something bigger is still scaled down first
+
+    def test_fill_and_14_9_are_trimmed_by_ffmpeg_so_fewer_bytes_move(self):
+        profiles.FFMPEG_CROP = True
+        self.addCleanup(setattr, profiles, 'FFMPEG_CROP', False)
+        media = type('M', (), {'video': {'width': 854, 'height': 480}})()
+        fill = pipeline.yuv_target(media, True, big=True, crop='Fill')
+        self.assertEqual((fill['w'], fill['h'], fill['crop_w']), (640, 480, 640))         # 854x480 -> 640x480: a quarter fewer bytes
+        wide = pipeline.yuv_target(media, True, big=True, crop='14:9')
+        self.assertEqual((wide['w'], wide['crop_w']), (752, 752))
+        self.assertIsNone(pipeline.yuv_target(media, True, big=True, crop='Off')['crop_w'])
+        square = type('M', (), {'video': {'width': 640, 'height': 480}})()
+        self.assertIsNone(pipeline.yuv_target(square, True, big=True, crop='Fill')['crop_w'])   # 4:3 stays whole
+        rt = type('Rt', (), {'ffmpeg': Path('ffmpeg'), 'ca': Path('ca')})()
+        src = {'url': 'http://x/v', 'headers': {}}
+        cmd = pipeline.decoder_command(rt, profiles.BY_KEY['240p30'], src, 'video', target=fill)
+        self.assertIn('crop=640:ih-mod(ih\,2)', cmd[cmd.index('-vf') + 1])
+        self.assertGreater(profiles.picture_bytes({'width': 854, 'height': 480}, True), profiles.picture_bytes({'width': 854, 'height': 480}, True, 'Fill'))
 
     def test_a_big_picture_is_written_where_its_header_says(self):
         from ytcrt import yuv

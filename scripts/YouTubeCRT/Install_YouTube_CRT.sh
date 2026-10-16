@@ -30,6 +30,15 @@ if [ -f /media/fat/_Other/YouTubeCRT_v0.16-fb.rbf ]; then
     done
   done
 fi
+# A menu entry for the H264 core (the FPGA decodes the video): MiSTer lists a .mgl file like a core, in the Other menu. Only when that
+# core has been installed (this player does not ship it).
+if ls /media/fat/_Other/H264_*.rbf >/dev/null 2>&1; then
+  printf '<mistergamedescription>
+  <rbf>_Other/H264</rbf>
+</mistergamedescription>
+' > "/media/fat/_Other/YouTube (H264).mgl"
+  echo "Menu entry written: Other > YouTube (H264)"
+fi
 command -v python3 >/dev/null || echo "WARNING: python3 not found; the player cannot run."
 echo "Checking the video tools (downloads them if missing; needs internet)..."
 if python3 "$BASE/ytcrt_setup.py" --root "$RT"; then

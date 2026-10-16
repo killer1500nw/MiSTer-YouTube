@@ -51,9 +51,24 @@ def limit_for(cal=None):
     return LIMIT_TOTAL if cal and cal.get('copy_ms') else LIMIT
 
 
-def picture_bytes(stream, big=False):
-    """Bytes of YUV 4:2:0 the player copies to the core for one picture of this stream."""
+FFMPEG_CROP = False       # True: ffmpeg trims the sides for Fill / 14:9 (a quarter fewer bytes to copy, but a crop change restarts the picture).
+                          # False: the FPGA crops (the change shows on the very next frame).
+
+
+def crop_width(w, h, crop='Off'):
+    """Width of the centre part of a w x h picture that a crop mode keeps (never wider than the picture)."""
+    if crop == '14:9':
+        return min(float(w), h * 14 / 9.0)
+    if crop == 'Fill':
+        return min(float(w), h * 4 / 3.0)
+    return float(w)
+
+
+def picture_bytes(stream, big=False, crop='Off'):
+    """Bytes of YUV 4:2:0 the player copies to the core for one picture of this stream (ffmpeg trims the sides for a crop first)."""
     w, h = stream['width'], stream['height']
+    if FFMPEG_CROP:
+        w = int(crop_width(w, h, crop))
     box = PICTURE_BOX_BIG if big else PICTURE_BOX
     f = min(1.0, box[0] / w, box[1] / h)
     return int(w * f) * int(h * f) * 3 // 2
@@ -65,7 +80,7 @@ def copy_scale(stream, cal):
     base = cal.get('copy_bytes')
     if cal.get('copy_fixed') or not base:
         return 1.0
-    return 0.5 + 0.5 * picture_bytes(stream, bool(cal.get('big'))) / float(base)
+    return 0.5 + 0.5 * picture_bytes(stream, bool(cal.get('big')), cal.get('crop', 'Off')) / float(base)
 
 
 def copy_cost(stream, cal, fps):
@@ -122,8 +137,16 @@ def speed_for(px, speed, learned):
     return speed
 
 
-CROPS = ('Off', '14:9', 'Fill')
+CROPS = ('Fill', '14:9', 'Off')          # the order the buttons cycle through: most old TV is uploaded as 4:3 inside a 16:9 frame
 QUALITIES = ('Auto', '240p', '360p', '480p')
+QUALITIES_H264 = ('Auto', '240p', '360p', '480p', '720p')      # the H264 core plays 720p too
+
+
+def next_quality(current, step, h264=False):
+    """The quality after `current` in the list (a 720p chosen on the H264 core is Auto on the player's own core)."""
+    options = QUALITIES_H264 if h264 else QUALITIES
+    at = options.index(current) if current in options else 0
+    return options[(at + step) % len(options)]
 
 
 def crop_filter(mode):
