@@ -2875,6 +2875,26 @@ class H264Feeder(unittest.TestCase):
         self.assertEqual([r[0] for r in recs[:2]].count(3), 1)             # the first sound went in with the first pictures
         self.assertEqual(feeder.stats['au'], 6)
 
+    def test_audio_counter_changes_are_described_and_wrap_correctly(self):
+        from ytcrt import app as appmod
+        self.assertEqual(appmod.audio_delta((100, 0, 5, 0, 0), (4900, 0, 6, 0, 0)), 'late +4800 frames, underruns +1')
+        self.assertEqual(appmod.audio_delta((0, 0, 65535, 0, 0), (0, 0, 1, 0, 0)), 'underruns +2')      # the 16-bit counter wrapped
+        self.assertEqual(appmod.audio_delta((1, 2, 3, 4, 5), (1, 2, 3, 4, 5)), 'no change')
+        self.assertEqual(appmod.signed32(0xFFFFFFFF), -1)
+
+    def test_how_far_ahead_of_the_clock_records_are_written_is_tracked(self):
+        from ytcrt import h264feed
+        ring = self.ring_test.make()
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], None, log=lambda m: None)
+        feeder.first_pts, feeder.stc = 90000, 90000
+        feeder._lead('audio', 90000 + 450)                   # 5 ms ahead
+        feeder._lead('audio', 90000 - 450)                   # 5 ms late
+        feeder._lead('video', 90000 + 90000)                 # a second ahead
+        got = feeder.take_lead()
+        self.assertEqual(got['audio'], (-5, 0))
+        self.assertEqual(got['video'], (1000, 1000))
+        self.assertEqual(feeder.take_lead(), {'audio': None, 'video': None})
+
     def test_a_video_that_never_arrives_is_reported(self):
         from ytcrt import h264feed
         ring = self.ring_test.make()

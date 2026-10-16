@@ -63,6 +63,22 @@ class Job:
         self.done = True
 
 
+def signed32(v):
+    return v - (1 << 32) if v >> 31 else v
+
+
+def audio_delta(prev, cur):
+    """What the core's audio counters did between two looks, as text: 'late +4800 frames, underruns +1'."""
+    names = ('late +%d frames', 'silence +%d frames', 'underruns +%d', 'slip dropped +%d', 'slip repeated +%d')
+    mods = (1 << 32, 1 << 32, 1 << 16, 1 << 16, 1 << 16)
+    parts = []
+    for name, mod, p, c in zip(names, mods, prev, cur):
+        d = (c - p) % mod
+        if d:
+            parts.append(name % d)
+    return ', '.join(parts) or 'no change'
+
+
 class App:
     def __init__(self, link, store, feeds, rt, inputs, log=print):
         self.link, self.store, self.feeds, self.rt, self.inputs, self.log = link, store, feeds, rt, inputs, log
@@ -1174,6 +1190,7 @@ class App:
         shown_osd = False
         next_save = now + 10
         next_stats = now + 15.0
+        audio_prev, audio_logged = None, 0.0
         try:
             start_feed(start_ms)
             while True:
@@ -1215,14 +1232,27 @@ class App:
                     start_feed(target)
                 # what the core says: the position, and whether a picture is on the screen
                 st = ring.status()
+                a = st['audio']
+                counters = (a['late'], a['silence'], a['underruns'], a['slip_drop'], a['slip_repeat'])
+                if audio_prev is None:
+                    audio_prev = counters
+                elif counters != audio_prev and now - audio_logged > 1.0:
+                    audio_logged = now
+                    delta = audio_delta(audio_prev, counters)
+                    audio_prev = counters
+                    lead = feed['feeder'].take_lead() if feed['feeder'] else {}
+                    self.log('AUDIO ISSUE at clock %s: %s; audio queued %d records, A/V offset %d; written ahead of the clock (min/mean ms): '
+                             'audio %s, video %s' % (ui.mmss(position['ms']), delta, a['queued'], signed32(a['offset']),
+                                                     lead.get('audio'), lead.get('video')))
                 if now >= next_stats:
                     next_stats = now + 15.0
-                    a = st['audio']
+                    lead = feed['feeder'].take_lead() if feed['feeder'] else {}
                     self.log('H264 core: clock %s, %d pictures, late %d, starved %d; audio queued %d, played %d, silence %d, late %d, underruns %d, '
-                             'A/V offset %d; fed %d pictures %d audio' % (
+                             'A/V offset %d; fed %d pictures %d audio; written ahead of the clock (min/mean ms): audio %s, video %s' % (
                                  ui.mmss(position['ms']), st['pictures_seen'], st['late'], st['starved'], a['queued'], a['played'],
-                                 a['silence'], a['late'], a['underruns'], a['offset'] - (1 << 32 if a['offset'] >> 31 else 0),
-                                 feed['feeder'].stats['au'] if feed['feeder'] else 0, feed['feeder'].stats['audio'] if feed['feeder'] else 0))
+                                 a['silence'], a['late'], a['underruns'], signed32(a['offset']),
+                                 feed['feeder'].stats['au'] if feed['feeder'] else 0, feed['feeder'].stats['audio'] if feed['feeder'] else 0,
+                                 lead.get('audio'), lead.get('video')))
                 if st['state'] == 5:
                     raise pipeline.PlaybackError('The H264 core stopped: ' + ring.state_text(st))
                 if st['state'] in (3, 4) and st['pictures_seen'] > 0:

@@ -63,6 +63,8 @@ class Feeder:
     def __init__(self, ring, video_cmd, audio_cmd=None, log=print, spawn=subprocess.Popen, clock=time.monotonic, duration_s=0):
         self.duration_s = duration_s              # the video's length: audio that ends before it is reopened where it stopped
         self.audio_restarts = 0
+        self.lead = {'audio': [None, 0, 0], 'video': [None, 0, 0]}   # how far ahead of the core's clock records were written: min ms, sum, count
+        self.stc = 0
         self.ring, self.video_cmd, self.audio_cmd, self.log, self.spawn, self.clock = ring, video_cmd, audio_cmd, log, spawn, clock
         self.procs = {}
         self.vq = queue.Queue(VIDEO_QUEUE)
@@ -219,6 +221,7 @@ class Feeder:
                 if self.clock() - polled > 0.04:
                     polled = self.clock()
                     stc = ring.status()['stc']
+                    self.stc = stc
                     horizon = (first[0] + START_AHEAD) if stc < first[0] - 2 * CLOCK else stc + AHEAD
                 if not v_done:
                     if v_next is _EMPTY:
@@ -226,6 +229,7 @@ class Feeder:
                     if v_next is not _EMPTY and v_held[0] <= horizon:      # now we know whether v_held is the last access unit
                         flags = hr.F_END_OF_STREAM if v_next is None else 0
                         if ring.try_write(hr.T_VIDEO_AU, v_held[1], v_held[0], flags):
+                            self._lead('video', v_held[0])
                             self.stats['au'] += 1
                             self.stats['video_bytes'] += len(v_held[1])
                             v_max = max(v_max, v_held[0])
@@ -243,6 +247,7 @@ class Feeder:
                         a_held = item
                 if a_held is not None and a_held[0] <= horizon and (a_held[0] <= v_max + AUDIO_LEAD or v_done):
                     if ring.try_write(hr.T_AUDIO, a_held[1], a_held[0]):
+                        self._lead('audio', a_held[0])
                         self.stats['audio'] += 1
                         a_held = None
                         progressed = True
@@ -256,6 +261,25 @@ class Feeder:
             return self._drain(stop, tick)
         finally:
             self.close()
+
+    def _lead(self, kind, pts):
+        """Note how far ahead of the core's clock a record was written (negative: it was already late when it went in)."""
+        if self.first_pts is None or self.stc < self.first_pts - 2 * CLOCK:
+            return                                             # the clock is not running on this timeline yet
+        ms = (pts - self.stc) // 90
+        rec = self.lead[kind]
+        rec[0] = ms if rec[0] is None else min(rec[0], ms)
+        rec[1] += ms
+        rec[2] += 1
+
+    def take_lead(self):
+        """-> {'audio': (min ms, mean ms) or None, 'video': ...} since the last call."""
+        out = {}
+        for kind in list(self.lead):
+            lo, total, n = self.lead[kind]
+            out[kind] = (lo, total // n) if n else None
+            self.lead[kind] = [None, 0, 0]
+        return out
 
     def _wait_first(self, stop, timeout):
         end = self.clock() + timeout
