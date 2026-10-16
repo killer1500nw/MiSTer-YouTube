@@ -1135,6 +1135,8 @@ class App:
                                 duration_s=media.duration)
             stop = threading.Event()
             f.crop = (14, 9) if state['crop'] == '14:9' else None          # only 14:9 is made in the stream; Fill and Off are the core's own setting
+            state['crop_core_mode'] = None
+            self._h264_crop(state['crop'])                                  # (a fresh stream starts with the crop at once)
             feed.update(feeder=f, stop=stop, result=None, error=None)
 
             def work():
@@ -1164,11 +1166,14 @@ class App:
             crops.pop(v['id'], None)
             crops[v['id']] = mode
             self.store.set('crops', dict(list(crops.items())[-200:]))
-            self._h264_crop(mode)
             state['note'] = 'Crop: ' + mode
-            if (mode == '14:9') != (previous == '14:9'):
-                # 14:9 is a rewritten sequence header: it applies from the next keyframe, so start the picture again here
-                state.update(pending=position['ms'], pending_at=now, note='Applying crop...')
+            if '14:9' in (mode, previous) and feed['feeder'] is not None:
+                # 14:9 is a rewritten sequence header: it shows from the next keyframe after what is already queued. No restart: the
+                # core's own aspect is changed at the same moment (see the loop), so the shape never goes wrong in between.
+                feed['feeder'].set_crop((14, 9) if mode == '14:9' else None)
+                state['crop_core_mode'] = mode
+            else:
+                self._h264_crop(mode)                                      # Fill <-> Off: the core's own setting, at once
 
         def more_key(act, now):
             m = state['more']
@@ -1264,6 +1269,13 @@ class App:
                                  lead.get('audio'), lead.get('video')))
                 if st['state'] == 5:
                     raise pipeline.PlaybackError('The H264 core stopped: ' + ring.state_text(st))
+                f = feed['feeder']
+                if (state.get('crop_core_mode') and f is not None and f.crop_switch_pts is not None
+                        and st['stc'] >= f.crop_switch_pts):
+                    self._h264_crop(state['crop_core_mode'])               # the keyframe with the new crop is on the screen now
+                    self.log('Crop %s shown from %s' % (state['crop_core_mode'], ui.mmss(st['stc'] // 90)))
+                    state['crop_core_mode'] = None
+                    f.crop_switch_pts = None
                 if st['state'] in (3, 4) and st['pictures_seen'] > 0:
                     position['ms'] = min(dur_ms or 1 << 60, st['stc'] // 90)
                     if loading is not None:

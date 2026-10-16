@@ -72,6 +72,8 @@ class Feeder:
         self.duration_s = duration_s              # the video's length: audio that ends before it is reopened where it stopped
         self.audio_restarts = 0
         self.crop = None                          # (num, den): crop the picture to this shape by rewriting the stream's sequence header
+        self.crop_gen = 0                         # bumped by set_crop; the first keyframe after it carries the new crop
+        self.crop_switch_pts = None               # the time stamp of that keyframe: the picture changes shape when the core's clock gets there
         self.lead = {'audio': [None, 0, 0], 'video': [None, 0, 0]}   # how far ahead of the core's clock records were written: min ms, sum, count
         self.stc = 0
         self.ring, self.video_cmd, self.audio_cmd, self.log, self.spawn, self.clock = ring, video_cmd, audio_cmd, log, spawn, clock
@@ -110,8 +112,15 @@ class Feeder:
                 continue
         return False
 
+    def set_crop(self, aspect):
+        """Change the crop of the pictures still to come, with no restart: it shows from the next keyframe (see crop_switch_pts)."""
+        self.crop = aspect
+        self.crop_gen += 1
+        self.crop_switch_pts = None
+
     def _read_video(self, proc):
         demux = TsVideo()
+        seen = self.crop_gen
         try:
             while not self.stopping.is_set():
                 data = proc.stdout.read(188 * 128)
@@ -120,6 +129,9 @@ class Feeder:
                 for pts, dts, au in demux.feed(data):
                     if pts is None:
                         continue
+                    if seen != self.crop_gen and h264sps.SPS_START.search(au) is not None:
+                        seen = self.crop_gen                  # a keyframe: the new crop starts here
+                        self.crop_switch_pts = pts
                     if self.crop is not None:
                         au = h264sps.crop_access_unit(au, self.crop)
                     if not self._put(self.vq, (pts, au)):

@@ -2796,6 +2796,61 @@ class H264Feeder(unittest.TestCase):
             elif r[0] == 2 and newest_audio is not None and r[4] + 54000 <= audios[-1][4]:
                 self.assertGreaterEqual(newest_audio, r[4] + 54000)
 
+    def test_a_crop_change_takes_effect_at_the_next_keyframe_without_a_restart(self):
+        import io
+        import threading
+        from ytcrt import h264feed, h264sps
+        sps = SpsCropping.S480
+        key = bytes([0, 0, 0, 1, 9, 0xF0, 0, 0, 0, 1]) + sps + bytes([0, 0, 0, 1, 0x65, 0x88, 0x84])
+        plain = bytes([0, 0, 0, 1, 9, 0xF0, 0, 0, 0, 1, 0x41, 0x9A, 0x24, 0x6C])
+        units = [(i * 3750, i * 3750, key if i in (0, 4) else plain) for i in range(8)]
+        whole = self.ts.stream(units)
+        split = len(self.ts.stream(units[:4]))            # the stream up to the second keyframe, then the rest
+        release = threading.Event()
+
+        class TwoParts:
+            def __init__(self):
+                self.stdout, self.stderr = self, io.BytesIO(b'')
+                self.calls = 0
+
+            def read(self, n):
+                self.calls += 1
+                if self.calls == 1:
+                    return whole[:split]
+                if self.calls == 2:
+                    release.wait(5)
+                    return whole[split:]
+                return b''
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+        ring = self.ring_test.make()
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], None, log=lambda m: None, spawn=lambda cmd, **kw: TwoParts())
+        feeder.start(0)
+        got = [feeder.vq.get(timeout=5) for _ in range(3)]          # the first keyframe and two more pictures, as they were
+        feeder.set_crop((14, 9))                                     # now the viewer picks 14:9
+        self.assertIsNone(feeder.crop_switch_pts)
+        release.set()
+        rest = []
+        while True:
+            item = feeder.vq.get(timeout=5)
+            if item is None:
+                break
+            rest.append(item)
+
+        def width(au):
+            start = au.find(bytes([0, 0, 1, 0x67]))
+            end = au.find(bytes([0, 0, 0, 1, 0x65]), start)
+            return h264sps.visible(h264sps.parse(au[start + 3:end]))[0]
+        self.assertEqual(width(got[0][1]), 854)                      # the keyframe already queued keeps its header
+        keyframes = [au for pts, au in rest if pts == 4 * 3750]
+        self.assertEqual(width(keyframes[0]), 744)                   # the next keyframe carries 14:9
+        self.assertEqual(feeder.crop_switch_pts, 4 * 3750)           # and says when the picture changes shape
+        feeder.close()
+
     def test_14_9_rewrites_the_sequence_header_of_the_pictures_it_writes(self):
         from ytcrt import h264feed, h264sps
         sps = SpsCropping.S480
