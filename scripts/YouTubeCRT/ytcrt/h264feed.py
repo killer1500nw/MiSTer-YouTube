@@ -13,6 +13,7 @@ import threading
 import time
 
 from . import h264ring as hr
+from . import h264sps
 from .tsdemux import TsVideo
 
 CLOCK = 90000
@@ -70,6 +71,7 @@ class Feeder:
     def __init__(self, ring, video_cmd, audio_cmd=None, log=print, spawn=subprocess.Popen, clock=time.monotonic, duration_s=0):
         self.duration_s = duration_s              # the video's length: audio that ends before it is reopened where it stopped
         self.audio_restarts = 0
+        self.crop = None                          # (num, den): crop the picture to this shape by rewriting the stream's sequence header
         self.lead = {'audio': [None, 0, 0], 'video': [None, 0, 0]}   # how far ahead of the core's clock records were written: min ms, sum, count
         self.stc = 0
         self.ring, self.video_cmd, self.audio_cmd, self.log, self.spawn, self.clock = ring, video_cmd, audio_cmd, log, spawn, clock
@@ -118,6 +120,8 @@ class Feeder:
                 for pts, dts, au in demux.feed(data):
                     if pts is None:
                         continue
+                    if self.crop is not None:
+                        au = h264sps.crop_access_unit(au, self.crop)
                     if not self._put(self.vq, (pts, au)):
                         return
             for pts, dts, au in demux.flush():

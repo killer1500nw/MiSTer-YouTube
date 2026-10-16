@@ -1102,7 +1102,7 @@ class App:
     def _h264_crop(self, mode):
         """Fill / 14:9 / Off -> the core's Analog Aspect (3 Crop, 2 Letterbox). The core has no 14:9: it shows Fill instead."""
         try:
-            self.link.ring.request_settings(analog_aspect=2 if mode == 'Off' else 3)
+            self.link.ring.request_settings(analog_aspect=3 if mode == 'Fill' else 2)        # 14:9 is cut in the stream, then letterboxed
         except Exception as exc:
             self.log('Could not change the core\'s aspect: %s' % exc)
 
@@ -1134,6 +1134,7 @@ class App:
                                 (lambda s: h264feed.audio_pcm_command(self.rt, media.audio, s)) if media.audio else None, log=self.log,
                                 duration_s=media.duration)
             stop = threading.Event()
+            f.crop = (14, 9) if state['crop'] == '14:9' else None          # only 14:9 is made in the stream; Fill and Off are the core's own setting
             feed.update(feeder=f, stop=stop, result=None, error=None)
 
             def work():
@@ -1157,6 +1158,7 @@ class App:
         def set_crop(mode, now):
             if mode == state['crop']:
                 return
+            previous = state['crop']
             state['crop'] = mode
             crops = dict(self.store.settings.get('crops', {}))
             crops.pop(v['id'], None)
@@ -1164,6 +1166,9 @@ class App:
             self.store.set('crops', dict(list(crops.items())[-200:]))
             self._h264_crop(mode)
             state['note'] = 'Crop: ' + mode
+            if (mode == '14:9') != (previous == '14:9'):
+                # 14:9 is a rewritten sequence header: it applies from the next keyframe, so start the picture again here
+                state.update(pending=position['ms'], pending_at=now, note='Applying crop...')
 
         def more_key(act, now):
             m = state['more']

@@ -2796,6 +2796,33 @@ class H264Feeder(unittest.TestCase):
             elif r[0] == 2 and newest_audio is not None and r[4] + 54000 <= audios[-1][4]:
                 self.assertGreaterEqual(newest_audio, r[4] + 54000)
 
+    def test_14_9_rewrites_the_sequence_header_of_the_pictures_it_writes(self):
+        from ytcrt import h264feed, h264sps
+        sps = SpsCropping.S480
+        keyframe = bytes([0, 0, 0, 1, 9, 0xF0, 0, 0, 0, 1]) + sps + bytes([0, 0, 0, 1, 0x65, 0x88, 0x84, 0x10, 0x20])
+        plain = bytes([0, 0, 0, 1, 9, 0xF0, 0, 0, 0, 1, 0x41, 0x9A, 0x24, 0x6C])
+        ring = self.ring_test.make()
+        self.ring_test.words[8] = 3
+        ring.new_session()
+        video_bytes = self.ts.stream([(0, 0, keyframe)] + [(i * 3750, i * 3750, plain) for i in range(1, 6)])
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], None, log=lambda m: None, spawn=lambda cmd, **kw: self.Proc(video_bytes))
+        feeder.crop = (14, 9)
+        feeder.start(0)
+        done = []
+
+        def tick():
+            self.ring_test.words[14] = min(feeder.last_pts, (1 << 32) - 1)
+            if feeder.stats['au'] == 6 and not done:
+                done.append(1)
+                self.ring_test.words[8] = 4
+        self.assertEqual(feeder.run(stop=lambda: False, tick=tick, first_timeout=5.0), 'ended')
+        first = [r for r in self.records(ring) if r[0] == 2][0]
+        written = bytes(self.ring_test.region[self.ring_test.hr.RING_OFFSET + 0:self.ring_test.hr.RING_OFFSET + 16 + first[3]][16:])
+        start = written.find(bytes([0, 0, 1, 0x67]))
+        sps_out = written[start + 3:written.find(bytes([0, 0, 0, 1, 0x65]))]
+        self.assertEqual(h264sps.visible(h264sps.parse(sps_out))[0], 744)       # the 854-wide picture is now 14:9 (744 x 480)
+        self.assertTrue(written.endswith(bytes([0, 0, 0, 1, 0x65, 0x88, 0x84, 0x10, 0x20])))     # the picture itself is untouched
+
     def test_audio_that_ends_early_is_reopened_where_it_stopped_and_stays_in_step(self):
         from ytcrt import h264feed
         ring = self.ring_test.make()
@@ -3103,6 +3130,72 @@ class H264Overlay(unittest.TestCase):
         self.assertEqual((box.read(48) >> 16) & 0xFFFF, (1 << 9) | 0x1C)
         self.assertEqual(box.read(52) >> 16, 2)                 # the sequence number the player's input code watches
         self.assertEqual(box.read(44), 0)
+
+
+class SpsCropping(unittest.TestCase):
+    """Cropping an H.264 stream by rewriting its sequence parameter set, tried on headers taken from real YouTube videos."""
+    S480 = bytes.fromhex('674d401ee8806c1ef3780b5010101400000fa40002ee003c58b448')            # 854x480, itag 135 (Limp Bizkit)
+    S720 = bytes.fromhex('674d401fe8802802dd80b5010101400000fa40002ee003c60c4480')            # 1280x720, itag 136
+    S3 = bytes.fromhex('674d401fe8806c1ef3780b50101014000003000400000300f03c60c448')          # 854x480 with 0x03 escape bytes in it
+
+    def tail_bits(self, info):
+        r = info['rbsp']
+        return [(r[p >> 3] >> (7 - (p & 7))) & 1 for p in range(info['vui_bit'], info['stop_bit'] + 1)]
+
+    def test_the_sizes_and_the_existing_crop_of_real_headers_are_read(self):
+        from ytcrt import h264sps
+        info = h264sps.parse(self.S480)
+        self.assertEqual((info['width'], info['height']), (864, 480))      # coded in whole macroblocks ...
+        self.assertEqual(h264sps.visible(info), (854, 480))                # ... with 10 columns cropped away by the stream itself
+        self.assertEqual(h264sps.visible(h264sps.parse(self.S720)), (1280, 720))
+        self.assertEqual(h264sps.visible(h264sps.parse(self.S3)), (854, 480))      # (the escape bytes are handled)
+
+    def test_the_visible_picture_is_cut_to_the_wanted_shape_and_the_rest_of_the_header_is_untouched(self):
+        from ytcrt import h264sps
+        for sps, wide, high in ((self.S480, 854, 480), (self.S720, 1280, 720), (self.S3, 854, 480)):
+            before = h264sps.parse(sps)
+            for aspect, ratio in (((4, 3), 4 / 3.0), ((14, 9), 14 / 9.0)):
+                new = h264sps.crop_to(sps, aspect)
+                after = h264sps.parse(new)
+                vw, vh = h264sps.visible(after)
+                self.assertEqual(vh, high)                                  # the height is not touched
+                self.assertLessEqual(vw, int(high * ratio))                 # no wider than asked ...
+                self.assertGreater(vw, int(high * ratio) - 8)               # ... and not much narrower
+                self.assertEqual(vw % 4, 0)
+                self.assertEqual(self.tail_bits(after), self.tail_bits(before))      # the VUI after the crop fields is identical, bit for bit
+                self.assertEqual((after['width'], after['height']), (before['width'], before['height']))
+        self.assertEqual(h264sps.visible(h264sps.parse(h264sps.crop_to(self.S480, (4, 3)))), (640, 480))
+        self.assertEqual(h264sps.visible(h264sps.parse(h264sps.crop_to(self.S720, (4, 3)))), (960, 720))
+
+    def test_a_picture_already_that_narrow_is_left_alone_and_cropping_twice_changes_nothing_more(self):
+        from ytcrt import h264sps
+        once = h264sps.crop_to(self.S480, (4, 3))
+        self.assertEqual(h264sps.crop_to(once, (4, 3)), once)
+        self.assertEqual(h264sps.crop_to(once, (14, 9)), once)               # 4:3 is narrower than 14:9: not widened
+        self.assertEqual(h264sps.crop_to(bytes([0x65, 0x88, 0x84]), (4, 3)), bytes([0x65, 0x88, 0x84]))        # not an SPS: unchanged
+
+    def test_escaping_round_trips(self):
+        from ytcrt import h264sps
+        raw = bytes([0, 0, 0, 0, 1, 0, 0, 2, 0, 0, 3, 5, 0, 0])
+        self.assertEqual(h264sps.unescape(h264sps.escape(raw)), raw)
+        self.assertNotIn(bytes([0, 0, 0]), h264sps.escape(raw))
+
+    def test_only_the_sps_of_an_access_unit_changes(self):
+        from ytcrt import h264sps
+        aud = bytes([0, 0, 0, 1, 9, 0xF0])
+        pps = bytes([0, 0, 0, 1, 0x68, 0xEE, 0x3C, 0x80])
+        slice_ = bytes([0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0x1F, 0xFF, 0xAA])
+        au = aud + bytes([0, 0, 0, 1]) + self.S480 + pps + slice_
+        out = h264sps.crop_access_unit(au, (4, 3))
+        self.assertTrue(out.startswith(aud + bytes([0, 0, 0, 1])))
+        self.assertTrue(out.endswith(pps + slice_))                          # the parameter set and the picture are exactly as they were
+        self.assertNotEqual(out, au)
+        start = len(aud) + 4
+        sps_out = out[start:len(out) - len(pps) - len(slice_)]
+        self.assertEqual(h264sps.visible(h264sps.parse(sps_out)), (640, 480))
+        plain = aud + slice_
+        self.assertIs(h264sps.crop_access_unit(plain, (4, 3)), plain)        # no SPS (most access units): returned as it is
+        self.assertIs(h264sps.crop_access_unit(au, None), au)
 
 
 class CpuLog(unittest.TestCase):
