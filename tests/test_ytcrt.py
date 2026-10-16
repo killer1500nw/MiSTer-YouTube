@@ -2895,6 +2895,60 @@ class H264Feeder(unittest.TestCase):
         self.assertEqual(got['video'], (1000, 1000))
         self.assertEqual(feeder.take_lead(), {'audio': None, 'video': None})
 
+    def audio_feeder(self, audio_results, duration=10):
+        """A feeder with ten seconds of video whose audio processes give `audio_results` in turn (bytes, or b'' for a crash)."""
+        from ytcrt import h264feed
+        ring = self.ring_test.make()
+        self.ring_test.words[8] = 3
+        ring.new_session()
+        au = bytes([0, 0, 0, 1, 9, 0xF0]) + bytes(50)
+        units = [(i * 90000, i * 90000, au) for i in range(10)]
+        video_bytes = self.ts.stream(units)
+        starts, results = [], list(audio_results)
+
+        def spawn(cmd, **kw):
+            if cmd[0] == 'V':
+                return self.Proc(video_bytes)
+            starts.append(cmd[1])
+            return self.Proc(results.pop(0) if results else b'')
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], lambda s: ['A', s], log=lambda m: None, spawn=spawn, duration_s=duration)
+        feeder.start(0)
+        done = []
+
+        def tick():
+            self.ring_test.words[14] = min(feeder.last_pts, (1 << 32) - 1)
+            if feeder.stats['au'] == len(units) and not done:
+                done.append(1)
+                self.ring_test.words[8] = 4
+        return ring, feeder, starts, feeder.run(stop=lambda: False, tick=tick, first_timeout=5.0)
+
+    def test_audio_that_crashes_where_it_starts_is_tried_a_little_later(self):
+        import time as real_time
+        from ytcrt import h264feed
+        saved = real_time.sleep
+        real_time.sleep = lambda s: None
+        try:
+            ring, feeder, starts, result = self.audio_feeder([b'', bytes(4 * 48000 * 9)])
+        finally:
+            real_time.sleep = saved
+        self.assertEqual(result, 'ended')
+        self.assertEqual([round(s, 1) for s in starts], [0.0, 1.2])           # the crash at 0.0, then 1.2 s later
+        pts = [r[4] for r in self.records(ring) if r[0] == 3]
+        self.assertEqual(pts[0], int(1.2 * 90000))                             # the sound starts at the position that worked
+        self.assertEqual(feeder.audio_restarts, 0)                             # (a crash at the start is not an 'ended early')
+
+    def test_audio_that_cannot_start_anywhere_is_given_up_not_retried_for_ever(self):
+        import time as real_time
+        saved = real_time.sleep
+        real_time.sleep = lambda s: None
+        try:
+            ring, feeder, starts, result = self.audio_feeder([])
+        finally:
+            real_time.sleep = saved
+        self.assertEqual(result, 'ended')                                      # the picture plays on without sound
+        self.assertEqual(len(starts), 1 + 4)                                   # the start and the four nudges, then it stops trying
+        self.assertEqual([r for r in self.records(ring) if r[0] == 3], [])
+
     def test_a_video_that_never_arrives_is_reported(self):
         from ytcrt import h264feed
         ring = self.ring_test.make()

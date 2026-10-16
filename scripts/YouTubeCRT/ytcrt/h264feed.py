@@ -19,6 +19,8 @@ CLOCK = 90000
 AUDIO_CHUNK_FRAMES = 4800                  # 100 ms: 256 records of 20 ms would be only 5 s of the ring
 AUDIO_LEAD = CLOCK                         # write audio only up to one second ahead of the newest video written
 AHEAD = 8 * CLOCK                          # nothing is written more than 8 s ahead of what the core is playing (YouTube resets a connection that sits idle)
+AUDIO_NUDGES = (1.2, 3.0, -2.0, 6.0)         # where to try again (seconds from the start that crashed): this ffmpeg build segfaults when it seeks to
+                                           # certain positions of a stream, and a second further on works
 AUDIO_START_WAIT = 12.0                    # seconds to wait for the first sound before starting the picture without it
 START_AHEAD = 3 * CLOCK                    # ... or, before the core's clock runs, 3 s past the first picture
 VIDEO_QUEUE = 90
@@ -122,35 +124,55 @@ class Feeder:
             self._put(self.vq, None)                     # the end
 
     def _read_audio(self, proc, start_pts):
-        frames = 0
+        frames = 0                                   # frames read from the process now running
         buf = bytearray()
         want = AUDIO_CHUNK_FRAMES * 4
+        failures, fail_base = 0, None
         try:
             while not self.stopping.is_set():
                 data = proc.stdout.read(want)
-                if not data:
-                    end_s = (start_pts + frames * CLOCK // 48000) / float(CLOCK)
-                    if (self.duration_s and end_s < self.duration_s - 3.0 and self.audio_restarts < self.AUDIO_RESTARTS
-                            and not self.stopping.is_set()):
-                        # YouTube's audio connection can end early (exit 0, a few seconds before the end): carry on from there
-                        self.audio_restarts += 1
-                        self.log('The audio ended early at %.1f s of %d; reopening it there (%d)' % (end_s, self.duration_s, self.audio_restarts))
-                        try:
-                            proc.kill()
-                        except (OSError, AttributeError):
-                            pass
-                        proc = self._spawn('audio', self.audio_cmd(end_s))
-                        buf.clear()
-                        start_pts, frames = int(end_s * CLOCK), 0
-                        continue
+                if data:
+                    failures, fail_base = 0, None
+                    buf += data
+                    while len(buf) >= want:
+                        pts = start_pts + frames * CLOCK // 48000
+                        if not self._put(self.aq, (pts, bytes(buf[:want]))):
+                            return
+                        del buf[:want]
+                        frames += AUDIO_CHUNK_FRAMES
+                    continue
+                end_s = (start_pts + frames * CLOCK // 48000) / float(CLOCK)
+                if self.stopping.is_set():
                     break
-                buf += data
-                while len(buf) >= want:
-                    pts = start_pts + frames * CLOCK // 48000
-                    if not self._put(self.aq, (pts, bytes(buf[:want]))):
-                        return
-                    del buf[:want]
-                    frames += AUDIO_CHUNK_FRAMES
+                try:
+                    code = proc.wait(timeout=1)
+                except Exception:
+                    code = '?'
+                if frames == 0 and not buf:
+                    # It produced nothing at all: ffmpeg crashes at some seek positions. Try a little before or after instead.
+                    failures += 1
+                    fail_base = end_s if fail_base is None else fail_base
+                    if failures > len(AUDIO_NUDGES):
+                        self.log('The audio cannot be started near %.1f s (ffmpeg exit %s); playing without it' % (fail_base, code))
+                        break
+                    target = max(0.0, fail_base + AUDIO_NUDGES[failures - 1])
+                    self.log('The audio cannot start at %.1f s (ffmpeg exit %s); trying %.1f s (%d of %d)' % (
+                        end_s, code, target, failures, len(AUDIO_NUDGES)))
+                    time.sleep(0.3)
+                elif (self.duration_s and end_s < self.duration_s - 3.0 and self.audio_restarts < self.AUDIO_RESTARTS):
+                    # YouTube's audio connection can end early (exit 0, a few seconds before the end): carry on from there
+                    self.audio_restarts += 1
+                    target = end_s
+                    self.log('The audio ended early at %.1f s of %d; reopening it there (%d)' % (end_s, self.duration_s, self.audio_restarts))
+                else:
+                    break
+                try:
+                    proc.kill()
+                except (OSError, AttributeError):
+                    pass
+                proc = self._spawn('audio', self.audio_cmd(target))
+                buf.clear()
+                start_pts, frames = int(target * CLOCK), 0
             tail = len(buf) - len(buf) % 4
             if tail > 0 and not self.stopping.is_set():
                 self._put(self.aq, (start_pts + frames * CLOCK // 48000, bytes(buf[:tail])))

@@ -1284,6 +1284,16 @@ class App:
                     exc = feed['error']
                     feed['error'] = None
                     msg = str(exc)
+                    if ('before the first picture' in msg or 'No video arrived' in msg) and state.get('early', 0) < len(EARLY_NUDGES_MS):
+                        # ffmpeg crashes at certain seek positions: start a little before or after instead
+                        state['early_base'] = state.get('early_base', position['ms'])
+                        at = max(0, state['early_base'] + EARLY_NUDGES_MS[state['early']])
+                        state['early'] += 1
+                        self.log('The video cannot start at %s (%s); trying %s (%d of %d)' % (
+                            ui.mmss(state['early_base']), ' | '.join(msg.splitlines())[:100], ui.mmss(at), state['early'], len(EARLY_NUDGES_MS)))
+                        state.update(note='Reconnecting...', osd_until=now + OSD_SECONDS + 3)
+                        start_feed(at)
+                        continue
                     if '403' in msg and not state.get('retried_403'):
                         state['retried_403'] = True
                         self.log('YouTube refused the stream (403); asking for fresh stream URLs')
