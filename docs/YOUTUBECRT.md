@@ -71,9 +71,11 @@ The player can run on a second core, the **MiSTer H264 core** by owenb321
 a separate project that is not part of this repository). It decodes H.264 in the FPGA, so the ARM only repackages the video and decodes
 the sound. That frees the ARM completely (about 5% of one core during playback) and allows sharper pictures than the ARM can decode.
 
-**Install.** Download the core's zip from its releases page and extract it to the SD card root (it adds `_Other/H264_*.rbf` and its own
-programs). Run this player's `Install_YouTube_CRT.sh` again: it adds **Other → YouTube (H264)** (a `.mgl` file in `_Other`). If that entry
-does not show up, `Scripts → YouTubeCRT → YouTube_H264` loads the core. Load it, and the YouTube menu appears over the core's picture.
+**Install.** Run **Scripts → YouTubeCRT → Install_H264_Core**. It downloads the one file the player needs (`H264_20261014.rbf`, 4.4 MB) from
+the author's release page, checks it against the checksum published there, puts it in `_Other` and adds **Other → YouTube (H264)** (a `.mgl`
+file). Nothing of the core is part of this player's own release. (You can also install the author's whole zip by hand, then run
+`Install_YouTube_CRT.sh` again to add the menu entry.) If the entry does not show up, `Scripts → YouTubeCRT → YouTube_H264` loads the
+core. Load it, and the YouTube menu appears over the core's picture.
 Do not run the H264 core's own video player at the same time: only one program can feed the core.
 
 **What is different.**
