@@ -2823,6 +2823,58 @@ class H264Feeder(unittest.TestCase):
         pts = [r[4] for r in recs if r[0] == 3]
         self.assertEqual(pts, [i * 9000 for i in range(100)])             # 100 ms apart across the join: nothing missing, nothing doubled
 
+    def test_nothing_is_written_until_the_first_sound_is_ready(self):
+        import io
+        import threading
+        from ytcrt import h264feed
+        ring = self.ring_test.make()
+        self.ring_test.words[8] = 3
+        ring.new_session()
+        au = bytes([0, 0, 0, 1, 9, 0xF0]) + bytes(50)
+        units = [(i * 3750, i * 3750, au) for i in range(6)]
+        video_bytes = self.ts.stream(units)
+        release = threading.Event()
+
+        class SlowAudio:
+            def __init__(self):
+                self.stdout, self.stderr = self, io.BytesIO(b'')
+                self.given = False
+
+            def read(self, n):
+                release.wait(5)                             # the audio ffmpeg is still connecting
+                if self.given:
+                    return b''
+                self.given = True
+                return bytes(19200)
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        def spawn(cmd, **kw):
+            return self.Proc(video_bytes) if cmd[0] == 'V' else SlowAudio()
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], lambda s: ['A', s], log=lambda m: None, spawn=spawn)
+        feeder.start(0)
+        result = []
+
+        def tick():
+            self.ring_test.words[14] = min(feeder.last_pts, (1 << 32) - 1)
+            if feeder.stats['au'] == len(units) and not result:
+                result.append(1)
+                self.ring_test.words[8] = 4
+        worker = threading.Thread(target=lambda: result.append(feeder.run(stop=lambda: False, tick=tick, first_timeout=5.0)), daemon=True)
+        worker.start()
+        import time as _t
+        _t.sleep(0.5)
+        self.assertEqual(ring.sent['au'] + ring.sent['audio'], 0)          # the picture is waiting for the sound
+        release.set()
+        worker.join(5)
+        recs = self.records(ring)
+        self.assertEqual([r[0] for r in recs[:2]].count(3), 1)             # the first sound went in with the first pictures
+        self.assertEqual(feeder.stats['au'], 6)
+
     def test_a_video_that_never_arrives_is_reported(self):
         from ytcrt import h264feed
         ring = self.ring_test.make()

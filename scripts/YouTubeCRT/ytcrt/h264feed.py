@@ -19,6 +19,7 @@ CLOCK = 90000
 AUDIO_CHUNK_FRAMES = 4800                  # 100 ms: 256 records of 20 ms would be only 5 s of the ring
 AUDIO_LEAD = CLOCK                         # write audio only up to one second ahead of the newest video written
 AHEAD = 8 * CLOCK                          # nothing is written more than 8 s ahead of what the core is playing (YouTube resets a connection that sits idle)
+AUDIO_START_WAIT = 12.0                    # seconds to wait for the first sound before starting the picture without it
 START_AHEAD = 3 * CLOCK                    # ... or, before the core's clock runs, 3 s past the first picture
 VIDEO_QUEUE = 90
 AUDIO_QUEUE = 40
@@ -193,6 +194,25 @@ class Feeder:
             self._start_audio(first[0])
             v_held, v_next, v_max, v_done = first, _EMPTY, first[0], False
             a_held, a_eof = None, False
+            # The picture starts the core's clock; sound that turns up afterwards is late and the core drops it. So nothing is written
+            # until the first sound is ready (its ffmpeg needs a few seconds to connect), and then both start together.
+            if self.audio_cmd is not None:
+                waited = self.clock()
+                while not stop():
+                    item = self._get(self.aq)
+                    if item is None:
+                        a_eof = True
+                        break
+                    if item is not _EMPTY:
+                        a_held = item
+                        break
+                    if self.clock() - waited > AUDIO_START_WAIT:
+                        self.log('No sound within %.0f s; starting the picture without it' % AUDIO_START_WAIT)
+                        break
+                    tick()
+                    ring.wait(0.01)
+                else:
+                    return 'stopped'
             horizon, polled = first[0] + START_AHEAD, 0.0
             while not stop():
                 progressed = False
