@@ -3011,6 +3011,13 @@ class H264Streams(unittest.TestCase):
         self.assertIn("next_quality(state['quality'], step)", old)
         self.assertNotIn('h264=True', old)
 
+    def test_a_pause_press_before_the_first_picture_is_ignored(self):
+        import inspect
+        from ytcrt import app as appmod
+        src = inspect.getsource(appmod.App._h264_loop)
+        self.assertIn("elif act == 'ok' and loading is not None:", src)
+        self.assertLess(src.index("elif act == 'ok' and loading is not None:"), src.index("ring.set_pause(state['paused'])"))
+
     def test_leaving_a_video_flushes_what_the_core_has_queued(self):
         import inspect
         from ytcrt import app as appmod

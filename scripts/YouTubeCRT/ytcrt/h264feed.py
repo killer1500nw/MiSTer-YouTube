@@ -23,12 +23,12 @@ AUDIO_LEAD = CLOCK                         # write audio only up to one second a
 AHEAD = 8 * CLOCK                          # nothing is written more than 8 s ahead of what the core is playing (YouTube resets a connection that sits idle)
 AUDIO_NUDGES = (1.2, 3.0, -2.0, 6.0)         # where to try again (seconds from the start that crashed): this ffmpeg build segfaults when it seeks to
                                            # certain positions of a stream, and a second further on works
-AUDIO_START_WAIT = 12.0                    # seconds to wait for the first sound before starting the picture without it
+AUDIO_START_WAIT = 10.0                    # seconds to wait for the first sound before starting the picture without it
 START_AHEAD = 3 * CLOCK                    # ... or, before the core's clock runs, 3 s past the first picture
 VIDEO_QUEUE = 220                          # access units held between ffmpeg and the writer (7 s at 30 fps)
-VIDEO_PREROLL_S = 4.0                      # seconds of picture to have in hand before the start (judged by time stamps, not by count)
+VIDEO_PREROLL_S = 3.0                      # seconds of picture to have in hand before the start (judged by time stamps, not by count)
 AUDIO_QUEUE = 60
-AUDIO_PREROLL = 40                         # chunks (4 s) of sound to have in hand before the picture starts: YouTube serves audio at only about
+AUDIO_PREROLL = 30                         # chunks (4 s) of sound to have in hand before the picture starts: YouTube serves audio at only about
                                            # twice real time after its first burst, and a start with almost nothing buffered drops sound
 
 

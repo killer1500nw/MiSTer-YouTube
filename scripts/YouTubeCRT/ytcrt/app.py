@@ -1211,6 +1211,8 @@ class App:
                     if dur_ms:
                         target = min(target, max(0, dur_ms - 2000))
                     state.update(pending=target, pending_at=now, osd_until=now + OSD_SECONDS, note=('>> ' if d > 0 else '<< ') + ui.mmss(target))
+                elif act == 'ok' and loading is not None:
+                    pass                                   # nothing to pause yet: a pause now would hold the core before its first picture
                 elif act == 'ok':
                     state['paused'] = not state['paused']
                     ring.set_pause(state['paused'])
