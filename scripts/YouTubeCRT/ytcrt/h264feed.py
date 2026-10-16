@@ -17,6 +17,8 @@ from .tsdemux import TsVideo
 
 CLOCK = 90000
 AUDIO_CHUNK_FRAMES = 4800                  # 100 ms: 256 records of 20 ms would be only 5 s of the ring
+AUDIO_RUNWAY = int(0.6 * CLOCK)               # the sound is written at least this far ahead of the picture it goes with (and at most AUDIO_LEAD):
+                                           # the core reads the ring in order, and sound that sits right behind its picture reaches it too late
 AUDIO_LEAD = CLOCK                         # write audio only up to one second ahead of the newest video written
 AHEAD = 8 * CLOCK                          # nothing is written more than 8 s ahead of what the core is playing (YouTube resets a connection that sits idle)
 AUDIO_NUDGES = (1.2, 3.0, -2.0, 6.0)         # where to try again (seconds from the start that crashed): this ffmpeg build segfaults when it seeks to
@@ -24,7 +26,9 @@ AUDIO_NUDGES = (1.2, 3.0, -2.0, 6.0)         # where to try again (seconds from 
 AUDIO_START_WAIT = 12.0                    # seconds to wait for the first sound before starting the picture without it
 START_AHEAD = 3 * CLOCK                    # ... or, before the core's clock runs, 3 s past the first picture
 VIDEO_QUEUE = 90
-AUDIO_QUEUE = 40
+AUDIO_QUEUE = 60
+AUDIO_PREROLL = 40                         # chunks (4 s) of sound to have in hand before the picture starts: YouTube serves audio at only about
+                                           # twice real time after its first burst, and a start with almost nothing buffered drops sound
 
 
 def _input_args(rt, source, kind):
@@ -220,24 +224,26 @@ class Feeder:
             a_held, a_eof = None, False
             # The picture starts the core's clock; sound that turns up afterwards is late and the core drops it. So nothing is written
             # until the first sound is ready (its ffmpeg needs a few seconds to connect), and then both start together.
+            audio_slow = False
             if self.audio_cmd is not None:
                 waited = self.clock()
                 while not stop():
-                    item = self._get(self.aq)
-                    if item is None:
-                        a_eof = True
-                        break
-                    if item is not _EMPTY:
-                        a_held = item
-                        break
+                    queued = list(self.aq.queue)
+                    if len(queued) >= AUDIO_PREROLL or (queued and queued[-1] is None):
+                        break                                       # enough sound in hand, or all of it (a short clip)
                     if self.clock() - waited > AUDIO_START_WAIT:
-                        self.log('No sound within %.0f s; starting the picture without it' % AUDIO_START_WAIT)
+                        self.log('Only %d of %d sound chunks within %.0f s; starting the picture now' % (
+                            len([q for q in queued if q is not None]), AUDIO_PREROLL, AUDIO_START_WAIT))
+                        audio_slow = True
                         break
                     tick()
                     ring.wait(0.01)
                 else:
                     return 'stopped'
             horizon, polled = first[0] + START_AHEAD, 0.0
+            a_max, audio_optional = None, self.audio_cmd is None            # the newest sound written; True when the picture need not wait for sound
+            if self.audio_cmd is not None and a_eof:
+                audio_optional = True
             while not stop():
                 progressed = False
                 if self.clock() - polled > 0.04:
@@ -248,7 +254,10 @@ class Feeder:
                 if not v_done:
                     if v_next is _EMPTY:
                         v_next = self._get(self.vq)
-                    if v_next is not _EMPTY and v_held[0] <= horizon:      # now we know whether v_held is the last access unit
+                    # The sound goes in first, by a runway; but the picture never waits for sound that is itself waiting for the picture
+                    runway_ok = (audio_optional or (a_max is not None and v_held[0] <= a_max - AUDIO_RUNWAY)
+                                 or (a_held is not None and a_held[0] > v_max + AUDIO_LEAD))
+                    if v_next is not _EMPTY and v_held[0] <= horizon and runway_ok:   # now we know whether v_held is the last access unit
                         flags = hr.F_END_OF_STREAM if v_next is None else 0
                         if ring.try_write(hr.T_VIDEO_AU, v_held[1], v_held[0], flags):
                             self._lead('video', v_held[0])
@@ -267,8 +276,11 @@ class Feeder:
                         a_eof = True
                     elif item is not _EMPTY:
                         a_held = item
+                if a_eof or audio_slow:
+                    audio_optional = True                                   # no more sound is coming (or it is too slow): do not hold the picture back
                 if a_held is not None and a_held[0] <= horizon and (a_held[0] <= v_max + AUDIO_LEAD or v_done):
                     if ring.try_write(hr.T_AUDIO, a_held[1], a_held[0]):
+                        a_max = a_held[0] + AUDIO_CHUNK_FRAMES * CLOCK // 48000
                         self._lead('audio', a_held[0])
                         self.stats['audio'] += 1
                         a_held = None

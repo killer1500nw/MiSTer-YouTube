@@ -2781,13 +2781,20 @@ class H264Feeder(unittest.TestCase):
         self.assertEqual(audios[1][4], base + 4800 * 90000 // 48000)       # 100 ms later
         self.assertTrue(all(a[3] == 19200 for a in audios))
         # audio never runs more than a second ahead of the newest video written before it (until the video is finished)
-        newest = 0
+        newest = units[0][0]                                                  # (the writer counts the first picture's time before it is written)
         for r in recs:
             if r[0] == 2:
                 newest = max(newest, r[4])
             elif r[0] == 3 and newest < videos[-1][4]:
                 self.assertLessEqual(r[4], newest + 90000)
         self.assertEqual(feeder.stats['au'], 10)
+        # and the sound sits in the ring at least 0.6 s before the picture it goes with (the core reads in order)
+        newest_audio = None
+        for r in recs:
+            if r[0] == 3:
+                newest_audio = r[4] + 9000
+            elif r[0] == 2 and newest_audio is not None and r[4] + 54000 <= audios[-1][4]:
+                self.assertGreaterEqual(newest_audio, r[4] + 54000)
 
     def test_audio_that_ends_early_is_reopened_where_it_stopped_and_stays_in_step(self):
         from ytcrt import h264feed
@@ -2868,7 +2875,7 @@ class H264Feeder(unittest.TestCase):
         worker.start()
         import time as _t
         _t.sleep(0.5)
-        self.assertEqual(ring.sent['au'] + ring.sent['audio'], 0)          # the picture is waiting for the sound
+        self.assertEqual(ring.sent['au'] + ring.sent['audio'], 0)          # the picture is waiting for the sound (all of this short clip)
         release.set()
         worker.join(5)
         recs = self.records(ring)
