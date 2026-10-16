@@ -464,8 +464,16 @@ def h264_media(media, quality='Auto'):
     fit = [f for f in fit if f.get('acodec') in (None, 'none')] or fit
     video = max(fit, key=lambda f: (_area(f), f.get('tbr') or 0))
     audio = _pick_audio(video, playable)
+    why = ''
+    if quality != 'Auto' and min(video['width'], video['height']) < box:
+        # The size that was asked for exists, but not in a form the core can play in real time (YouTube's 720p H.264 is often 60 fps)
+        bigger = [f for f in playable if (f.get('vcodec') or '').startswith('avc1') and f.get('width') and f.get('height')
+                  and min(f['width'], f['height']) == box]
+        if bigger:
+            why = '%s is %d fps here; the core plays up to 30' % (profiles.label_for(bigger[0]['width'], bigger[0]['height']),
+                                                                 max((f.get('fps') or 0) for f in bigger))
     return Media(media.id, media.title, media.duration, _source(video, info), _source(audio, info) if audio else None,
-                 profiles.label_for(video['width'], video['height']), media.catalog, '', 0.0)
+                 profiles.label_for(video['width'], video['height']), media.catalog, why, 0.0)
 
 
 def _client(src):

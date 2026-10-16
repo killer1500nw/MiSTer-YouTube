@@ -3027,6 +3027,16 @@ class H264Streams(unittest.TestCase):
         self.assertLess(tail.index('stop_feed()'), tail.index('ring.new_session()'))       # (after the feeder thread has stopped)
         self.assertIn('ring.set_pause(False)', tail)
 
+    def test_a_quality_that_only_exists_too_fast_for_the_core_is_explained(self):
+        fast = stream(1280, 720, 1900, fps=60, fid='298')
+        m = self.media(stream(854, 480, 400), fast)
+        got = pipeline.h264_media(m, '720p')
+        self.assertEqual(got.label, '480p')                              # the core cannot play 720p60 ...
+        self.assertIn('720p is 60 fps', got.why)                         # ... and the player says why
+        self.assertEqual(pipeline.h264_media(m, 'Auto').why, '')          # (Auto just picks the best it can: nothing to explain)
+        ok = self.media(stream(854, 480, 400), stream(1280, 720, 1400, fps=24))
+        self.assertEqual(pipeline.h264_media(ok, '720p').why, '')
+
     def test_the_biggest_h264_stream_within_the_cores_limits_wins_and_auto_means_720p(self):
         m = self.media(stream(426, 240, 220), stream(854, 480, 500), stream(1280, 720, 1400), stream(1920, 1080, 3000),
                        stream(1280, 720, 1500, fid='vp9', vcodec='vp09.00.31.08'))

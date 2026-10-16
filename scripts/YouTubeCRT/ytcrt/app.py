@@ -1071,8 +1071,9 @@ class App:
                 self.log('Cannot play on the H264 core: %s' % exc)
                 self.push(ui.TextView('Cannot play', ['!' + l for l in ui.wrap(str(exc), 37, 14)]))
                 return
-            self.log('H264 core: %dx%d %s fps %s kbps (%s)' % (media.video['width'], media.video['height'], media.video.get('fps'),
-                                                             round(media.tbr or 0), media.video['format_id']))
+            self.log('H264 core: %dx%d %s fps %s kbps (%s)%s' % (media.video['width'], media.video['height'], media.video.get('fps'),
+                                                               round(media.tbr or 0), media.video['format_id'],
+                                                               ('; ' + media.why) if media.why else ''))
             try:
                 outcome, pos_ms = self._h264_loop(v, media, pos_ms)
             except Quit:
@@ -1150,7 +1151,8 @@ class App:
             f = feed['feeder']
             tail = (f.errors[-1][1].strip().splitlines() or [''])[-1] if f is not None and f.errors else ''
             return [ui.clip(v.get('title', ''), 33), 'Starting... %ds' % (time.monotonic() - state['opened_at']),
-                    '%s, %d kbps (H264 core)' % (media.label, round(media.tbr or 0)), ui.clip(pipeline.safe_text(tail), 33)]
+                    '%s, %d kbps (H264 core)' % (media.label, round(media.tbr or 0)),
+                    ui.clip(media.why or pipeline.safe_text(tail), 33)]
 
         def set_crop(mode, now):
             if mode == state['crop']:
