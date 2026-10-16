@@ -25,7 +25,8 @@ AUDIO_NUDGES = (1.2, 3.0, -2.0, 6.0)         # where to try again (seconds from 
                                            # certain positions of a stream, and a second further on works
 AUDIO_START_WAIT = 12.0                    # seconds to wait for the first sound before starting the picture without it
 START_AHEAD = 3 * CLOCK                    # ... or, before the core's clock runs, 3 s past the first picture
-VIDEO_QUEUE = 90
+VIDEO_QUEUE = 220                          # access units held between ffmpeg and the writer (7 s at 30 fps)
+VIDEO_PREROLL_S = 4.0                      # seconds of picture to have in hand before the start (judged by time stamps, not by count)
 AUDIO_QUEUE = 60
 AUDIO_PREROLL = 40                         # chunks (4 s) of sound to have in hand before the picture starts: YouTube serves audio at only about
                                            # twice real time after its first burst, and a start with almost nothing buffered drops sound
@@ -229,12 +230,17 @@ class Feeder:
                 waited = self.clock()
                 while not stop():
                     queued = list(self.aq.queue)
-                    if len(queued) >= AUDIO_PREROLL or (queued and queued[-1] is None):
-                        break                                       # enough sound in hand, or all of it (a short clip)
+                    pictures = list(self.vq.queue)
+                    sound_ready = len(queued) >= AUDIO_PREROLL or (queued and queued[-1] is None)       # 4 s of sound, or all of it
+                    picture_ready = ((pictures and pictures[-1] is None)
+                                     or (pictures and pictures[-1] is not None and pictures[-1][0] - first[0] >= VIDEO_PREROLL_S * CLOCK))
+                    if sound_ready and picture_ready:
+                        break                                       # enough of both in hand (or a short clip with all of it)
                     if self.clock() - waited > AUDIO_START_WAIT:
-                        self.log('Only %d of %d sound chunks within %.0f s; starting the picture now' % (
-                            len([q for q in queued if q is not None]), AUDIO_PREROLL, AUDIO_START_WAIT))
-                        audio_slow = True
+                        self.log('Only %d of %d sound chunks and %.1f s of picture within %.0f s; starting now' % (
+                            len([q for q in queued if q is not None]), AUDIO_PREROLL,
+                            ((pictures[-1][0] - first[0]) / float(CLOCK)) if pictures and pictures[-1] is not None else 0.0, AUDIO_START_WAIT))
+                        audio_slow = not sound_ready
                         break
                     tick()
                     ring.wait(0.01)

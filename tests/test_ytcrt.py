@@ -3003,6 +3003,14 @@ class H264Streams(unittest.TestCase):
         m = pipeline.Media('v' * 11, 't', 100, None, None, '', ({'id': 'v'}, [stream(854, 480, 500), stream(1280, 720, 1400)] + AUDIO))
         self.assertEqual(pipeline.h264_media(m, '720p').label, '720p')
 
+    def test_the_h264_play_loops_more_panel_cycles_through_720p_and_the_old_loops_does_not(self):
+        import inspect
+        from ytcrt import app as appmod
+        self.assertIn("next_quality(state['quality'], step, h264=True)", inspect.getsource(appmod.App._h264_loop))
+        old = inspect.getsource(appmod.App._play_loop)
+        self.assertIn("next_quality(state['quality'], step)", old)
+        self.assertNotIn('h264=True', old)
+
     def test_the_biggest_h264_stream_within_the_cores_limits_wins_and_auto_means_720p(self):
         m = self.media(stream(426, 240, 220), stream(854, 480, 500), stream(1280, 720, 1400), stream(1920, 1080, 3000),
                        stream(1280, 720, 1500, fid='vp9', vcodec='vp09.00.31.08'))

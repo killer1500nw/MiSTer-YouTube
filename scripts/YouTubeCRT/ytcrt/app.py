@@ -1176,7 +1176,7 @@ class App:
                 set_crop(profiles.CROPS[(profiles.CROPS.index(state['crop']) + step) % len(profiles.CROPS)], now)
             elif m['sel'] == 1 and act in ('left', 'right', 'ok'):
                 step = -1 if act == 'left' else 1
-                state['quality'] = profiles.next_quality(state['quality'], step)
+                state['quality'] = profiles.next_quality(state['quality'], step, h264=True)
                 state.update(quality_req=state['quality'], quality_at=now, note='Quality: ' + state['quality'])
             elif m['sel'] == 2 and act in ('left', 'right', 'ok'):
                 state['note'] = 'Saved' if self.store.toggle_later(v) else 'Removed'
@@ -1386,7 +1386,7 @@ class App:
                 # Quality for this video only. It applies about a second after the last press (so cycling through the
                 # choices does not restart the picture each time), at the same position.
                 step = -1 if act == 'left' else 1
-                state['quality'] = profiles.next_quality(state['quality'], step, h264=True)
+                state['quality'] = profiles.next_quality(state['quality'], step)
                 state.update(quality_req=state['quality'], quality_at=now, note='Quality: ' + state['quality'])
             elif m['sel'] == 2 and act in ('left', 'right', 'ok'):
                 state['note'] = 'Saved' if self.store.toggle_later(v) else 'Removed'
