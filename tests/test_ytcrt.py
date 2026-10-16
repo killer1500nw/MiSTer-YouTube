@@ -3253,6 +3253,50 @@ class SpsCropping(unittest.TestCase):
         self.assertIs(h264sps.crop_access_unit(au, None), au)
 
 
+class H264CoreInstaller(unittest.TestCase):
+    """The opt-in download of the H264 core (fetched from its author's release page and checked, never bundled)."""
+
+    def setUp(self):
+        import hashlib
+        import ytcrt_setup
+        self.setup = ytcrt_setup
+        self.fat = tempfile.mkdtemp()
+        self.payload = bytes(range(256)) * 40
+        self.saved = (ytcrt_setup.fetch, ytcrt_setup.H264_SHA256)
+        self.fetched = []
+        ytcrt_setup.H264_SHA256 = hashlib.sha256(self.payload).hexdigest()
+
+        def fake_fetch(url, dest=None, label=''):
+            self.fetched.append(url)
+            Path(dest).write_bytes(self.payload)
+        ytcrt_setup.fetch = fake_fetch
+
+    def tearDown(self):
+        self.setup.fetch, self.setup.H264_SHA256 = self.saved
+
+    def test_the_core_is_fetched_from_the_authors_release_checked_and_given_a_menu_entry(self):
+        self.setup.setup_h264_core(self.fat)
+        other = Path(self.fat) / '_Other'
+        self.assertEqual((other / self.setup.H264_NAME).read_bytes(), self.payload)
+        self.assertEqual(self.fetched, [self.setup.H264_URL])
+        self.assertTrue(self.setup.H264_URL.startswith('https://github.com/owenb321/MiSTer_h264_decoder/releases/download/'))
+        self.assertIn('<rbf>_Other/H264</rbf>', (other / 'YouTube (H264).mgl').read_text())
+        self.assertIn('owenb321', (other / 'H264_core_README.txt').read_text())       # the credit travels with the file
+        self.assertEqual(sorted(p.name for p in other.iterdir()), sorted([self.setup.H264_NAME, 'YouTube (H264).mgl', 'H264_core_README.txt']))
+        self.setup.setup_h264_core(self.fat)                                        # again: already there, nothing is downloaded
+        self.assertEqual(len(self.fetched), 1)
+
+    def test_a_file_that_does_not_match_its_checksum_is_never_installed(self):
+        self.setup.H264_SHA256 = '0' * 64
+        with self.assertRaises(RuntimeError):
+            self.setup.setup_h264_core(self.fat)
+        other = Path(self.fat) / '_Other'
+        self.assertEqual([p.name for p in other.iterdir()], [])                    # no core, no partial file, no menu entry
+
+    def test_the_pinned_checksum_is_the_one_github_publishes_for_the_release_file(self):
+        self.assertEqual(self.saved[1], '0790a8893789092c542aabc2e1135169b57a1f29bb7663a415fe8a5a33e1bdfb')
+
+
 class CpuLog(unittest.TestCase):
     def test_proc_stat_with_spaces_in_the_name(self):
         from ytcrt import cpu

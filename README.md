@@ -53,7 +53,7 @@ does not ship), decodes H.264 video in the FPGA. With it this player only repack
 uses about 5% of one ARM core instead of all of them, and videos play at up to **720p** (when YouTube offers 720p at 30 fps
 or less) with full-quality decoding.
 
-1. Install the player as above, then install the H264 core from its releases page (extract its zip to the SD card root).
+1. Install the player as above, then run **Scripts → YouTubeCRT → Install_H264_Core**. It downloads the core from the author's release page and checks it (nothing of it is in this project's own release).
 2. Load **Other → YouTube (H264)** (the installer creates this entry when the core is on the card). The YouTube menu appears over the core.
 
 What changes: Stream quality has a 720p choice, Auto means "the best H.264 stream the core can play", the crop options still work

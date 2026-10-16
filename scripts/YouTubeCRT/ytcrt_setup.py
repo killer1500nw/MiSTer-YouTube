@@ -36,6 +36,17 @@ NODE_VER = 'v22.23.3'                      # yt-dlp needs Node 22 or newer
 NODE_URL = 'https://nodejs.org/dist/%s/node-%s-linux-armv7l.tar.gz' % (NODE_VER, NODE_VER)
 NODE_SHA256 = '8b99058ec6f4e372b9887f8ecb577a292adb132d59e5104356428a758fdb126c'
 UA = 'YouTubeCRT-setup/1.0'
+# The optional H264 core, by owenb321 (github.com/owenb321/MiSTer_h264_decoder, GPL-3.0-or-later). It is NOT part of this project's release:
+# the script below fetches that one file from the author's own release page and checks it against the checksum GitHub publishes for it.
+H264_TAG = 'v1.1.0'
+H264_NAME = 'H264_20261014.rbf'
+H264_URL = 'https://github.com/owenb321/MiSTer_h264_decoder/releases/download/%s/%s' % (H264_TAG, H264_NAME)
+H264_SHA256 = '0790a8893789092c542aabc2e1135169b57a1f29bb7663a415fe8a5a33e1bdfb'
+H264_MGL = '<mistergamedescription>\n  <rbf>_Other/H264</rbf>\n</mistergamedescription>\n'
+H264_README = (
+    'The H264 core in this folder (%s) is the work of owenb321: https://github.com/owenb321/MiSTer_h264_decoder\n'
+    'GPL-3.0-or-later; its client library is MIT. Source code and licence: that page (release %s).\n'
+    'It was downloaded from there by the YouTube CRT player\'s Install_H264_Core script. It is not part of the player.\n' % (H264_NAME, H264_TAG))
 
 
 def ctx():
@@ -210,10 +221,44 @@ def setup_ffmpeg(root, dl):
     print('ffmpeg installed (%s).' % top)
 
 
+def setup_h264_core(fat):
+    """Put the H264 core in /media/fat/_Other (checked against its published SHA-256), plus the menu entry that loads it."""
+    other = Path(fat) / '_Other'
+    other.mkdir(parents=True, exist_ok=True)
+    dest = other / H264_NAME
+    if dest.is_file() and digest(dest, 'sha256') == H264_SHA256:
+        print('The H264 core %s is already installed.' % H264_NAME)
+    else:
+        print('Downloading the H264 core %s (about 4.4 MB) from github.com/owenb321/MiSTer_h264_decoder ...' % H264_NAME, flush=True)
+        part = other / (H264_NAME + '.part')
+        try:
+            fetch(H264_URL, part, 'H264 core')
+            if digest(part, 'sha256') != H264_SHA256:
+                raise RuntimeError('H264 core checksum mismatch; not installing it.')
+            print('  checksum OK', flush=True)
+            os.replace(part, dest)
+        finally:
+            if part.exists():
+                part.unlink()
+        print('The H264 core is installed: %s' % dest)
+    (other / 'YouTube (H264).mgl').write_text(H264_MGL)
+    (other / 'H264_core_README.txt').write_text(H264_README)
+    print('Menu entry written: Other > YouTube (H264)')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default='/media/fat/YouTubeNative')
+    ap.add_argument('--h264-core', action='store_true', help='only install the optional H264 core (see setup_h264_core)')
+    ap.add_argument('--fat', default='/media/fat')
     args = ap.parse_args()
+    if args.h264_core:
+        try:
+            setup_h264_core(args.fat)
+        except Exception as exc:
+            print('SETUP FAILED: %s' % exc, flush=True)
+            return 1
+        return 0
     root = Path(args.root)
     root.mkdir(parents=True, exist_ok=True)
     dl = root / '_download'
