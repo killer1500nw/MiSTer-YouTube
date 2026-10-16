@@ -2928,6 +2928,20 @@ class H264Streams(unittest.TestCase):
         formats = list(videos) + AUDIO
         return pipeline.Media('v' * 11, 't', 100, None, None, '', (info, formats))
 
+    def test_720p_can_be_chosen_on_the_h264_core_only(self):
+        self.assertEqual(profiles.next_quality('480p', 1, h264=True), '720p')
+        self.assertEqual(profiles.next_quality('720p', 1, h264=True), 'Auto')
+        self.assertEqual(profiles.next_quality('Auto', -1, h264=True), '720p')
+        self.assertEqual(profiles.next_quality('480p', 1), 'Auto')                 # the player's own cores top out at 480p
+        self.assertEqual(profiles.next_quality('720p', 1), '240p')                 # a 720p left over from the H264 core is treated as Auto
+        a = type('A', (), {'store': store.Store(tempfile.mkdtemp()), 'h264': True})()
+        choices = [r for r in ui.Settings().rows(a) if r[0] == 'quality'][0][3]
+        self.assertEqual(choices[-1], '720p')
+        a.h264 = False
+        self.assertNotIn('720p', [r for r in ui.Settings().rows(a) if r[0] == 'quality'][0][3])
+        m = pipeline.Media('v' * 11, 't', 100, None, None, '', ({'id': 'v'}, [stream(854, 480, 500), stream(1280, 720, 1400)] + AUDIO))
+        self.assertEqual(pipeline.h264_media(m, '720p').label, '720p')
+
     def test_the_biggest_h264_stream_within_the_cores_limits_wins_and_auto_means_720p(self):
         m = self.media(stream(426, 240, 220), stream(854, 480, 500), stream(1280, 720, 1400), stream(1920, 1080, 3000),
                        stream(1280, 720, 1500, fid='vp9', vcodec='vp09.00.31.08'))

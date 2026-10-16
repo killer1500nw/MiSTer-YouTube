@@ -139,6 +139,14 @@ def speed_for(px, speed, learned):
 
 CROPS = ('Fill', '14:9', 'Off')          # the order the buttons cycle through: most old TV is uploaded as 4:3 inside a 16:9 frame
 QUALITIES = ('Auto', '240p', '360p', '480p')
+QUALITIES_H264 = ('Auto', '240p', '360p', '480p', '720p')      # the H264 core plays 720p too
+
+
+def next_quality(current, step, h264=False):
+    """The quality after `current` in the list (a 720p chosen on the H264 core is Auto on the player's own core)."""
+    options = QUALITIES_H264 if h264 else QUALITIES
+    at = options.index(current) if current in options else 0
+    return options[(at + step) % len(options)]
 
 
 def crop_filter(mode):

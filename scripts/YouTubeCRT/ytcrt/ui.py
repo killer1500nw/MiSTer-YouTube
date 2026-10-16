@@ -711,7 +711,8 @@ class Settings(ListScreen):
     def rows(self, app):
         s = app.store.settings
         return [
-            ('quality', 'Stream quality', s['quality'], ('Auto', '240p', '360p', '480p')),
+            ('quality', 'Stream quality', s['quality'],
+             ('Auto', '240p', '360p', '480p', '720p') if getattr(app, 'h264', False) else ('Auto', '240p', '360p', '480p')),
             ('crop', 'Video crop', s['crop'], ('Fill', '14:9', 'Off')),
             ('resume', 'Resume playback', s['resume'], ('Ask', 'Always')),
             ('autoplay', 'Play next video', s['autoplay'], ('On', 'Off')),

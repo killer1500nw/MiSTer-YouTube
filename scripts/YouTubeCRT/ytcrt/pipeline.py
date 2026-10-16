@@ -434,7 +434,7 @@ def _pick_audio(video, playable):
     return None
 
 
-H264_BOX = {'240p': 240, '360p': 360, '480p': 480, 'Auto': 720}      # the shorter side allowed; Auto = the best the H264 core plays
+H264_BOX = {'240p': 240, '360p': 360, '480p': 480, '720p': 720, 'Auto': 720}      # the shorter side allowed; Auto = the best the H264 core plays
 H264_MAX_MBS = 3600                                                  # 1280x720
 H264_MB_RATE = 108000                                                # macroblocks a second the core decodes in real time (720p30, 854x480@60)
 H264_PROFILES = (0x4D, 0x64)                                         # Main and High: what the core decodes (Baseline is CAVLC)
