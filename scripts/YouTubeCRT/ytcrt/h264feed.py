@@ -18,6 +18,8 @@ from .tsdemux import TsVideo
 CLOCK = 90000
 AUDIO_CHUNK_FRAMES = 4800                  # 100 ms: 256 records of 20 ms would be only 5 s of the ring
 AUDIO_LEAD = CLOCK                         # write audio only up to one second ahead of the newest video written
+AHEAD = 8 * CLOCK                          # nothing is written more than 8 s ahead of what the core is playing (YouTube resets a connection that sits idle)
+START_AHEAD = 3 * CLOCK                    # ... or, before the core's clock runs, 3 s past the first picture
 VIDEO_QUEUE = 90
 AUDIO_QUEUE = 40
 
@@ -55,7 +57,11 @@ def audio_pcm_command(rt, source, start_s=0.0):
 class Feeder:
     """One playback. `video_cmd` / `audio_cmd` are functions of the start time returning an ffmpeg command line (audio may be None)."""
 
-    def __init__(self, ring, video_cmd, audio_cmd=None, log=print, spawn=subprocess.Popen, clock=time.monotonic):
+    AUDIO_RESTARTS = 30
+
+    def __init__(self, ring, video_cmd, audio_cmd=None, log=print, spawn=subprocess.Popen, clock=time.monotonic, duration_s=0):
+        self.duration_s = duration_s              # the video's length: audio that ends before it is reopened where it stopped
+        self.audio_restarts = 0
         self.ring, self.video_cmd, self.audio_cmd, self.log, self.spawn, self.clock = ring, video_cmd, audio_cmd, log, spawn, clock
         self.procs = {}
         self.vq = queue.Queue(VIDEO_QUEUE)
@@ -120,6 +126,20 @@ class Feeder:
             while not self.stopping.is_set():
                 data = proc.stdout.read(want)
                 if not data:
+                    end_s = (start_pts + frames * CLOCK // 48000) / float(CLOCK)
+                    if (self.duration_s and end_s < self.duration_s - 3.0 and self.audio_restarts < self.AUDIO_RESTARTS
+                            and not self.stopping.is_set()):
+                        # YouTube's audio connection can end early (exit 0, a few seconds before the end): carry on from there
+                        self.audio_restarts += 1
+                        self.log('The audio ended early at %.1f s of %d; reopening it there (%d)' % (end_s, self.duration_s, self.audio_restarts))
+                        try:
+                            proc.kill()
+                        except (OSError, AttributeError):
+                            pass
+                        proc = self._spawn('audio', self.audio_cmd(end_s))
+                        buf.clear()
+                        start_pts, frames = int(end_s * CLOCK), 0
+                        continue
                     break
                 buf += data
                 while len(buf) >= want:
@@ -173,12 +193,17 @@ class Feeder:
             self._start_audio(first[0])
             v_held, v_next, v_max, v_done = first, _EMPTY, first[0], False
             a_held, a_eof = None, False
+            horizon, polled = first[0] + START_AHEAD, 0.0
             while not stop():
                 progressed = False
+                if self.clock() - polled > 0.04:
+                    polled = self.clock()
+                    stc = ring.status()['stc']
+                    horizon = (first[0] + START_AHEAD) if stc < first[0] - 2 * CLOCK else stc + AHEAD
                 if not v_done:
                     if v_next is _EMPTY:
                         v_next = self._get(self.vq)
-                    if v_next is not _EMPTY:                       # now we know whether v_held is the last access unit
+                    if v_next is not _EMPTY and v_held[0] <= horizon:      # now we know whether v_held is the last access unit
                         flags = hr.F_END_OF_STREAM if v_next is None else 0
                         if ring.try_write(hr.T_VIDEO_AU, v_held[1], v_held[0], flags):
                             self.stats['au'] += 1
@@ -196,7 +221,7 @@ class Feeder:
                         a_eof = True
                     elif item is not _EMPTY:
                         a_held = item
-                if a_held is not None and (a_held[0] <= v_max + AUDIO_LEAD or v_done):
+                if a_held is not None and a_held[0] <= horizon and (a_held[0] <= v_max + AUDIO_LEAD or v_done):
                     if ring.try_write(hr.T_AUDIO, a_held[1], a_held[0]):
                         self.stats['audio'] += 1
                         a_held = None

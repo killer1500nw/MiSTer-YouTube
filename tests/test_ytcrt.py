@@ -2747,6 +2747,7 @@ class H264Feeder(unittest.TestCase):
         done = []
 
         def tick():
+            self.ring_test.words[14] = min(feeder.last_pts, (1 << 32) - 1)    # the core's clock follows what has been written
             if feeder.stats['au'] == len(units) and not done:
                 done.append(1)
                 self.ring_test.words[8] = 4                    # the core has shown the last picture
@@ -2787,6 +2788,40 @@ class H264Feeder(unittest.TestCase):
             elif r[0] == 3 and newest < videos[-1][4]:
                 self.assertLessEqual(r[4], newest + 90000)
         self.assertEqual(feeder.stats['au'], 10)
+
+    def test_audio_that_ends_early_is_reopened_where_it_stopped_and_stays_in_step(self):
+        from ytcrt import h264feed
+        ring = self.ring_test.make()
+        self.ring_test.words[8] = 3
+        ring.new_session()
+        au = bytes([0, 0, 0, 1, 9, 0xF0]) + bytes(50)
+        units = [(i * 90000, i * 90000, au) for i in range(10)]           # ten seconds of video, one access unit a second
+        video_bytes = self.ts.stream(units)
+        second = 48000 * 4
+        spawned = []
+
+        def spawn(cmd, **kw):
+            spawned.append(cmd)
+            if cmd[0] == 'V':
+                return self.Proc(video_bytes)
+            return self.Proc(bytes(4 * second) if len([c for c in spawned if c[0] == 'A']) == 1 else bytes(6 * second))
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], lambda s: ['A', s], log=lambda m: None, spawn=spawn, duration_s=10)
+        feeder.start(0)
+        done = []
+
+        def tick():
+            self.ring_test.words[14] = min(feeder.last_pts, (1 << 32) - 1)
+            if feeder.stats['au'] == len(units) and feeder.stats['audio'] >= 100 and not done:
+                done.append(1)
+                self.ring_test.words[8] = 4
+        self.assertEqual(feeder.run(stop=lambda: False, tick=tick, first_timeout=5.0), 'ended')
+        audio_starts = [c[1] for c in spawned if c[0] == 'A']
+        self.assertEqual(len(audio_starts), 2)
+        self.assertAlmostEqual(audio_starts[1], 4.0, places=2)             # reopened where the first one stopped
+        self.assertEqual(feeder.audio_restarts, 1)
+        recs = self.records(ring)
+        pts = [r[4] for r in recs if r[0] == 3]
+        self.assertEqual(pts, [i * 9000 for i in range(100)])             # 100 ms apart across the join: nothing missing, nothing doubled
 
     def test_a_video_that_never_arrives_is_reported(self):
         from ytcrt import h264feed

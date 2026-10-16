@@ -89,16 +89,20 @@ class Ring:
         """A consistent copy of the words the player cares about (the core writes them once a frame; read the tail, the words, the head)."""
         for _ in range(attempts):
             tail = self.lo(W_SEQ_TAIL)
-            words = {w: self.word(w) for w in (W_STATE, W_READ, W_ERR_WORD, W_STC, 8, 15, 16, 19, 25, 26, 27, 30)}
+            words = {w: self.word(w) for w in (W_STATE, W_READ, W_ERR_WORD, W_STC, 8, 15, 16, 19, 25, 26, 27, 30, 40, 41, 42, 43, 44)}
             if self.lo(W_HEARTBEAT) == tail:
                 st = words[W_STATE]
                 return {'heartbeat': tail, 'state': st & 0xFF, 'error': (st >> 8) & 0xFF, 'error_at': st >> 32,
                         'read_index': words[W_READ] & 0xFFFFFFFF, 'ack_nonce': words[W_READ] >> 32,
                         'stc': words[W_STC] & _mask(33), 'lag_ms': (words[W_STC] >> 48) & 0xFFFF,
-                        'au': words[8] & 0xFFFFFFFF, 'audio': words[8] >> 32,
+                        'au': words[8] & 0xFFFFFFFF, 'audio_records': words[8] >> 32,
                         'pictures_seen': words[15] & 0xFFFFFFFF, 'refused': words[15] >> 32,
                         'frontend_errors': words[16] & 0xFFFFFFFF, 'pictures_decoded': words[19] & 0xFFFFFFFF,
                         'skipped': words[26] & 0xFFFFFFFF, 'late': (words[26] >> 32) & 0xFFFF, 'starved': (words[26] >> 48) & 0xFFFF,
+                        'audio': {'state': words[40] & 3, 'queued': (words[40] >> 16) & 0x1FF, 'played': words[41] & 0xFFFFFFFF,
+                                  'silence': words[42] & 0xFFFFFFFF, 'late': words[42] >> 32, 'underruns': words[43] & 0xFFFF,
+                                  'slip_drop': (words[43] >> 16) & 0xFFFF, 'slip_repeat': (words[43] >> 32) & 0xFFFF,
+                                  'offset': words[44] & 0xFFFFFFFF},
                         'raw_state': st, 'raw_settings_seq': (words[30] >> 24) & 0xFF}
             self.wait(0.0005)
         raise RingError('The core is writing its status all the time.')

@@ -18,6 +18,7 @@ def main(argv=None):
     ap.add_argument('source')
     ap.add_argument('--audio', help='a separate audio source (default: the same as the video)')
     ap.add_argument('--start', type=float, default=0.0)
+    ap.add_argument('--duration', type=float, default=0.0, help='the length in seconds, so that audio ending early is reopened')
     ap.add_argument('--root', default='/media/fat/YouTubeNative')
     ap.add_argument('--here', default='/media/fat/Scripts/YouTubeCRT')
     ap.add_argument('--rbf', default='_Other/H264')
@@ -37,7 +38,7 @@ def main(argv=None):
         ring.new_session()
         log('Session started; ffmpeg: ' + str(rt.ffmpeg))
         feeder = h264feed.Feeder(ring, lambda s: h264feed.video_copy_command(rt, video, s),
-                                 lambda s: h264feed.audio_pcm_command(rt, audio, s), log=log)
+                                 lambda s: h264feed.audio_pcm_command(rt, audio, s), log=log, duration_s=a.duration)
         feeder.start(a.start)
         last = [0.0]
 

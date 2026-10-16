@@ -1114,7 +1114,8 @@ class App:
             ring.new_session()                                     # drops whatever the core had not read and resets its display
             ring.set_pause(False)
             f = h264feed.Feeder(ring, lambda s: h264feed.video_copy_command(self.rt, media.video, s),
-                                (lambda s: h264feed.audio_pcm_command(self.rt, media.audio, s)) if media.audio else None, log=self.log)
+                                (lambda s: h264feed.audio_pcm_command(self.rt, media.audio, s)) if media.audio else None, log=self.log,
+                                duration_s=media.duration)
             stop = threading.Event()
             feed.update(feeder=f, stop=stop, result=None, error=None)
 
@@ -1172,6 +1173,7 @@ class App:
         self.push(loading)
         shown_osd = False
         next_save = now + 10
+        next_stats = now + 15.0
         try:
             start_feed(start_ms)
             while True:
@@ -1213,6 +1215,14 @@ class App:
                     start_feed(target)
                 # what the core says: the position, and whether a picture is on the screen
                 st = ring.status()
+                if now >= next_stats:
+                    next_stats = now + 15.0
+                    a = st['audio']
+                    self.log('H264 core: clock %s, %d pictures, late %d, starved %d; audio queued %d, played %d, silence %d, late %d, underruns %d, '
+                             'A/V offset %d; fed %d pictures %d audio' % (
+                                 ui.mmss(position['ms']), st['pictures_seen'], st['late'], st['starved'], a['queued'], a['played'],
+                                 a['silence'], a['late'], a['underruns'], a['offset'] - (1 << 32 if a['offset'] >> 31 else 0),
+                                 feed['feeder'].stats['au'] if feed['feeder'] else 0, feed['feeder'].stats['audio'] if feed['feeder'] else 0))
                 if st['state'] == 5:
                     raise pipeline.PlaybackError('The H264 core stopped: ' + ring.state_text(st))
                 if st['state'] in (3, 4) and st['pictures_seen'] > 0:
@@ -1252,6 +1262,12 @@ class App:
                 if feed['result'] == 'ended':
                     return 'eof', dur_ms
         finally:
+            f = feed['feeder']
+            if f is not None:
+                for kind, text in f.errors[-4:]:
+                    self.log('ffmpeg (%s) said: %s' % (kind, ' | '.join(text.strip().splitlines())[-300:]))
+                if f.audio_restarts:
+                    self.log('The audio was reopened %d time(s)' % f.audio_restarts)
             stop_feed()
             link.hide_overlay()
             self.osd_sig = None
