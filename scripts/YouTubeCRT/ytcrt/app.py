@@ -1309,6 +1309,11 @@ class App:
                 if f.audio_restarts:
                     self.log('The audio was reopened %d time(s)' % f.audio_restarts)
             stop_feed()
+            try:
+                ring.set_pause(False)
+                ring.new_session()                  # the core still holds seconds of picture and sound: a new session drops them at once
+            except Exception as exc:
+                self.log('Could not flush the core: %s' % exc)
             link.hide_overlay()
             self.osd_sig = None
             if loading is not None and self.screen is loading:

@@ -3011,6 +3011,15 @@ class H264Streams(unittest.TestCase):
         self.assertIn("next_quality(state['quality'], step)", old)
         self.assertNotIn('h264=True', old)
 
+    def test_leaving_a_video_flushes_what_the_core_has_queued(self):
+        import inspect
+        from ytcrt import app as appmod
+        src = inspect.getsource(appmod.App._h264_loop)
+        tail = src[src.rindex('finally:'):]
+        self.assertIn('ring.new_session()', tail)               # otherwise the picture and sound play on for the 8 s that were queued
+        self.assertLess(tail.index('stop_feed()'), tail.index('ring.new_session()'))       # (after the feeder thread has stopped)
+        self.assertIn('ring.set_pause(False)', tail)
+
     def test_the_biggest_h264_stream_within_the_cores_limits_wins_and_auto_means_720p(self):
         m = self.media(stream(426, 240, 220), stream(854, 480, 500), stream(1280, 720, 1400), stream(1920, 1080, 3000),
                        stream(1280, 720, 1500, fid='vp9', vcodec='vp09.00.31.08'))
