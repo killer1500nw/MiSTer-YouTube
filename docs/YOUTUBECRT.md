@@ -64,6 +64,47 @@ The daemon only *reads* one memory word twice a second while another core is loa
 writing within half a second if the core's heartbeat stops. Its log is
 `/media/fat/YouTubeNative/YouTube-crt-daemon.txt` (overwritten each boot).
 
+## The H264 core
+
+The player can run on a second core, the **MiSTer H264 core** by owenb321
+([github.com/owenb321/MiSTer_h264_decoder](https://github.com/owenb321/MiSTer_h264_decoder), release 1.1 or later; GPL-3.0-or-later,
+a separate project that is not part of this repository). It decodes H.264 in the FPGA, so the ARM only repackages the video and decodes
+the sound. That frees the ARM completely (about 5% of one core during playback) and allows sharper pictures than the ARM can decode.
+
+**Install.** Download the core's zip from its releases page and extract it to the SD card root (it adds `_Other/H264_*.rbf` and its own
+programs). Run this player's `Install_YouTube_CRT.sh` again: it adds **Other → YouTube (H264)** (a `.mgl` file in `_Other`). If that entry
+does not show up, `Scripts → YouTubeCRT → YouTube_H264` loads the core. Load it, and the YouTube menu appears over the core's picture.
+Do not run the H264 core's own video player at the same time: only one program can feed the core.
+
+**What is different.**
+
+| | YouTubeCRT core | H264 core |
+| --- | --- | --- |
+| Who decodes | the ARM (ffmpeg) | the FPGA |
+| Best picture | 480p | 720p (YouTube's H.264 at 30 fps or less) |
+| ARM use while playing | all of it | about 5% of one core |
+| Speed test, decoder speed | used | not used |
+| Output | 240p or 480i | 480i/576i or 480p/576p (the core's menu: F12) |
+| Extras | composite blur, flicker filter, dither | the core's anti-twitter and dither |
+
+**Stream quality** gets a 720p choice. **Auto** picks the biggest H.264 stream the core can decode in real time (at most 3,600
+macroblocks and 108,000 macroblocks a second, which is 720p30 or 480p60). YouTube often offers its 720p H.264 only at 60 fps, which the
+core cannot play in real time; then you get 480p and the Starting screen says why ("720p is 60 fps here; the core plays up to 30").
+
+**Crop** (X, then Crop): **Fill** and **Off** are the core's own setting and change at once. **14:9** is made in the video: the player
+rewrites the cropping fields of the stream's sequence header, so the core shows a 14:9 picture with thin bars. It shows from the next
+keyframe after the few seconds already queued (several seconds, with no pause or jump). Your choice is remembered for each video.
+
+**How the player talks to the core.** Video and sound go into a ring buffer in shared memory with presentation times (the core's
+documented interface, version 1.1); the sound is written ahead of the picture it belongs with, with about 3 seconds of both in hand
+before a video starts. The menu is drawn into the Linux framebuffer, which the core draws over its picture. Pad and keyboard events come
+from the core's input region.
+
+**Troubleshooting.** The log (`/media/fat/YouTubeNative/YouTube-crt-log.txt`) has an `H264 core:` line every 15 seconds with the
+core's own counters (late and starved pictures, audio queued, played, late and underruns), and an `AUDIO ISSUE` line whenever sound is
+dropped or an underrun happens. `The audio cannot start at ...; trying ...` means ffmpeg crashed at that position (some seek positions
+do) and the player retried a little earlier or later.
+
 ## Adding channels, playlists and single videos
 
 Everything lives in **one file**, `/media/fat/YouTubeNative/ytcrt/subscriptions.txt` (created on first run). One entry

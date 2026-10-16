@@ -13,6 +13,13 @@ The native ARM helper is supplied with its C source and build instructions.
 External yt-dlp, QuickJS, Node.js (MIT, downloaded from nodejs.org), FFmpeg and Quartus are not included; their respective
 upstream licences apply. No ownership of those projects is claimed.
 
+## MiSTer H264 core
+
+* The optional H264 mode talks to the **MiSTer H264 core** by owenb321 (https://github.com/owenb321/MiSTer_h264_decoder, GPL-3.0-or-later;
+  its client library is MIT). The core is not included in this repository or its installer. The Python code in
+  `scripts/YouTubeCRT/ytcrt/h264ring.py` is an independent implementation of the core's published interface (version 1.1), written with
+  that project's documentation and MIT-licensed client library as reference.
+
 ## YouTube CRT GUI
 
 * `scripts/YouTubeCRT/ytcrt/font8x8.py`: 8x8 bitmap font, public domain (Daniel Hepper, font8x8_basic).
