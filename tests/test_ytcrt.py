@@ -2524,6 +2524,295 @@ class PlaylistSearch(unittest.TestCase):
             pipeline.search_playlists = saved
 
 
+class H264Ring(unittest.TestCase):
+    """The H264 core's ring interface, against a bytearray that a tiny fake core answers for."""
+
+    def make(self, version=0x101):
+        from ytcrt import h264ring as hr
+        self.hr = hr
+        self.region = bytearray(hr.REGION_LEN)
+        self.words = memoryview(self.region).cast('I')
+        self.words[0], self.words[1] = hr.MAGIC & 0xFFFFFFFF, hr.MAGIC >> 32
+        self.words[2] = version
+        self.beat = 1
+
+        def core():
+            self.beat += 1
+            self.words[6] = self.beat                      # the heartbeat (word 3) and its tail copy (word 31)
+            self.words[62] = self.beat
+            nonce = self.words[66]                         # word 33
+            if nonce and self.words[11] != nonce:          # a new session: acknowledge it, reading from the current write index
+                self.words[11] = nonce
+                self.words[10] = self.words[64]
+            elif self.consume:
+                self.words[10] = self.words[64]            # and it reads everything that was written
+        self.consume = True
+        self.ring = hr.Ring(self.region, tick=core)
+        core()
+        return self.ring
+
+    def record(self, at):
+        """(type, flags, seq, length, pts, sync, payload) of the record at ring byte `at`."""
+        w = self.words
+        i = (self.hr.RING_OFFSET + at) // 4
+        w0, w1 = w[i] | (w[i + 1] << 32), w[i + 2] | (w[i + 3] << 32)
+        length = w0 >> 32
+        raw = bytes(self.region[self.hr.RING_OFFSET + at + 16:self.hr.RING_OFFSET + at + 16 + length])
+        return w0 & 0xFF, (w0 >> 8) & 0xFF, (w0 >> 16) & 0xFFFF, length, w1 & ((1 << 33) - 1), w1 >> 48, raw
+
+    def test_it_attaches_to_a_running_core_and_refuses_the_wrong_one(self):
+        ring = self.make()
+        self.assertTrue(ring.alive(1.0))
+        ring = self.make(version=0x100)                      # 1.0: older than the 1.1 this player is built for
+        with self.assertRaises(self.hr.RingError):
+            ring.alive(1.0)
+        ring = self.make(version=0x200)
+        with self.assertRaises(self.hr.RingError):
+            ring.alive(1.0)
+        ring = self.make()
+        self.words[0] = 0                                    # no core: no magic
+        with self.assertRaises(self.hr.RingError):
+            ring.alive(0.1)
+
+    def test_a_session_starts_with_a_nonce_and_continues_at_the_cores_read_index(self):
+        ring = self.make()
+        self.words[64] = 0x1235                              # a stale, misaligned write index from some earlier run
+        ring.new_session()
+        self.assertTrue(ring.session)
+        self.assertEqual(self.words[64], 0x1230)             # rounded down to 16
+        self.assertEqual(ring.w, 0x1230)
+        self.assertEqual(self.words[66], ring.nonce)
+
+    def test_an_access_unit_is_written_with_its_header_payload_padding_and_index(self):
+        ring = self.make()
+        ring.new_session()
+        start = ring.w
+        au = bytes([0, 0, 0, 1, 0x65]) + bytes(range(30))   # 35 bytes -> padded to 48
+        ring.write_au(au, pts=90000)
+        rtype, flags, seq, length, pts, sync, raw = self.record(start)
+        self.assertEqual((rtype, flags, seq, length, pts, sync), (2, 1, 0, 35, 90000, 0x5248))
+        self.assertEqual(raw, au)
+        self.assertEqual(ring.w, start + 16 + 48)
+        self.assertEqual(self.words[64], start + 64)         # the write index publishes it
+        ring.write_audio(bytes(8), pts=0)
+        rtype, flags, seq, length, pts, sync, raw = self.record(start + 64)
+        self.assertEqual((rtype, flags, seq, length), (3, 1, 1, 8))      # the next sequence number, audio takes only PTS_VALID
+        ring.write_au(au)                                    # no time stamp: no PTS flag
+        self.assertEqual(self.record(start + 64 + 32)[1], 0)
+
+    def test_a_record_that_would_cross_the_ring_end_is_preceded_by_a_pad(self):
+        ring = self.make()
+        ring.new_session()
+        size = self.hr.RING_SIZE
+        ring.w = size - 96                                   # 96 bytes left before the end
+        self.words[64] = ring.w
+        self.words[10] = ring.w                              # nothing unread
+        ring.write_au(bytes(200), pts=1)                     # 16 + 208 > 96
+        rtype, flags, seq, length, pts, sync, raw = self.record(size - 96)
+        self.assertEqual((rtype, length), (1, 80))           # a PAD that ends exactly at the ring's end
+        rtype, flags, seq2, length, pts, sync, raw = self.record(0)
+        self.assertEqual((rtype, length, seq2), (2, 200, seq + 1))
+        self.assertEqual(ring.w & 0xFFFFFFFF, size + 16 + 208)
+
+    def test_a_full_ring_makes_the_writer_wait_and_then_give_up(self):
+        ring = self.make()
+        ring.new_session()
+        self.consume = False                                 # the core reads nothing
+        self.words[10] = ring.w
+        big = bytes(0x300000)
+        self.assertTrue(ring.try_write(2, big, 0))
+        self.assertTrue(ring.try_write(2, big, 1))
+        self.assertFalse(ring.try_write(2, big, 2))          # 8 MB are full
+        t = [0.0]
+        ring.clock = lambda: t.__setitem__(0, t[0] + 1.0) or t[0]
+        with self.assertRaises(self.hr.RingError):
+            ring.write_au(big, 3, timeout=3.0)
+
+    def test_pause_and_volume_share_one_word_and_a_bad_record_is_refused_here(self):
+        ring = self.make()
+        ring.new_session()
+        ring.set_volume(20)
+        ring.set_pause(True)
+        self.assertEqual(self.words[68], 1 | (20 << 8))      # word 34
+        ring.set_pause(False)
+        self.assertEqual(self.words[68], 20 << 8)
+        with self.assertRaises(self.hr.RingError):
+            ring.write_audio(bytes(7))                       # whole 4-byte frames only
+        with self.assertRaises(self.hr.RingError):
+            ring.write_au(b'')
+
+    def test_the_status_copy_is_consistent_and_names_the_state(self):
+        ring = self.make()
+        self.words[8], self.words[9] = 5 | (2 << 8), 0       # word 4: state ERROR (5), error code 2
+        st = ring.status()
+        self.assertEqual((st['state'], st['error']), (5, 2))
+        self.assertIn('error', ring.state_text(st))
+
+
+class TsVideoReader(unittest.TestCase):
+    """The MPEG-TS reader that turns ffmpeg's stream copy into one access unit per record."""
+
+    @staticmethod
+    def pts_bytes(marker, value):
+        return bytes([(marker << 4) | (((value >> 30) & 7) << 1) | 1, (value >> 22) & 0xFF, (((value >> 15) & 0x7F) << 1) | 1,
+                      (value >> 7) & 0xFF, ((value & 0x7F) << 1) | 1])
+
+    def packets(self, pid, payload, first=True):
+        """TS packets carrying `payload`, the last one padded with an adaptation field."""
+        out = []
+        for i in range(0, len(payload), 184):
+            chunk = payload[i:i + 184]
+            pusi = 0x40 if (first and i == 0) else 0
+            if len(chunk) == 184:
+                out.append(bytes([0x47, pusi | (pid >> 8), pid & 0xFF, 0x10]) + chunk)
+            else:
+                fill = 184 - len(chunk)
+                if fill == 1:
+                    af = bytes([0])
+                else:
+                    af = bytes([fill - 1, 0]) + bytes([255]) * (fill - 2)
+                out.append(bytes([0x47, pusi | (pid >> 8), pid & 0xFF, 0x30]) + af + chunk)
+        return out
+
+    def stream(self, units, pmt_pid=0x1000, video_pid=0x100):
+        pat = bytes([0, 0, 0xB0, 13, 0, 1, 0xC1, 0, 0, 0, 1, 0xE0 | (pmt_pid >> 8), pmt_pid & 0xFF, 0, 0, 0, 0])
+        pmt = bytes([0, 2, 0xB0, 23, 0, 1, 0xC1, 0, 0, 0xE0 | (video_pid >> 8), video_pid & 0xFF, 0xF0, 0,
+                     0x0F, 0xE1, 0x01, 0xF0, 0,                       # an audio stream first (AAC, ADTS) ...
+                     0x1B, 0xE0 | (video_pid >> 8), video_pid & 0xFF, 0xF0, 0, 0, 0, 0])
+        pkts = self.packets(0, pat) + self.packets(pmt_pid, pmt)
+        for pts, dts, au in units:
+            if dts is None:
+                head = bytes([0, 0, 1, 0xE0, 0, 0, 0x80, 0x80, 5]) + self.pts_bytes(2, pts)
+            else:
+                head = bytes([0, 0, 1, 0xE0, 0, 0, 0x80, 0xC0, 10]) + self.pts_bytes(3, pts) + self.pts_bytes(1, dts)
+            pkts += self.packets(video_pid, head + au)
+        return b''.join(pkts)
+
+    def test_access_units_come_out_whole_with_their_time_stamps(self):
+        from ytcrt import tsdemux
+        small = bytes([0, 0, 1, 9, 0x10]) + bytes(range(40))
+        big = bytes([0, 0, 0, 1, 0x65]) + bytes((i * 7) & 255 for i in range(700))     # spans several TS packets
+        data = self.stream([(90000 + 3750, 90000, big), (90000 + 7500, 90000 + 3750, small), ((1 << 33) - 5, (1 << 33) - 9, small)])
+        r = tsdemux.TsVideo()
+        got = r.feed(data[:1000]) + r.feed(data[1000:])         # fed in two uneven pieces
+        got += r.flush()
+        self.assertEqual([g[0] for g in got], [93750, 97500, (1 << 33) - 5])
+        self.assertEqual([g[1] for g in got], [90000, 93750, (1 << 33) - 9])
+        self.assertEqual([g[2] for g in got], [big, small, small])
+        self.assertEqual(r.video_pid, 0x100)
+
+    def test_a_unit_without_a_decode_time_uses_its_presentation_time_and_noise_before_a_sync_byte_is_skipped(self):
+        from ytcrt import tsdemux
+        au = bytes([0, 0, 1, 9, 0x10, 1, 2, 3])
+        data = bytes([0, 1, 2]) + self.stream([(5000, None, au), (8750, None, au)])
+        r = tsdemux.TsVideo()
+        got = r.feed(data) + r.flush()
+        self.assertEqual([(g[0], g[1]) for g in got], [(5000, 5000), (8750, 8750)])
+        self.assertGreaterEqual(r.skipped, 1)
+
+
+class H264Feeder(unittest.TestCase):
+    """The feeder: fake ffmpeg processes in, records in a fake ring out."""
+
+    class Proc:
+        def __init__(self, data):
+            import io
+            self.stdout, self.stderr = io.BytesIO(data), io.BytesIO(b'')
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return 0
+
+    def setUp(self):
+        self.ring_test = H264Ring('test_it_attaches_to_a_running_core_and_refuses_the_wrong_one')
+        self.ts = TsVideoReader('test_access_units_come_out_whole_with_their_time_stamps')
+
+    def run_feeder(self, units, audio_frames, first_start=0.0):
+        from ytcrt import h264feed
+        ring = self.ring_test.make()
+        self.ring_test.words[8] = 3                            # word 4: the core is PLAYING
+        ring.new_session()
+        self.started = []
+        video_bytes = self.ts.stream(units)
+        pcm = bytes((i * 3) & 127 for i in range(audio_frames * 4))
+
+        def spawn(cmd, **kw):
+            self.started.append(cmd)
+            return self.Proc(video_bytes if cmd[0] == 'V' else pcm)
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], lambda s: ['A', s], log=lambda m: None, spawn=spawn)
+        feeder.start(first_start)
+        done = []
+
+        def tick():
+            if feeder.stats['au'] == len(units) and not done:
+                done.append(1)
+                self.ring_test.words[8] = 4                    # the core has shown the last picture
+        result = feeder.run(stop=lambda: False, tick=tick, first_timeout=5.0)
+        return ring, feeder, result
+
+    def records(self, ring, start=0):
+        out, at = [], start
+        while at < ring.w:
+            rtype, flags, seq, length, pts, sync, raw = self.ring_test.record(at & (ring.hr.RING_SIZE - 1) if hasattr(ring, 'hr') else at)
+            out.append((rtype, flags, seq, length, pts))
+            at += 16 + ((length + 15) & ~15)
+        return out
+
+    def test_video_and_audio_are_interleaved_in_time_order_and_the_last_unit_ends_the_stream(self):
+        au = bytes([0, 0, 0, 1, 9, 0xF0]) + bytes(100)
+        # ten access units half a second apart, starting 58.9 s into the source (a seek lands on the keyframe before the wanted time)
+        base = int(58.9 * 90000)
+        units = [(base + i * 45000, base + i * 45000 - 3750, au) for i in range(10)]
+        ring, feeder, result = self.run_feeder(units, audio_frames=48000 * 6)
+        self.assertEqual(result, 'ended')
+        self.assertEqual([c[0] for c in self.started], ['V', 'A'])
+        self.assertAlmostEqual(self.started[1][1], 58.9, places=3)         # the audio starts where the video does
+        recs = self.records(ring)
+        videos = [r for r in recs if r[0] == 2]
+        audios = [r for r in recs if r[0] == 3]
+        self.assertEqual([v[4] for v in videos], [u[0] for u in units])
+        self.assertEqual(videos[-1][1], 1 | 4)                              # PTS_VALID | END_OF_STREAM on the last access unit only
+        self.assertTrue(all(v[1] == 1 for v in videos[:-1]))
+        self.assertEqual(audios[0][4], base)                                # the first audio chunk is stamped with the video's start
+        self.assertEqual(audios[1][4], base + 4800 * 90000 // 48000)       # 100 ms later
+        self.assertTrue(all(a[3] == 19200 for a in audios))
+        # audio never runs more than a second ahead of the newest video written before it (until the video is finished)
+        newest = 0
+        for r in recs:
+            if r[0] == 2:
+                newest = max(newest, r[4])
+            elif r[0] == 3 and newest < videos[-1][4]:
+                self.assertLessEqual(r[4], newest + 90000)
+        self.assertEqual(feeder.stats['au'], 10)
+
+    def test_a_video_that_never_arrives_is_reported(self):
+        from ytcrt import h264feed
+        ring = self.ring_test.make()
+        ring.new_session()
+        feeder = h264feed.Feeder(ring, lambda s: ['V', s], None, log=lambda m: None, spawn=lambda cmd, **kw: self.Proc(b''))
+        feeder.start(0)
+        with self.assertRaises(RuntimeError):
+            feeder.run(stop=lambda: False, first_timeout=2.0)
+
+    def test_the_ffmpeg_commands_copy_the_video_and_decode_the_audio_on_the_sources_time_line(self):
+        from ytcrt import h264feed
+        rt = type('Rt', (), {'ffmpeg': Path('ffmpeg'), 'ca': Path('ca')})()
+        src = {'url': 'https://example.test/v', 'headers': {'User-Agent': 'x'}}
+        v = h264feed.video_copy_command(rt, src, 12.5)
+        self.assertIn('copy', v)
+        self.assertIn('-copyts', v)
+        self.assertLess(v.index('-ss'), v.index('-i'))
+        self.assertEqual(v[v.index('-f') + 1], 'mpegts')
+        self.assertNotIn('libx264', v)
+        a = h264feed.audio_pcm_command(rt, src, 12.5)
+        self.assertEqual(a[a.index('-ar') + 1], '48000')
+        self.assertEqual(a[a.index('-ac') + 1], '2')
+        self.assertEqual(a[a.index('-f') + 1], 's16le')
+
+
 class CpuLog(unittest.TestCase):
     def test_proc_stat_with_spaces_in_the_name(self):
         from ytcrt import cpu
