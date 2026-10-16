@@ -70,7 +70,8 @@ class App:
         if store.settings.get('decode_threads'):
             pipeline.DECODE_THREADS = int(store.settings['decode_threads'])        # and the decoder thread count
         self.play_quality = 'Auto'                                    # the quality of the video being played (the More panel can change it)
-        self.yuv = getattr(link, 'kind', 'rgb') == 'yuv'              # the v0.15 core: the GUI is an overlay, pictures are YUV
+        self.h264 = getattr(link, 'kind', 'rgb') == 'h264'            # the H264 core: the FPGA decodes, the GUI is a framebuffer overlay
+        self.yuv = getattr(link, 'kind', 'rgb') in ('yuv', 'h264')    # an overlay core: the GUI is a YUV overlay (the H264 link converts it)
         self.canvas = YuvCanvas(320, 240) if self.yuv else Canvas(320, 240)
         self.stack = []
         self.dirty = True
@@ -895,6 +896,8 @@ class App:
     def _play(self, v, start_ms):
         if self.missing_tools():
             return
+        if self.h264:
+            return self._play_h264(v, start_ms)
         prof, speed = self.profile(), self.store.settings['decode_speed']
         q = self.store.settings.get('quality', 'Auto')
         self.play_quality = q
@@ -1030,6 +1033,230 @@ class App:
         self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))
         self.finished = outcome == 'eof'
         self.dirty = True
+
+    def _play_h264(self, v, start_ms):
+        """Play a video on the H264 core: ffmpeg only repackages the H.264 and decodes the audio; the FPGA does the rest."""
+        prof = self.profile()
+        q = self.store.settings.get('quality', 'Auto')
+        self.play_quality = q
+        self.log('Play %s "%s" (H264 core) quality=%s resume=%dms' % (v['id'], v.get('title', '')[:60], q, start_ms))
+        media = self._resolve(v, prof, q)
+        if media is None:
+            return
+        if not v.get('title'):
+            v['title'] = media.title
+        self.finished = False
+        pos_ms, outcome = start_ms, 'stop'
+        refresh_left = 1
+        while True:
+            try:
+                media = pipeline.h264_media(media, q)
+            except ValueError as exc:
+                self.log('Cannot play on the H264 core: %s' % exc)
+                self.push(ui.TextView('Cannot play', ['!' + l for l in ui.wrap(str(exc), 37, 14)]))
+                return
+            self.log('H264 core: %dx%d %s fps %s kbps (%s)' % (media.video['width'], media.video['height'], media.video.get('fps'),
+                                                             round(media.tbr or 0), media.video['format_id']))
+            try:
+                outcome, pos_ms = self._h264_loop(v, media, pos_ms)
+            except Quit:
+                raise
+            except pipeline.PlaybackError as exc:
+                self.log('Playback error: ' + ' | '.join(str(exc).splitlines())[:600])
+                self.push(ui.TextView('Playback stopped', ['!' + l for l in ui.wrap(str(exc), 37, 14)]))
+                return
+            if outcome == 'quality':
+                q = self.play_quality
+                continue
+            if outcome == 'refresh' and refresh_left > 0:
+                refresh_left -= 1
+                pipeline.forget(self.rt, v['id'])
+                fresh = self._resolve(v, prof, q)
+                if fresh is None:
+                    return
+                media = fresh
+                continue
+            break
+        self.log('Playback %s at %s of %s' % ('finished' if outcome == 'eof' else 'stopped', ui.mmss(pos_ms), ui.mmss(media.duration * 1000)))
+        self.store.record_play(v, pos_ms, media.duration * 1000, finished=(outcome == 'eof'))
+        self.finished = outcome == 'eof'
+        self.dirty = True
+
+    def _h264_crop(self, mode):
+        """Fill / 14:9 / Off -> the core's Analog Aspect (3 Crop, 2 Letterbox). The core has no 14:9: it shows Fill instead."""
+        try:
+            self.link.ring.request_settings(analog_aspect=2 if mode == 'Off' else 3)
+        except Exception as exc:
+            self.log('Could not change the core\'s aspect: %s' % exc)
+
+    def _h264_loop(self, v, media, start_ms):
+        """The play loop for the H264 core. -> (outcome, position in ms)."""
+        from . import h264feed
+        link, ring = self.link, self.link.ring
+        dur_ms = media.duration * 1000
+        now = time.monotonic()
+        state = {'paused': False, 'pending': None, 'pending_at': 0.0, 'seeking': False, 'note': '', 'osd_until': now + OSD_SECONDS,
+                 'more': None, 'crop': self.store.settings.get('crops', {}).get(v['id']) or self.store.settings.get('crop', 'Fill'),
+                 'quality': self.play_quality, 'tier': media.tier, 'flags': 0, 'quality_req': None, 'quality_at': 0.0}
+        self._h264_crop(state['crop'])
+        feed = {'feeder': None, 'thread': None, 'stop': None, 'result': None, 'error': None}
+        position = {'ms': start_ms}
+
+        def stop_feed():
+            if feed['feeder'] is not None:
+                feed['stop'].set()
+                feed['feeder'].close()
+                feed['thread'].join(timeout=5)
+                feed['feeder'] = None
+
+        def start_feed(at_ms):
+            stop_feed()
+            ring.new_session()                                     # drops whatever the core had not read and resets its display
+            ring.set_pause(False)
+            f = h264feed.Feeder(ring, lambda s: h264feed.video_copy_command(self.rt, media.video, s),
+                                (lambda s: h264feed.audio_pcm_command(self.rt, media.audio, s)) if media.audio else None, log=self.log)
+            stop = threading.Event()
+            feed.update(feeder=f, stop=stop, result=None, error=None)
+
+            def work():
+                try:
+                    feed['result'] = f.run(stop=stop.is_set, first_timeout=90.0)
+                except Exception as exc:
+                    feed['error'] = exc
+            f.start(at_ms / 1000.0)
+            feed['thread'] = threading.Thread(target=work, daemon=True)
+            feed['thread'].start()
+            position['ms'] = at_ms
+            state.update(seeking=True, opened_at=time.monotonic())
+
+        def lines():
+            f = feed['feeder']
+            tail = (f.errors[-1][1].strip().splitlines() or [''])[-1] if f is not None and f.errors else ''
+            return [ui.clip(v.get('title', ''), 33), 'Starting... %ds' % (time.monotonic() - state['opened_at']),
+                    '%s, %d kbps (H264 core)' % (media.label, round(media.tbr or 0)), ui.clip(pipeline.safe_text(tail), 33)]
+
+        def set_crop(mode, now):
+            if mode == state['crop']:
+                return
+            state['crop'] = mode
+            crops = dict(self.store.settings.get('crops', {}))
+            crops.pop(v['id'], None)
+            crops[v['id']] = mode
+            self.store.set('crops', dict(list(crops.items())[-200:]))
+            self._h264_crop(mode)
+            state['note'] = 'Crop: ' + mode
+
+        def more_key(act, now):
+            m = state['more']
+            if act in ('back', 'menu'):
+                state['more'] = None
+            elif act == 'down':
+                m['sel'] = (m['sel'] + 1) % 4
+            elif act == 'up':
+                m['sel'] = (m['sel'] - 1) % 4
+            elif m['sel'] == 0 and act in ('left', 'right', 'ok'):
+                step = -1 if act == 'left' else 1
+                set_crop(profiles.CROPS[(profiles.CROPS.index(state['crop']) + step) % len(profiles.CROPS)], now)
+            elif m['sel'] == 1 and act in ('left', 'right', 'ok'):
+                step = -1 if act == 'left' else 1
+                state['quality'] = profiles.QUALITIES[(profiles.QUALITIES.index(state['quality']) + step) % len(profiles.QUALITIES)]
+                state.update(quality_req=state['quality'], quality_at=now, note='Quality: ' + state['quality'])
+            elif m['sel'] == 2 and act in ('left', 'right', 'ok'):
+                state['note'] = 'Saved' if self.store.toggle_later(v) else 'Removed'
+            elif m['sel'] == 3 and act == 'ok':
+                state['more'] = None
+            state['osd_until'] = now + OSD_SECONDS
+
+        loading = ui.Message('Starting', lines, spinner=True, on_back=False)
+        state['opened_at'] = now
+        self.push(loading)
+        shown_osd = False
+        next_save = now + 10
+        try:
+            start_feed(start_ms)
+            while True:
+                if loading is not None:
+                    self.loading_frame()
+                link.health()
+                now = time.monotonic()
+                act = self.inputs.get(0.02)
+                if act and state['more'] is not None:
+                    more_key(act, now)
+                    act = None
+                if act == 'back':
+                    return 'stop', position['ms']
+                if act in ('left', 'right', 'pgup', 'pgdn'):
+                    d = {'left': -SEEK_SMALL, 'right': SEEK_SMALL, 'pgup': -SEEK_BIG, 'pgdn': SEEK_BIG}[act]
+                    basepos = state['pending'] if state['pending'] is not None else position['ms']
+                    target = max(0, basepos + d * 1000)
+                    if dur_ms:
+                        target = min(target, max(0, dur_ms - 2000))
+                    state.update(pending=target, pending_at=now, osd_until=now + OSD_SECONDS, note=('>> ' if d > 0 else '<< ') + ui.mmss(target))
+                elif act == 'ok':
+                    state['paused'] = not state['paused']
+                    ring.set_pause(state['paused'])
+                    state['osd_until'] = now + OSD_SECONDS
+                elif act == 'alt':
+                    state['note'] = 'Saved' if self.store.toggle_later(v) else 'Removed'
+                    state['osd_until'] = now + OSD_SECONDS
+                elif act == 'menu':
+                    state.update(more={'sel': 0}, osd_until=now + OSD_SECONDS)
+                elif act:
+                    state['osd_until'] = now + OSD_SECONDS
+                if (state['quality_req'] is not None and now - state['quality_at'] > QUALITY_SETTLE and state['pending'] is None
+                        and state['quality_req'] != self.play_quality):
+                    self.play_quality, state['quality_req'] = state['quality_req'], None
+                    return 'quality', position['ms']
+                if state['pending'] is not None and now - state['pending_at'] > SEEK_SETTLE:
+                    target, state['pending'] = state['pending'], None
+                    state.update(paused=False, note='Seeking...', osd_until=now + OSD_SECONDS + 3)
+                    start_feed(target)
+                # what the core says: the position, and whether a picture is on the screen
+                st = ring.status()
+                if st['state'] == 5:
+                    raise pipeline.PlaybackError('The H264 core stopped: ' + ring.state_text(st))
+                if st['state'] in (3, 4) and st['pictures_seen'] > 0:
+                    position['ms'] = min(dur_ms or 1 << 60, st['stc'] // 90)
+                    if loading is not None:
+                        if self.screen is loading:
+                            self.pop()
+                        loading = None
+                        self.log('First picture %.1f s after starting' % (now - state['opened_at']))
+                        link.hide_overlay()
+                        shown_osd = False
+                    if state['seeking']:
+                        state.update(seeking=False, note='', osd_until=now + 1.5)
+                # the playback bar
+                if loading is None:
+                    show_osd = now < state['osd_until'] or state['more'] is not None
+                    if show_osd:
+                        self._osd_overlay(v, position['ms'] if state['pending'] is None else state['pending'], dur_ms,
+                                          state['paused'], state)
+                        shown_osd = True
+                    elif shown_osd:
+                        link.hide_overlay()
+                        self.osd_sig = None
+                        shown_osd = False
+                if now >= next_save and not state['paused']:
+                    next_save = now + 10
+                    self.store.record_play(v, position['ms'], dur_ms, force=False)
+                if feed['error'] is not None:
+                    exc = feed['error']
+                    feed['error'] = None
+                    msg = str(exc)
+                    if '403' in msg and not state.get('retried_403'):
+                        state['retried_403'] = True
+                        self.log('YouTube refused the stream (403); asking for fresh stream URLs')
+                        return 'refresh', position['ms']
+                    raise pipeline.PlaybackError(msg)
+                if feed['result'] == 'ended':
+                    return 'eof', dur_ms
+        finally:
+            stop_feed()
+            link.hide_overlay()
+            self.osd_sig = None
+            if loading is not None and self.screen is loading:
+                self.pop()
 
     @staticmethod
     def _decoder_load(state):

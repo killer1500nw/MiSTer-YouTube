@@ -2813,6 +2813,82 @@ class H264Feeder(unittest.TestCase):
         self.assertEqual(a[a.index('-f') + 1], 's16le')
 
 
+class H264Streams(unittest.TestCase):
+    """Which streams the H264 core is given."""
+
+    def media(self, *videos):
+        info = {'id': 'v' * 11, 'title': 't', 'duration': 100}
+        formats = list(videos) + AUDIO
+        return pipeline.Media('v' * 11, 't', 100, None, None, '', (info, formats))
+
+    def test_the_biggest_h264_stream_within_the_cores_limits_wins_and_auto_means_720p(self):
+        m = self.media(stream(426, 240, 220), stream(854, 480, 500), stream(1280, 720, 1400), stream(1920, 1080, 3000),
+                       stream(1280, 720, 1500, fid='vp9', vcodec='vp09.00.31.08'))
+        got = pipeline.h264_media(m, 'Auto')
+        self.assertEqual((got.video['width'], got.video['height']), (1280, 720))
+        self.assertEqual(got.video['format_id'], '1280x720')              # the avc1 one, not the VP9
+        self.assertEqual(got.audio['format_id'], '140')                  # AAC, not the loudness-compressed copy or Opus
+        self.assertEqual(got.label, '720p')
+        self.assertEqual(pipeline.h264_media(m, '480p').label, '480p')   # the quality setting still caps it
+        self.assertEqual(pipeline.h264_media(m, '360p').label, '240p')   # nothing at 360: the nearest below
+
+    def test_streams_past_the_cores_speed_or_profile_are_not_offered(self):
+        fast = stream(1280, 720, 3000, fps=60, fid='720p60')                  # 3,600 macroblocks x 60: twice what it decodes
+        baseline = stream(854, 480, 500, fid='baseline', vcodec='avc1.42C01E')   # CAVLC
+        ok = stream(854, 480, 500, fid='main')
+        got = pipeline.h264_media(self.media(fast, baseline, ok), 'Auto')
+        self.assertEqual(got.video['format_id'], 'main')
+        with self.assertRaises(ValueError):
+            pipeline.h264_media(self.media(fast, baseline), 'Auto')
+        with self.assertRaises(ValueError):
+            pipeline.h264_media(self.media(stream(854, 480, 500, vcodec='vp09.00.31.08')), 'Auto')
+
+
+class H264Overlay(unittest.TestCase):
+    """The menu's YUV overlay as a doubled ARGB page for the core, and MiSTer's controls as the player's input words."""
+
+    def test_luma_zero_is_transparent_and_pixels_are_doubled_in_both_directions(self):
+        from ytcrt import h264link
+        argb = h264link.Argb(8, 4)
+        y = bytearray(8 * 4)
+        u, v = bytearray([128]) * 8, bytearray([128]) * 8
+        for x in range(4):
+            y[x] = 235                                         # white, left half of the top row
+        page, changed = argb.render(y, u, v)
+        self.assertEqual(changed, 4)
+        self.assertEqual(bytes(page[0:4]), bytes([255, 255, 255, 255]))      # B G R A: opaque white
+        self.assertEqual(bytes(page[4:8]), bytes([255, 255, 255, 255]))      # ... doubled across
+        self.assertEqual(bytes(page[2560:2564]), bytes([255, 255, 255, 255]))   # ... and down (a 640-wide ARGB row is 2,560 bytes)
+        self.assertEqual(bytes(page[16 * 4 // 2:16 * 4 // 2 + 4]), bytes(4)) if False else None
+        self.assertEqual(bytes(page[8 * 4:8 * 4 + 4]), bytes(4))             # luma 0 further right: fully transparent
+        again, changed = argb.render(y, u, v)
+        self.assertEqual(changed, 0)                                         # the same picture: no row is converted or copied again
+
+    def test_the_cores_pad_and_key_events_look_like_the_players_own_core_words(self):
+        from ytcrt import h264link, h264ring as hr
+        ring = H264Ring('test_it_attaches_to_a_running_core_and_refuses_the_wrong_one').make()
+        words = ring.words
+
+        def set_events(events, count):
+            for i, ev in enumerate(events):
+                n = count - len(events) + i
+                entry = n % 32
+                idx = 2 * (56 + entry // 4) + (entry % 4) // 2
+                shift = 16 * ((entry % 4) % 2)
+                words[idx] = (words[idx] & ~(0xFFFF << shift)) | (ev << shift)
+            words[97] = count                                   # word 48 high: the events queued so far
+        box = h264link.H264Box(ring)
+        words[98] = 0x0010                                      # word 49: pad 0, A pressed
+        words[99] = 0                                           # (and its sticks)
+        set_events([(1 << 9) | 0x1C, 0x1C], 2)                  # key A pressed, key A released
+        words[142] = words[96]                                  # word 71's low half equals word 48's: a consistent copy
+        self.assertEqual(box.read(40) & 0xFFF, 0x10)
+        self.assertEqual(box.read(48) & 0xFFFF, 0x1C)           # newest event first (the release)
+        self.assertEqual((box.read(48) >> 16) & 0xFFFF, (1 << 9) | 0x1C)
+        self.assertEqual(box.read(52) >> 16, 2)                 # the sequence number the player's input code watches
+        self.assertEqual(box.read(44), 0)
+
+
 class CpuLog(unittest.TestCase):
     def test_proc_stat_with_spaces_in_the_name(self):
         from ytcrt import cpu

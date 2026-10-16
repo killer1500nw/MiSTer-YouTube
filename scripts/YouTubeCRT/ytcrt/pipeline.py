@@ -416,19 +416,56 @@ def choose_streams(info, formats, profile, quality='Auto', cal=None, mult=1.0, m
                                                                 rank[0].get('tbr') or 0, round(cost(rank[0]) * 100))
     else:
         video = rank[0]
-    muxed = video.get('acodec') not in (None, 'none')
-    audio = None
-    if muxed:
-        audio = video
-    else:
-        auds = [f for f in playable if f.get('acodec') not in (None, 'none') and f.get('vcodec') in (None, 'none')]
-        if auds:     # AAC in m4a first, and the ~130 kbps "medium" track: light to decode, plenty for this DAC
-            audio = max(auds, key=lambda f: (f.get('language_preference') or 0,        # the original / default language, not an auto-dub
-                                            (f.get('acodec') or '').startswith('mp4a'), f.get('ext') == 'm4a',
-                                            'drc' not in str(f.get('format_id')),      # not the loudness-compressed copy
-                                            -abs((f.get('tbr') or 130) - 130)))
+    audio = _pick_audio(video, playable)
     return (_source(video, info), (_source(audio, info) if audio else None),
             profiles.label_for(video['width'], video['height']), profiles.predicted_cost(video, cal, mult), why)
+
+
+def _pick_audio(video, playable):
+    """The audio stream for a video: the video itself when it is muxed, else the best audio-only stream (or None)."""
+    if video.get('acodec') not in (None, 'none'):
+        return video
+    auds = [f for f in playable if f.get('acodec') not in (None, 'none') and f.get('vcodec') in (None, 'none')]
+    if auds:     # AAC in m4a first, and the ~130 kbps "medium" track: light to decode, plenty for this DAC
+        return max(auds, key=lambda f: (f.get('language_preference') or 0,        # the original / default language, not an auto-dub
+                                        (f.get('acodec') or '').startswith('mp4a'), f.get('ext') == 'm4a',
+                                        'drc' not in str(f.get('format_id')),      # not the loudness-compressed copy
+                                        -abs((f.get('tbr') or 130) - 130)))
+    return None
+
+
+H264_BOX = {'240p': 240, '360p': 360, '480p': 480, 'Auto': 720}      # the shorter side allowed; Auto = the best the H264 core plays
+H264_MAX_MBS = 3600                                                  # 1280x720
+H264_MB_RATE = 108000                                                # macroblocks a second the core decodes in real time (720p30, 854x480@60)
+H264_PROFILES = (0x4D, 0x64)                                         # Main and High: what the core decodes (Baseline is CAVLC)
+
+
+def h264_media(media, quality='Auto'):
+    """The streams the H264 core can play for an already resolved video: the biggest H.264 (Main/High) stream within its limits and the
+    quality setting. Nothing is predicted about the ARM: the FPGA decodes. -> Media, or raises ValueError."""
+    info, formats = media.catalog
+    playable = [f for f in formats if f.get('protocol') in ('https', 'http') and str(f.get('url', '')).startswith(('https://', 'http://'))]
+
+    def usable(f):
+        code = str(f.get('vcodec') or '')
+        if not code.startswith('avc1') or not f.get('width') or not f.get('height'):
+            return False
+        try:
+            profile = int(code.split('.')[1][:2], 16)
+        except (IndexError, ValueError):
+            return False
+        mbs = -(-f['width'] // 16) * -(-f['height'] // 16)
+        return profile in H264_PROFILES and mbs <= H264_MAX_MBS and mbs * (f.get('fps') or 30) <= H264_MB_RATE
+    pool = [f for f in playable if usable(f)]
+    if not pool:
+        raise ValueError('This video has no H.264 stream the H264 core can play.')
+    box = H264_BOX.get(quality, 720)
+    fit = [f for f in pool if min(f['width'], f['height']) <= box] or [min(pool, key=_area)]
+    fit = [f for f in fit if f.get('acodec') in (None, 'none')] or fit
+    video = max(fit, key=lambda f: (_area(f), f.get('tbr') or 0))
+    audio = _pick_audio(video, playable)
+    return Media(media.id, media.title, media.duration, _source(video, info), _source(audio, info) if audio else None,
+                 profiles.label_for(video['width'], video['height']), media.catalog, '', 0.0)
 
 
 def _client(src):

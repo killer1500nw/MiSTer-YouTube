@@ -235,8 +235,8 @@ class Feeder:
         end_pts = self.last_pts
         while not stop():
             st = ring.status()
-            if st['state'] == 4 or (st['state'] == 3 and st['stc'] >= end_pts):
-                return 'ended'
+            if st['state'] == 4 or (st['state'] == 3 and st['stc'] >= end_pts + 2 * CLOCK):
+                return 'ended'           # (normally the core says ENDED once the last picture has been shown)
             if st['state'] == 5:
                 raise hr.RingError('The core stopped: ' + ring.state_text(st))
             ring.wait(0.05)

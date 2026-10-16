@@ -58,7 +58,8 @@ class Ring:
     def __init__(self, region, tick=None, clock=time.monotonic, sleep=time.sleep):
         self.region = region
         self.words = memoryview(region).cast('I')                 # 32-bit accesses only: unaligned ones fault on the MiSTer's ARM
-        self.base = ctypes.addressof(ctypes.c_char.from_buffer(region))
+        self._anchor = ctypes.c_char.from_buffer(region)          # keeps the buffer exported; `release()` lets the mapping close again
+        self.base = ctypes.addressof(self._anchor)
         self.tick, self.clock, self.sleep = tick, clock, sleep    # `tick` is for the tests: it plays the core while we wait
         self.session = False
         self.nonce = 0
@@ -88,7 +89,7 @@ class Ring:
         """A consistent copy of the words the player cares about (the core writes them once a frame; read the tail, the words, the head)."""
         for _ in range(attempts):
             tail = self.lo(W_SEQ_TAIL)
-            words = {w: self.word(w) for w in (W_STATE, W_READ, W_ERR_WORD, W_STC, 8, 15, 16, 19, 25, 26, 27)}
+            words = {w: self.word(w) for w in (W_STATE, W_READ, W_ERR_WORD, W_STC, 8, 15, 16, 19, 25, 26, 27, 30)}
             if self.lo(W_HEARTBEAT) == tail:
                 st = words[W_STATE]
                 return {'heartbeat': tail, 'state': st & 0xFF, 'error': (st >> 8) & 0xFF, 'error_at': st >> 32,
@@ -98,7 +99,7 @@ class Ring:
                         'pictures_seen': words[15] & 0xFFFFFFFF, 'refused': words[15] >> 32,
                         'frontend_errors': words[16] & 0xFFFFFFFF, 'pictures_decoded': words[19] & 0xFFFFFFFF,
                         'skipped': words[26] & 0xFFFFFFFF, 'late': (words[26] >> 32) & 0xFFFF, 'starved': (words[26] >> 48) & 0xFFFF,
-                        'raw_state': st}
+                        'raw_state': st, 'raw_settings_seq': (words[30] >> 24) & 0xFF}
             self.wait(0.0005)
         raise RingError('The core is writing its status all the time.')
 
@@ -141,7 +142,11 @@ class Ring:
             nonce = (nonce + 1) & 0xFFFFFFFF
         self.session = False
         self.store(W_PAUSE, self._pause_word())
-        self.store(W_SETTINGS, 0)
+        if not self.set_word:
+            self.set_seq = (self.status()['raw_settings_seq'])         # numbering continues from what the core consumed
+        self.store(W_SETTINGS, self.set_word)
+        if self.ovl:
+            self._ovl_write()                                     # this program's overlay again (a new session starts without one)
         widx = self.lo(W_WINDEX)
         if widx & 15:
             self.store(W_WINDEX, widx & ~15)                      # a cold boot's random memory
@@ -239,10 +244,109 @@ class Ring:
         self.atten = max(0, min(255, int(atten)))
         self.store(W_PAUSE, self._pause_word())
 
+    # the overlay: a page of the Linux framebuffer drawn over the video -----------------------------------------------------------
+    OVL_FORMATS = {'1555': 0, '4444': 1, '8888': 2}
+    set_word = 0
+    set_seq = 0
+    OPT_WIDTH = (2, 2, 2, 1, 2, 2, 2)           # the core's menu options in the order of its mirror: aspect, deinterlace, video output,
+    OPT_COUNT = (3, 3, 4, 2, 4, 4, 3)           # HDMI deinterlace, analog aspect, refresh rate, anti-twitter
+    OPT_NAMES = ('aspect', 'deint', 'video_out', 'hdmi_deint', 'analog_aspect', 'refresh', 'anti_twitter')
+
+    def request_settings(self, **values):
+        """Change menu options of the core from here (analog_aspect=3 ...). The core's own menu adopts them. -> the request's number."""
+        mask, word, lsb = 0, 0, 0
+        for i, name in enumerate(self.OPT_NAMES):
+            if name in values:
+                if not 0 <= values[name] < self.OPT_COUNT[i]:
+                    raise RingError('%s=%r is not a value of that option.' % (name, values[name]))
+                mask |= 1 << i
+                word |= values[name] << lsb
+            lsb += self.OPT_WIDTH[i]
+        if not mask:
+            raise RingError('No option named.')
+        self.set_seq = 1 if self.set_seq >= 255 else self.set_seq + 1
+        word |= (mask << 13) | (self.set_seq << 24)
+        self.store(W_SETTINGS, word)
+        self.set_word = word
+        return self.set_seq
+
+    def clear_settings(self):
+        self.set_word = 0
+        self.store(W_SETTINGS, 0)
+
+    ovl = None                       # (ctl, base, size word, stride, band word) of the descriptor in force, or None (hidden)
+    ovl_gen = 0
+
+    def overlay_show(self, base, width, height, stride, fmt='8888', band=None):
+        """Describe an overlay page (a physical address inside the framebuffer). -> the generation to wait for in `overlay_seen`."""
+        first, last = band if band else (0, height - 1)
+        self.ovl = (1 | (self.OVL_FORMATS[fmt] << 1), base, width | (height << 16), stride, first | (last << 16))
+        return self._ovl_write()
+
+    def overlay_hide(self):
+        self.ovl = None
+        return self._ovl_write()
+
+    def _ovl_write(self):
+        self.ovl_gen = (self.ovl_gen + 1) & 0xFFFFFFFF or 1
+        ctl, base, size, stride, band = self.ovl if self.ovl else (0, 0, 0, 0, 0)
+        self.store(79, self.ovl_gen)                               # the generation first ...
+        self.store(73, ctl)
+        self.store(74, base)
+        self.store(75, size)
+        self.store(76, stride)
+        self.store(77, band)
+        self.store(78, 0)
+        self.store(72, self.ovl_gen)                               # ... and last: if they differ the core caught us writing
+        return self.ovl_gen
+
+    def overlay_seen(self):
+        """(generation the core read last, state: 0 hidden / 1 shown / 2 refused, error code)."""
+        w = self.word(46)
+        return w & 0xFFFFFFFF, (w >> 32) & 3, (w >> 36) & 15
+
+    def raster(self):
+        """(width, height) of the core's output picture area, which overlay pages are centred on."""
+        w = self.word(80)
+        return w & 0xFFF, (w >> 12) & 0xFFF
+
+    # the input region: MiSTer's gamepads and keys, passed on by the core -----------------------------------------------------
+    def input_snapshot(self, attempts=10):
+        """-> (pad buttons [6], event_count) as a consistent copy of the input region (word 71 first, word 48 last)."""
+        for _ in range(attempts):
+            tail = self.lo(71)
+            pads = [self.lo(49 + k) & 0xFFFF for k in range(6)]
+            count = self.hi(48)
+            if self.lo(48) == tail:
+                return pads, count
+        return pads, count
+
+    def input_events(self, since):
+        """Events queued after number `since`: -> (new count, [16-bit events]). Events lost to a slow reader are skipped."""
+        pads, count = self.input_snapshot()
+        behind = (count - since) & 0xFFFFFFFF
+        if behind > 0x80000000:                                      # since is ahead of the core (a core reload): start over
+            return count, []
+        behind = min(behind, 32)
+        out = []
+        for n in range((count - behind) & 0xFFFFFFFF, count):
+            entry = n % 32
+            word = self.lo(56 + entry // 4) | (self.hi(56 + entry // 4) << 32)
+            out.append((word >> (16 * (entry % 4))) & 0xFFFF)
+        return count, out
+
     def close(self):
         try:
             self.store(W_PAUSE, 0)
         except Exception:
+            pass
+
+    def release(self):
+        """Drop every view of the mapped memory (so that it can be unmapped). The ring is unusable afterwards."""
+        self._anchor = None
+        try:
+            self.words.release()
+        except ValueError:
             pass
 
 

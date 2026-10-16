@@ -73,7 +73,7 @@ def source_signature():
 
 
 def daemon():
-    from ytcrt import app as appmod, core_link, feeds, inputs, pipeline, store
+    from ytcrt import app as appmod, core_link, feeds, h264link, inputs, pipeline, store
 
     lock = LOCK.open('a')
     try:
@@ -108,6 +108,7 @@ def daemon():
     inp = inputs.Input(evdev=False, tty=False)   # input comes from the core, not Linux
     link = core_link.Link(log, cancel)
     link.open()
+    h264 = h264link.H264Link(log, cancel)                  # the other core this player can run on: the FPGA decodes the video
     boot_sig = source_signature()
     pending = {'sig': None, 'since': 0}
 
@@ -125,15 +126,35 @@ def daemon():
             link.close()
             lock.close()
             os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), '--daemon'])
+    def wait_for_any():
+        """Block until one of the cores this player runs on is loaded: its own YouTubeCRT core, or the H264 core."""
+        link._probe = None
+        last_note, last_ident = 0.0, None
+        while True:
+            cancel()
+            if link.core_alive():
+                return link
+            if h264.core_alive():
+                return h264
+            restart_if_updated()
+            ident = link.box.read(32)
+            now = time.monotonic()
+            if ident != last_ident or now - last_note > 60:
+                log('Waiting: identity word %08x (the YouTubeCRT core: %08x, %08x, %08x or %08x), heartbeat %d; core name now: %s' % (
+                    ident, core_link.t.IDENT_FB, core_link.t.IDENT_FB6, core_link.t.IDENT_YUV, core_link.t.IDENT_RGB,
+                    link.box.read(36), (Path('/tmp/CORENAME').read_text().strip() if Path('/tmp/CORENAME').exists() else '?')))
+                last_note, last_ident = now, ident
+            time.sleep(0.5)
     try:
         while True:
+            active = None
             try:
-                log('Waiting for the YouTubeCRT core to be loaded...')
-                link.wait_for_core(poll=0.5, idle=restart_if_updated)
-                log('Core detected; starting session.')
-                link.start_session()
-                inp.attach_core(link.box)
-                application = appmod.App(link, st, fd, rt, inp, log)
+                log('Waiting for the YouTubeCRT core or the H264 core to be loaded...')
+                active = wait_for_any()
+                log('Core detected (%s); starting session.' % ('H264' if active is h264 else 'YouTubeCRT'))
+                active.start_session()
+                inp.attach_core(active.box)
+                application = appmod.App(active, st, fd, rt, inp, log)
                 application.run()
             except core_link.Cancelled:
                 log('Stopped.')
@@ -142,11 +163,13 @@ def daemon():
                 log('Session ended: %s' % str(exc)[:200])
             finally:
                 inp.detach_core()
-                link.end_session()
+                if active is not None:
+                    active.end_session()
             time.sleep(1)
     finally:
         inp.close()
         link.close()
+        h264.end_session()
 
 
 if __name__ == '__main__':
