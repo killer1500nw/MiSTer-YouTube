@@ -184,8 +184,12 @@ class Framebuffer:
         self.view = ctypes.addressof(ctypes.c_char.from_buffer(view_map))
 
     @classmethod
-    def open(cls, fb_path='/dev/fb0', mem_path='/dev/mem'):
-        """-> Framebuffer, or None when there is no usable one (not a MiSTer, too small, no permission...)."""
+    def open(cls, fb_path='/dev/fb0', mem_path='/dev/mem', overlay_only=False):
+        """Open video slots with an uncached read-back window, or just the H264 menu's overlay pages.
+
+        Overlay-only users need three 640x480 ARGB pages, not the eight video slots or /dev/mem read-back mapping.
+        Returns None when the framebuffer cannot provide the requested layout.
+        """
         import fcntl
         import mmap
         import struct
@@ -195,10 +199,17 @@ class Framebuffer:
             info = bytearray(160)
             fcntl.ioctl(fd, 0x4602, info)                         # FBIOGET_FSCREENINFO
             start, length = struct.unpack('<II', bytes(info[16:24]))
-            if length < yuv.FB_MIN_LENGTH or start % 4096:
+            minimum = 640 * 480 * 4 * yuv.OVERLAYS if overlay_only else yuv.FB_MIN_LENGTH
+            if length < minimum or start % 4096:
+                os.close(fd)
                 return None
             slots_offset = max(yuv.FB_SLOTS_OFFSET, (length - 8 * yuv.FB_SLOT_STRIDE) & ~0xFFFF)
             fb_map = mmap.mmap(fd, length, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+            if overlay_only:
+                # No video planes are copied or read back in this mode. Share the mapping; close it only once.
+                fb = cls(start, length, fb_map, fb_map, slots_offset=0)
+                fb.fds = (fd,)
+                return fb
             fdm = os.open(mem_path, os.O_RDWR | os.O_SYNC)
             view_map = mmap.mmap(fdm, 8 * yuv.FB_SLOT_STRIDE, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE,
                                  offset=start + slots_offset)
@@ -285,7 +296,8 @@ class Framebuffer:
     def close(self):
         if self.jobs is not None:
             self.jobs.put(None)
-        for m in (self.fb_map, self.view_map):
+        maps = (self.fb_map,) if self.view_map is self.fb_map else (self.fb_map, self.view_map)
+        for m in maps:
             try:
                 m.close()
             except (OSError, ValueError, BufferError):

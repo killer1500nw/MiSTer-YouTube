@@ -107,6 +107,11 @@ core's own counters (late and starved pictures, audio queued, played, late and u
 dropped or an underrun happens. `The audio cannot start at ...; trying ...` means ffmpeg crashed at that position (some seek positions
 do) and the player retried a little earlier or later.
 
+If only colour bars and a moving white square appear, the H264 core is running but idle. Check the same log for session-start errors.
+H264 menus need three 640x480 ARGB framebuffer pages (3,686,400 bytes), independently of the larger video-slot allocation used by
+the YouTubeCRT core. A 6,220,800-byte framebuffer is sufficient for H264 menus; it must not be rejected because it is below the
+YouTubeCRT video-buffer minimum of 6,291,456 bytes. The overlay-only path maps `/dev/fb0` without a video read-back mapping.
+
 ## Adding channels, playlists and single videos
 
 Everything lives in **one file**, `/media/fat/YouTubeNative/ytcrt/subscriptions.txt` (created on first run). One entry
