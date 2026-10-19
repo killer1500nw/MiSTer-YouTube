@@ -197,7 +197,7 @@ class H264Link:
     def start_session(self):
         ring = self.ring
         ring.new_session()
-        self.fb = t.Framebuffer.open()
+        self.fb = t.Framebuffer.open(overlay_only=True)
         if self.fb is None:
             raise RuntimeError('The framebuffer (/dev/fb0) is not available for the menu overlay.')
         names = t.console_bind(False)
