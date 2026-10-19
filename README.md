@@ -2,7 +2,7 @@
 
 Browse and watch YouTube on a MiSTer FPGA, on a CRT in 240p or 480i, at up to **480p** video quality, with a gamepad or keyboard. Load the
 **YouTubeCRT** core and a menu appears on screen: your channels, playlists and videos, with thumbnails, resume
-and a playback bar. There is no account or login, and nothing is saved to the card except small lists and a cache.
+and a playback bar. There is no account or login, and nothing is saved to the card except small lists and a cache. The video streams to the MiSTer's RAM.
 Video is found on the MiSTer itself (yt-dlp and ffmpeg). Either the MiSTer's ARM decodes it and the FPGA core displays it and plays the
 audio (the **YouTubeCRT** core, up to 480p), or, with the optional **H264 core**, the FPGA decodes it (up to **720p**, with the ARM almost idle).
 
