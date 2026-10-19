@@ -7,12 +7,13 @@ anything already installed is left alone.
 
     yt-dlp  2026.08.19  (ARM onedir build)   Unlicense  github.com/yt-dlp/yt-dlp
     QuickJS v0.17.0     (qjs, ARM)           MIT        github.com/quickjs-ng/quickjs
-    FFmpeg  static armhf (johnvansickle.com) GPLv3
+    FFmpeg  7.0.2 static armhf (eugeneware/ffmpeg-static, John Van Sickle build) GPLv3
     Node.js v22         (linux-armv7l)       MIT        nodejs.org   (optional: solves YouTube's JS check in
                                                               seconds instead of minutes; QuickJS stays as the fallback)
 """
 import argparse
 import hashlib
+import gzip
 import io
 import os
 import shutil
@@ -31,7 +32,15 @@ YTDLP_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/download/%s/' % YTDLP_TA
 QJS_TAG = 'v0.17.0'
 QJS_URL = 'https://github.com/quickjs-ng/quickjs/releases/download/%s/qjs-linux-armv7' % QJS_TAG
 QJS_SHA256 = 'dbda6e499471c675bd991dbc477f14d6134c182409d15047e9b63e3df7bc3e64'
-FFMPEG_URL = 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-armhf-static.tar.xz'
+# The b6.1.1 release's ARMHF asset contains John Van Sickle's FFmpeg 7.0.2 build.
+# Keep the release and GitHub-published SHA-256 digests pinned together.
+FFMPEG_BASE = 'https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/'
+FFMPEG_URL = FFMPEG_BASE + 'ffmpeg-linux-arm.gz'
+FFMPEG_SHA256 = '64b115a12f0ab77c277e3c418aae8b40ef881e75e746a0e2d066a206b9bc5172'
+FFMPEG_NOTICES = (
+    ('linux-arm.LICENSE', 'GPLv3.txt', '8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903'),
+    ('linux-arm.README', 'readme.txt', 'faaea83a6d92419cb112d5de5ac673f51b72401830e068c4d003b3229ee1c89a'),
+)
 NODE_VER = 'v22.23.3'                      # yt-dlp needs Node 22 or newer
 NODE_URL = 'https://nodejs.org/dist/%s/node-%s-linux-armv7l.tar.gz' % (NODE_VER, NODE_VER)
 NODE_SHA256 = '8b99058ec6f4e372b9887f8ecb577a292adb132d59e5104356428a758fdb126c'
@@ -183,42 +192,30 @@ def setup_ffmpeg(root, dl):
     if list(root.glob('ffmpeg-*-armhf-static/ffmpeg')):
         print('ffmpeg already installed.')
         return
-    print('Downloading ffmpeg (about 16 MB)...', flush=True)
-    tpath = dl / 'ffmpeg.tar.xz'
+    print('Downloading ffmpeg 7.0.2 ARMHF...', flush=True)
+    tpath = dl / 'ffmpeg.gz'
     fetch(FFMPEG_URL, tpath, 'ffmpeg')
-    want = fetch(FFMPEG_URL + '.md5').decode().split()[0]
-    if digest(tpath, 'md5') != want:
+    if digest(tpath, 'sha256') != FFMPEG_SHA256:
         raise RuntimeError('ffmpeg checksum mismatch; not installing it.')
     print('  checksum OK; unpacking...', flush=True)
+    final = root / 'ffmpeg-7.0.2-armhf-static'
+    stage = root / ('_stage-' + final.name)
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(parents=True)
     try:
-        tar = tarfile.open(tpath, 'r:xz')
-    except (tarfile.TarError, ImportError, RuntimeError):
-        tar = None
-    if tar is None:                              # Python built without lzma: use xz/tar if present
-        raw = dl / 'ffmpeg.tar'
-        with open(raw, 'wb') as f:
-            if subprocess.call(['xz', '-dc', str(tpath)], stdout=f) != 0:
-                raise RuntimeError('Cannot unpack .xz here (no lzma module and no xz tool).')
-        tar = tarfile.open(raw, 'r:')
-    with tar:
-        names = tar.getnames()
-        safe_members(names)
-        top = names[0].split('/')[0]
-        stage = root / ('_stage-' + top)
+        with gzip.open(tpath, 'rb') as src, open(stage / 'ffmpeg', 'wb') as dst:
+            shutil.copyfileobj(src, dst, 1 << 20)
+        for remote, local, checksum in FFMPEG_NOTICES:
+            notice = stage / local
+            fetch(FFMPEG_BASE + remote, notice)
+            if digest(notice, 'sha256') != checksum:
+                raise RuntimeError('ffmpeg notice checksum mismatch; not installing it.')
+        os.chmod(stage / 'ffmpeg', 0o755)
+        shutil.rmtree(final, ignore_errors=True)
+        os.rename(stage, final)
+    finally:
         shutil.rmtree(stage, ignore_errors=True)
-        stage.mkdir(parents=True)
-        for m in tar.getmembers():
-            base = Path(m.name).name
-            if m.isfile() and base in ('ffmpeg', 'GPLv3.txt', 'readme.txt'):
-                with tar.extractfile(m) as src, open(stage / base, 'wb') as dst:
-                    shutil.copyfileobj(src, dst, 1 << 20)
-    if not (stage / 'ffmpeg').is_file():
-        raise RuntimeError('ffmpeg not found in the archive.')
-    os.chmod(stage / 'ffmpeg', 0o755)
-    final = root / top
-    shutil.rmtree(final, ignore_errors=True)
-    os.rename(stage, final)
-    print('ffmpeg installed (%s).' % top)
+    print('ffmpeg installed (%s).' % final.name)
 
 
 def setup_h264_core(fat):
