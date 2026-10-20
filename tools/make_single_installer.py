@@ -16,11 +16,29 @@ HEAD = r'''#!/bin/bash
 set -Eeuo pipefail
 echo "Unpacking the YouTube CRT files..."
 python3 - "$0" <<'PY'
-import base64, io, os, sys, zipfile
+import base64, io, os, sys, tempfile, zipfile
+from pathlib import PurePosixPath
 text = open(sys.argv[1], 'rb').read().decode('ascii', 'ignore')
 blob = text.split('\n#ZIP-BEGIN\n', 1)[1].split('\n#ZIP-END', 1)[0]
 z = zipfile.ZipFile(io.BytesIO(base64.b64decode(''.join(l[1:] for l in blob.split('\n') if l.startswith('#')))))
 n = 0
+# Validate the full payload before writing any files.
+if z.testzip() is not None:
+    raise SystemExit('Installer payload is corrupt.')
+for info in z.infolist():
+    path = PurePosixPath(info.filename)
+    if path.is_absolute() or '..' in path.parts or not info.filename.startswith(
+            ('Scripts/.config/YouTubeCRT/', 'Scripts/YouTubeCRT/')):
+        raise SystemExit('Unexpected installer path: ' + info.filename)
+# Preserve an older visible runtime (including any local files) before replacing
+# its menu folder with launchers. Re-running a launcher-only install needs no backup.
+legacy = '/media/fat/Scripts/YouTubeCRT'
+if os.path.isfile(legacy + '/youtube_crt.py') and os.path.isdir(legacy + '/ytcrt'):
+    config = '/media/fat/Scripts/.config'
+    os.makedirs(config, exist_ok=True)
+    backup = tempfile.mkdtemp(prefix='YouTubeCRT-legacy-', dir=config)
+    os.rename(legacy, backup + '/YouTubeCRT')
+    print('Previous runtime preserved in ' + backup)
 for info in z.infolist():
     name = info.filename
     if info.is_dir() or '__pycache__' in name or not name.lower().startswith(('scripts/', '_other/')):
@@ -32,8 +50,8 @@ for info in z.infolist():
     n += 1
 print('Unpacked %d files.' % n)
 PY
-chmod +x /media/fat/Scripts/YouTubeCRT/*.sh 2>/dev/null || true
-bash /media/fat/Scripts/YouTubeCRT/Install_YouTube_CRT.sh
+chmod +x /media/fat/Scripts/.config/YouTubeCRT/*.sh /media/fat/Scripts/YouTubeCRT/*.sh 2>/dev/null || true
+bash /media/fat/Scripts/.config/YouTubeCRT/Install_YouTube_CRT.sh
 exit $?
 '''
 
