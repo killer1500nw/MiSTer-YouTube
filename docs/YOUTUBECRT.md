@@ -38,7 +38,7 @@ Not included: live streams, account login, 60 fps.
 ## Install (once)
 
 **One script.** Download `Install_YouTube_CRT.sh` from the
-[latest release](https://github.com/killer1500nw/MiSTer-YouTube/releases/latest), put that single file in
+[fork installer](https://raw.githubusercontent.com/pxpxpxp/MiSTer-YouTube/clean-install-folders/release/Install_YouTube_CRT.sh), put that single file in
 `/media/fat/Scripts/`, and run **Scripts → Install_YouTube_CRT** on the MiSTer. The player and the core are inside that
 file (about 3 MB). It installs the core into `_Other`, downloads the ARM builds of yt-dlp, QuickJS, ffmpeg and Node.js
 (checksum-verified), adds the boot entry, starts the player and shows its log
@@ -55,7 +55,7 @@ By hand instead of the installer, append this to `/media/fat/linux/user-startup.
 
 ```sh
 # YouTube CRT player
-case "${1:-start}" in start) ( bash /media/fat/Scripts/YouTubeCRT/youtube_crt_daemon.sh </dev/null >/dev/null 2>&1 & ) ;; esac
+case "${1:-start}" in start) ( bash /media/fat/Scripts/.config/YouTubeCRT/youtube_crt_daemon.sh </dev/null >/dev/null 2>&1 & ) ;; esac
 ```
 
 The core's menu options are on new setting bits, so a saved v0.13 config cannot leave streaming off or the test pattern on.

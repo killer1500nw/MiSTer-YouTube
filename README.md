@@ -33,7 +33,7 @@ videos play but take longer to start.
 
 ## Quick start
 
-1. Download [`Install_YouTube_CRT.sh`](https://github.com/killer1500nw/MiSTer-YouTube/releases/latest/download/Install_YouTube_CRT.sh)
+1. Download [`Install_YouTube_CRT.sh`](https://raw.githubusercontent.com/pxpxpxp/MiSTer-YouTube/clean-install-folders/release/Install_YouTube_CRT.sh)
    and put that one file in `/media/fat/Scripts/` on the MiSTer's SD card.
 2. On the MiSTer, run **Scripts → Install_YouTube_CRT**. The player and the core are inside that one file: it installs the core into
    `_Other`, downloads the video tools (yt-dlp, QuickJS, ffmpeg and Node.js) and makes the player start at boot. It needs internet
@@ -42,6 +42,14 @@ videos play but take longer to start.
 
 Run the same script again at any time to update; your lists and settings are kept. YouTube needs the internet anyway,
 so there is no separate offline package.
+
+The player and helper files live in `/media/fat/Scripts/.config/YouTubeCRT/`.
+Only small menu launchers remain in `Scripts/YouTubeCRT/`; settings, lists, tools and logs stay in `YouTubeNative/`.
+Each reinstall stages a complete fresh application and replaces both application folders,
+so obsolete program files cannot linger. Previous folders are preserved under
+`Scripts/.config/YouTubeCRT-backup-*/` (`runtime/` and `menu/`).
+Your `/media/fat/YouTubeNative/subscriptions.txt` is preserved byte for byte, along with
+settings, watch later, history, downloaded tools and logs. A failed folder replacement rolls back.
 
 Full instructions, controls and every setting: [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md).
 

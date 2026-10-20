@@ -16,24 +16,68 @@ HEAD = r'''#!/bin/bash
 set -Eeuo pipefail
 echo "Unpacking the YouTube CRT files..."
 python3 - "$0" <<'PY'
-import base64, io, os, sys, zipfile
+import base64, io, os, shutil, sys, tempfile, zipfile
+from pathlib import PurePosixPath
 text = open(sys.argv[1], 'rb').read().decode('ascii', 'ignore')
 blob = text.split('\n#ZIP-BEGIN\n', 1)[1].split('\n#ZIP-END', 1)[0]
 z = zipfile.ZipFile(io.BytesIO(base64.b64decode(''.join(l[1:] for l in blob.split('\n') if l.startswith('#')))))
 n = 0
+# Validate the full payload before writing any files.
+if z.testzip() is not None:
+    raise SystemExit('Installer payload is corrupt.')
 for info in z.infolist():
-    name = info.filename
-    if info.is_dir() or '__pycache__' in name or not name.lower().startswith(('scripts/', '_other/')):
-        continue
-    target = '/media/fat/' + name
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    with z.open(info) as src, open(target, 'wb') as dst:
-        dst.write(src.read())
-    n += 1
+    path = PurePosixPath(info.filename)
+    if path.is_absolute() or '..' in path.parts or not info.filename.startswith(
+            ('Scripts/.config/YouTubeCRT/', 'Scripts/YouTubeCRT/')):
+        raise SystemExit('Unexpected installer path: ' + info.filename)
+# Stage a complete application install, then replace both old application folders.
+# YouTubeNative (including subscriptions.txt) is never part of this operation.
+config = '/media/fat/Scripts/.config'
+os.makedirs(config, exist_ok=True)
+stage = tempfile.mkdtemp(prefix='YouTubeCRT-install-', dir=config)
+backup = None
+moved = []
+installed = []
+try:
+    for info in z.infolist():
+        if info.is_dir() or '__pycache__' in info.filename:
+            continue
+        target = os.path.join(stage, info.filename)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with z.open(info) as src, open(target, 'wb') as dst:
+            shutil.copyfileobj(src, dst)
+        n += 1
+    folders = ('Scripts/.config/YouTubeCRT', 'Scripts/YouTubeCRT')
+    for relative in folders:
+        if not os.path.isdir(os.path.join(stage, relative)):
+            raise RuntimeError('Missing application folder: ' + relative)
+    for index, relative in enumerate(folders):
+        target = '/media/fat/' + relative
+        if os.path.lexists(target):
+            if backup is None:
+                backup = tempfile.mkdtemp(prefix='YouTubeCRT-backup-', dir=config)
+            saved = os.path.join(backup, 'runtime' if index == 0 else 'menu')
+            os.rename(target, saved)
+            moved.append((saved, target))
+        os.rename(os.path.join(stage, relative), target)
+        installed.append(target)
+except BaseException:
+    for target in reversed(installed):
+        shutil.rmtree(target)
+    for saved, target in reversed(moved):
+        os.rename(saved, target)
+    if backup is not None:
+        os.rmdir(backup)
+    raise
+finally:
+    shutil.rmtree(stage)
+if backup is not None:
+    print('Previous application folders preserved in ' + backup)
+print('Subscriptions preserved: /media/fat/YouTubeNative/subscriptions.txt')
 print('Unpacked %d files.' % n)
 PY
-chmod +x /media/fat/Scripts/YouTubeCRT/*.sh 2>/dev/null || true
-bash /media/fat/Scripts/YouTubeCRT/Install_YouTube_CRT.sh
+chmod +x /media/fat/Scripts/.config/YouTubeCRT/*.sh /media/fat/Scripts/YouTubeCRT/*.sh 2>/dev/null || true
+bash /media/fat/Scripts/.config/YouTubeCRT/Install_YouTube_CRT.sh
 exit $?
 '''
 

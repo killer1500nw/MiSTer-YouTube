@@ -2,7 +2,7 @@
 """Copy the player (and optionally the core) to a MiSTer over SSH, and fetch its log.
 
     python tools/deploy_to_mister.py --setup HOST      one time: make an SSH key and print the command that installs it
-    python tools/deploy_to_mister.py [HOST]            copy scripts/YouTubeCRT to /media/fat/Scripts/YouTubeCRT
+    python tools/deploy_to_mister.py [HOST]            copy scripts/YouTubeCRT to /media/fat/Scripts/.config/YouTubeCRT
     python tools/deploy_to_mister.py --core            also copy the core to /media/fat/_Other (reload the core afterwards)
     python tools/deploy_to_mister.py --install         send and run the one-file installer (player and cores)
     python tools/deploy_to_mister.py --log             fetch YouTube-crt-log.txt to ./mister-log.txt (and print its tail)
@@ -56,13 +56,14 @@ def deploy(host, core):
     if not (src / 'ytcrt' / '__init__.py').is_file():
         sys.exit('scripts/YouTubeCRT not found')
     version = (src / 'ytcrt' / '__init__.py').read_text().split("'")[1]
-    print('Copying player %s to %s:%s/YouTubeCRT ...' % (version, host, REMOTE_SCRIPTS))
+    print('Copying player %s to %s:%s/YouTubeCRT ...' % (version, host, REMOTE_SCRIPTS + "/.config"))
     # tar over ssh: one connection, keeps the folder identical, no stray logs or caches.
     tar = subprocess.Popen(['tar', '-C', str(src.parent), '--exclude=__pycache__', '--exclude=*.pyc',
                             '--exclude=YouTube-*log*.txt', '--exclude=*.rbf', '-cf', '-', 'YouTubeCRT'],
                            stdout=subprocess.PIPE)
-    remote = 'tar -C %s -xf - && find %s/YouTubeCRT -name "*.sh" -exec sed -i "s/\\r$//" {} + && chmod +x %s/YouTubeCRT/*.sh' % (
-        REMOTE_SCRIPTS, REMOTE_SCRIPTS, REMOTE_SCRIPTS)
+    remote = 'mkdir -p %s && tar -C %s -xf - && find %s/YouTubeCRT -name "*.sh" -exec sed -i "s/\\r$//" {} + && chmod +x %s/YouTubeCRT/*.sh' % (
+        REMOTE_SCRIPTS + "/.config", REMOTE_SCRIPTS + "/.config",
+        REMOTE_SCRIPTS + "/.config", REMOTE_SCRIPTS + "/.config")
     r = subprocess.run(ssh_base(host) + [remote], stdin=tar.stdout)
     tar.stdout.close()
     if tar.wait() or r.returncode:
