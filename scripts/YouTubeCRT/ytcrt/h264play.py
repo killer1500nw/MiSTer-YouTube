@@ -20,7 +20,7 @@ def main(argv=None):
     ap.add_argument('--start', type=float, default=0.0)
     ap.add_argument('--duration', type=float, default=0.0, help='the length in seconds, so that audio ending early is reopened')
     ap.add_argument('--root', default='/media/fat/YouTubeNative')
-    ap.add_argument('--here', default='/media/fat/Scripts/YouTubeCRT')
+    ap.add_argument('--here', default='/media/fat/Scripts/.config/YouTubeCRT')
     ap.add_argument('--rbf', default='_Other/H264')
     a = ap.parse_args(argv)
     rt = pipeline.Runtime(a.root, a.here)

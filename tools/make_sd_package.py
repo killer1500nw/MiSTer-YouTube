@@ -16,6 +16,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'release' / 'SD_COPY'
 CORE = 'YouTubeCRT_v0.16-fb.rbf'
+RUNTIME = Path('Scripts/.config/YouTubeCRT')
+MENU_SCRIPTS = ('Install_YouTube_CRT.sh', 'Install_H264_Core.sh', 'YouTube_H264.sh',
+                'Status_YouTube_CRT.sh', 'Where_Is_The_Log.sh', 'Test_Node_JS.sh',
+                'Uninstall_YouTube_CRT.sh')
 
 
 def main():
@@ -37,7 +41,7 @@ def main():
     shutil.copyfile(core, OUT / '_Other' / CORE)
     # The folder people copy to the SD card carries the cores too (the installer puts them in _Other); keep it current.
     shutil.copyfile(core, ROOT / 'scripts' / 'YouTubeCRT' / CORE)
-    scripts = OUT / 'Scripts' / 'YouTubeCRT'
+    scripts = OUT / RUNTIME
     shutil.copytree(ROOT / 'scripts' / 'YouTubeCRT', scripts,
                     ignore=shutil.ignore_patterns('__pycache__', '*.rbf', '*.pyc', '*.txt.tmp', 'YouTube-*log*.txt'))
     import re
@@ -46,13 +50,21 @@ def main():
     (ROOT / 'scripts' / 'YouTubeCRT' / 'VERSION.txt').write_text(ver + '\n')   # keep the source folder in sync too
     for f in scripts.glob('*.sh'):                      # SD cards want LF endings
         f.write_bytes(f.read_bytes().replace(b'\r\n', b'\n'))
-    # The small package: one folder. Install_YouTube_CRT.sh copies the core and downloads the tools itself.
+    # Only small user-facing launchers belong in the visible Scripts menu.
+    menu = OUT / 'Scripts' / 'YouTubeCRT'
+    menu.mkdir(parents=True)
+    for name in MENU_SCRIPTS:
+        launcher = menu / name
+        launcher.write_text('#!/bin/bash\n# YouTube CRT menu launcher; runtime lives in Scripts/.config.\n'
+                            'exec bash /media/fat/Scripts/.config/YouTubeCRT/%s "$@"\n' % name)
+        launcher.chmod(0o755)
+    # The one-file installer embeds the runtime, launchers and current core.
     small = ROOT / 'release' / 'YouTubeCRT-installer.zip'
     with zipfile.ZipFile(small, 'w', zipfile.ZIP_DEFLATED) as z:
-        for p in sorted(scripts.rglob('*')):
+        for p in sorted((OUT / 'Scripts').rglob('*')):
             if p.is_file():
-                z.write(p, 'Scripts/YouTubeCRT/' + p.relative_to(scripts).as_posix())
-        z.write(core, 'Scripts/YouTubeCRT/' + CORE)
+                z.write(p, p.relative_to(OUT).as_posix())
+        z.write(core, (RUNTIME / CORE).as_posix())
     print('Core:', core)
     print('Small installer: %s (%.1f MB)' % (small, small.stat().st_size / 1e6))
 
