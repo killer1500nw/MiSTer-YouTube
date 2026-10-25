@@ -1,18 +1,9 @@
 # YouTube CRT — on-screen browser and player
 
-A gamepad/keyboard GUI that runs **inside the same streaming session** as the video. With the **v0.15-yuv** core the ARM only
-decodes: it hands the core the decoded picture at the video's own size and the FPGA scales it to a true 640×480 interlaced
-(or 640×240) picture with 8-bit colour; the menus and the playback bar are a separate overlay layer the FPGA draws over the
-picture (see [FPGA-YUV-v0.15.md](FPGA-YUV-v0.15.md)). The older v0.14-auto core (320×240 RGB565 records) still works with
-the same player. Playback uses the validated pipeline from `YouTubeURL` (yt-dlp → ffmpeg → bounded A/V records).
-
-> **Status: not yet run on hardware.** The core compiles and its RTL tests pass in simulation (see below). The menus, store, feed parsing, resume
-> logic and the playback loop (OSD, pause, seek, end-of-video) were exercised on
-> a PC with `tools/ytcrt_sim.py` and `tests/test_ytcrt.py`. Real RSS feeds and
-> `@handle` resolution were checked against YouTube. Not yet verified on a
-> DE10-Nano: evdev input while the core is loaded, thumbnails via the armhf
-> ffmpeg, seeking with `-ss`, and the speed-test numbers. Treat the first run
-> as a test and read the report file if anything misbehaves.
+A gamepad/keyboard GUI that plays YouTube on a MiSTer, on a CRT, at up to 720p. The video is **decoded in the FPGA** by the
+MiSTer H264 core ([owenb321/MiSTer_h264_decoder](https://github.com/owenb321/MiSTer_h264_decoder), GPL-3.0). The ARM does not decode the
+picture: it finds the video (yt-dlp), repackages YouTube's H.264 stream (ffmpeg, no re-encoding) and decodes the sound. The menus and the
+playback bar are drawn into the Linux framebuffer, which the core shows over its picture.
 
 ## How this code was written
 
@@ -31,24 +22,22 @@ This is stated up front because it is a fair thing for anyone evaluating the cod
 | Resume | Position saved every 10 s and on exit. Setting: **Ask** (prompt) or **Always** |
 | Thumbnails | 80×45 preview in the detail panel (fetched on demand, cached on the SD card) |
 | Playback OSD | Title, progress bar, time; pause/seek; hides after 4 s |
-| Speed test | Settings → Speed test: decodes a test stream and calibrates how much picture quality your ARM can sustain |
 
-Not included: live streams, account login, 60 fps.
+Not included: live streams, account login, 60 fps (the core plays up to 720p at 30 fps, or 480p at 60).
 
 ## Install (once)
 
 **One script.** Download `Install_YouTube_CRT.sh` from the
 [latest release](https://github.com/killer1500nw/MiSTer-YouTube/releases/latest/download/Install_YouTube_CRT.sh), put that single file in
-`/media/fat/Scripts/`, and run **Scripts → Install_YouTube_CRT** on the MiSTer. The player and the core are inside that
-file (about 3 MB). It downloads the H264 core by owenb321 (GPL-3.0, checksum-verified, not bundled) into `_Other`, downloads the ARM builds of yt-dlp, QuickJS, ffmpeg and Node.js
-(checksum-verified), adds the boot entry, starts the player and shows its log
-(*Waiting for the YouTubeCRT core to be loaded...*). It needs internet access and a roughly correct clock. Run it
-again to update. Then load **Other → YouTube (H264)**. The installer removes the older YouTubeCRT cores (v0.14, v0.15, v0.16) from `_Other`.
+`/media/fat/Scripts/`, and run **Scripts → Install_YouTube_CRT** on the MiSTer. The player is inside that file (about 1.5 MB). It
+downloads the H264 core by owenb321 (GPL-3.0, about 4.4 MB) into `_Other` and the ARM builds of yt-dlp, QuickJS, ffmpeg and Node.js; every download is
+checked against a SHA-256 before it is installed. None of these downloads is bundled in the script. It then adds **Other → YouTube (H264)**, the boot entry, starts the player and shows its log
+(*Waiting for the YouTubeCRT core or the H264 core to be loaded...*). It needs internet access and a roughly correct clock. Run it
+again to update or repair. It removes the older YouTubeCRT cores (v0.14, v0.15, v0.16) from `_Other`.
 
-That is the last script you run. From then on: **load the YouTubeCRT core from the MiSTer menu
-and the GUI appears.** The player starts the streaming session itself. There is no RAM-streaming
-Off/On step, no two-minute window and nothing to launch. Load another core and the player goes
-back to waiting; load YouTubeCRT again and the menu comes back. Leave the core from the normal MiSTer
+That is the last script you run. From then on: **load Other → YouTube (H264) from the MiSTer menu
+and the GUI appears.** The player starts the streaming session itself. Nothing to launch. Load another core and the player goes
+back to waiting; load the H264 core again and the menu comes back. Leave the core from the normal MiSTer
 menu (F12). `Uninstall_YouTube_CRT` removes the boot entry.
 
 By hand instead of the installer, append this to `/media/fat/linux/user-startup.sh`:
@@ -58,38 +47,22 @@ By hand instead of the installer, append this to `/media/fat/linux/user-startup.
 case "${1:-start}" in start) ( bash /media/fat/Scripts/.config/YouTubeCRT/youtube_crt_daemon.sh </dev/null >/dev/null 2>&1 & ) ;; esac
 ```
 
-The core's menu options are on new setting bits, so a saved v0.13 config cannot leave streaming off or the test pattern on.
-
 The daemon only *reads* one memory word twice a second while another core is loaded, and stops
 writing within half a second if the core's heartbeat stops. Its log is
-`/media/fat/YouTubeNative/YouTube-crt-daemon.txt` (overwritten each boot).
+`/media/fat/YouTubeNative/YouTube-crt-log.txt`.
 
 ## The H264 core
 
-The player can run on a second core, the **MiSTer H264 core** by owenb321
-([github.com/owenb321/MiSTer_h264_decoder](https://github.com/owenb321/MiSTer_h264_decoder), release 1.1 or later; GPL-3.0-or-later,
-a separate project that is not part of this repository). It decodes H.264 in the FPGA, so the ARM only repackages the video and decodes
-the sound. That frees the ARM completely (about 5% of one core during playback) and allows sharper pictures than the ARM can decode.
-
-**Install.** Run **Scripts → YouTubeCRT → Install_H264_Core**. It downloads the one file the player needs (`H264_20261014.rbf`, 4.4 MB) from
-the author's release page, checks it against the checksum published there, puts it in `_Other` and adds **Other → YouTube (H264)** (a `.mgl`
-file). Nothing of the core is part of this player's own release. (You can also install the author's whole zip by hand, then run
-`Install_YouTube_CRT.sh` again to add the menu entry.) If the entry does not show up, `Scripts → YouTubeCRT → YouTube_H264` loads the
-core. Load it, and the YouTube menu appears over the core's picture.
+The H264 core decodes H.264 in the FPGA, so the ARM only repackages the video and decodes the sound. That leaves the ARM almost idle
+(about 5% of one core during playback) and allows sharper pictures than the ARM could decode. It is owenb321's separate project
+([github.com/owenb321/MiSTer_h264_decoder](https://github.com/owenb321/MiSTer_h264_decoder), release 1.1 or later, GPL-3.0-or-later) and is not
+part of this repository: the installer downloads the one file the player needs (`H264_20261014.rbf`) from the author's release page and
+checks it against the checksum published there. If the menu entry does not show up, `Scripts → YouTubeCRT → YouTube_H264` loads the core.
 Do not run the H264 core's own video player at the same time: only one program can feed the core.
 
-**What is different.**
+The core's menu (F12) sets the output: 480i/576i or 480p/576p, with its own anti-twitter and analog dither settings.
 
-| | YouTubeCRT core | H264 core |
-| --- | --- | --- |
-| Who decodes | the ARM (ffmpeg) | the FPGA |
-| Best picture | 480p | 720p (YouTube's H.264 at 30 fps or less) |
-| ARM use while playing | all of it | about 5% of one core |
-| Speed test, decoder speed | used | not used |
-| Output | 240p or 480i | 480i/576i or 480p/576p (the core's menu: F12) |
-| Extras | composite blur, flicker filter, dither | the core's anti-twitter and dither |
-
-**Stream quality** gets a 720p choice. **Auto** picks the biggest H.264 stream the core can decode in real time (at most 3,600
+**Stream quality** (Auto, 240p, 360p, 480p, 720p): **Auto** picks the biggest H.264 stream the core can decode in real time (at most 3,600
 macroblocks and 108,000 macroblocks a second, which is 720p30 or 480p60). YouTube often offers its 720p H.264 only at 60 fps, which the
 core cannot play in real time; then you get 480p and the Starting screen says why ("720p is 60 fps here; the core plays up to 30").
 
@@ -107,10 +80,9 @@ core's own counters (late and starved pictures, audio queued, played, late and u
 dropped or an underrun happens. `The audio cannot start at ...; trying ...` means ffmpeg crashed at that position (some seek positions
 do) and the player retried a little earlier or later.
 
-If only colour bars and a moving white square appear, the H264 core is running but idle. Check the same log for session-start errors.
-H264 menus need three 640x480 ARGB framebuffer pages (3,686,400 bytes), independently of the larger video-slot allocation used by
-the YouTubeCRT core. A 6,220,800-byte framebuffer is sufficient for H264 menus; it must not be rejected because it is below the
-YouTubeCRT video-buffer minimum of 6,291,456 bytes. The overlay-only path maps `/dev/fb0` without a video read-back mapping.
+If only colour bars and a moving white square appear, the H264 core is running but idle: the player is not running or has not started a
+session. Check the log (`Where_Is_The_Log` in the Scripts menu shows where it is) for session-start errors.
+The menus need three 640x480 ARGB framebuffer pages (3,686,400 bytes); a framebuffer of 6,220,800 bytes is sufficient.
 
 ## Adding channels, playlists and single videos
 
@@ -195,8 +167,7 @@ refused with a message. A typed video gets its title from YouTube once it starts
 ## Video crop
 
 Most YouTube video is 16:9 but a CRT is 4:3. **Settings → Video crop** sets how each video starts; during
-playback press **X** for the **More** panel and change **Crop** and **Quality** (Auto, 240p, 360p, 480p) for that video only; a new Quality takes effect about a second after the last press, at the same position, without asking YouTube again. With the v0.15 core it takes effect on the very
-next picture (the FPGA does the crop); with the v0.14 core it restarts the picture at the current position, so allow a few seconds.
+playback press **X** for the **More** panel and change **Crop** and **Quality** (Auto, 240p, 360p, 480p, 720p) for that video only; a new Quality takes effect about a second after the last press, at the same position, without asking YouTube again.
 
 | Crop | What you see |
 | --- | --- |
@@ -204,7 +175,7 @@ next picture (the FPGA does the crop); with the v0.14 core it restarts the pictu
 | **14:9** | Trims the sides of widescreen video to 14:9 and leaves thin black bars, the compromise many TV stations used for widescreen material in the 90s |
 | **Off** | The whole picture with black bars top and bottom |
 
-With the v0.16 core, ffmpeg trims the sides itself (Fill and 14:9), so a 16:9 video crosses the pipe and is copied to the core about a quarter smaller (854×480 becomes 640×480); changing the crop in the More panel therefore restarts the picture for a second or two.
+On the H264 core, **Fill** and **Off** are the core's own setting and change at once; **14:9** is made in the video and shows from the next keyframe (see *The H264 core*).
 
 **The crop you choose in the More panel is remembered for that video** (the last 200 videos), so it opens the same way next time. **Settings → Video crop** is the starting crop for every other video.
 
@@ -216,66 +187,15 @@ them. The core declares buttons `A, B, X, Y, L, R, Select, Start`. The first tim
 to map its buttons (F12 → *Define joystick buttons*); map them as A, B, X, Y, L, R, Select, Start. Keyboard
 arrows, Enter, Space, Esc, Backspace, Tab, PgUp/PgDn, W and Q work too.
 
-## Output modes and performance
+## Output modes and picture quality
 
-The core menu (F12) is deliberately short: **Output: 240p / 480i** (default 240p), **480i field order**, **Analog dither**, **480i flicker filter**, **Composite blur** and **Reset**.
-Everything else (streaming, test pattern, test tone, loading a frame) used to be there for development and is gone.
-With the v0.15 core the picture is drawn at 640 pixels per line (a 13.3 MHz pixel clock, the same 15.7 kHz line rate). In **480i**
-it is a real interlaced picture: the two fields show alternate lines of one 640×480 frame, so a 360p video really has three times
-the pixels it had at 320×240. **240p** shows 640×240. **Analog dither** adds a little ordered dither before the picture is cut to
-the analog output's 6 bits, which hides colour banding in smooth gradients on a CRT (leave it Off for HDMI). **Composite blur** (Low / Medium / High) softens the picture along each line the way a cable-box composite signal did, which
-many 1980s and 1990s programmes were made to look good with; it is gentler in 240p, where each pixel is twice as wide. **480i flicker filter**
-(Low / Medium / High) moves what the two fields show closer together, so thin horizontal lines twitter less on an interlaced TV, at the cost of a
-little vertical sharpness. In 240p the picture is sampled from the centre of each pair of pixels and lines, which averages what would otherwise
-be dropped. The player needs no
-setting for any of this: it reads the core's mode and sends pictures that fit it. (With the v0.14 core the same 320×240 picture is
-sent as 525-line video: it adds compatibility, not detail.) 60 fps is not offered: no core supports 60 fps
-records, and the ARM cannot decode 60 fps H.264 at useful sizes anyway (see
-[PROTOCOL-v0.14-draft.md](PROTOCOL-v0.14-draft.md)).
+The output is set in the core's own menu (F12): 480i/576i or 480p/576p, plus its anti-twitter and analog dither settings. The player needs no
+setting for any of this: it sends the video and the core scales it to the output. 60 fps is not offered: the core plays up to 720p at 30 fps
+(or 480p at 60), and YouTube often offers 720p H.264 only at 60 fps (then you get 480p, and the Starting screen says why).
 
-Settings → **Decoder speed** (`Normal` / `Fast` / `Fastest`) passes
-`-skip_loop_filter noref|all -flags2 +fast` to ffmpeg's H.264 decoder: less
-CPU per frame for a slightly softer, blockier picture, which a CRT hides well.
-**Normal** is automatic: the gentlest setting predicted to keep up. At 480p it prefers **Fast**, and a clip that still
-starves on Fast is switched to **Fastest** on the same stream before Auto considers a smaller picture (the clip is
-remembered, so it starts on Fastest next time). Choosing **Fast** or **Fastest** by hand is always honoured.
-Run **Speed test** after changing it; **≥ 1.15×** means smooth, below **1.0×** means that setting cannot hold
-real time.
-
-## Picture quality: Stream quality
-
-YouTube's own **240p stream is only about 210-240 kbps**, so it arrives already blocky. A bigger source looks cleaner on
-the CRT, and with the v0.16-fb core the FPGA does all the scaling, so the ARM only has to decode: pictures up to 854×480 go
-straight to the core (read from the framebuffer) with no shrink step in ffmpeg.
-
-What the ARM can decode in real time depends on the stream: how many **pixels**, how many **kbps** and how many
-**frames per second**. Auto estimates that load for every stream a video offers and picks the largest picture
-predicted to need at most 72% of the ARM, which leaves room for the player's own work (reading the video and copying records to the core, about a quarter):
-
-* Most TV and music-video uploads play at **480p** on a stock MiSTer, using the **Fast** decoder setting.
-* A very heavy 480p clip (a high bitrate such as 950 kbps) is moved to **Fastest** while it plays; if even that is not enough, Auto drops to **360p**.
-* Busy footage (game capture, sports) can still need **360p** or **240p**.
-* A **24 or 25 fps** source has 20% fewer frames than 30 fps, so it is estimated 20% cheaper.
-
-**Auto remembers each video.** When Auto has to step a video down to a lighter stream, it saves that choice (the last 100 videos), and the next time you play the video it starts on the stream that worked, so a music video does not stutter and switch a second time. A video that needed the **Fastest** decoder setting is remembered the same way. Running the **Speed test** clears both lists, because they belong to the old measurement.
-
-Settings → **Stream quality**:
-
-| Setting | Behaviour |
-| --- | --- |
-| **Auto** (default) | Picks per video by estimated load. If the picture still starves (an empty queue for more than ~1.2 s in 12) it steps down to the next lighter stream from the same spot, without asking YouTube again, and makes the estimate 25% more pessimistic. After 90 s of clean playback of a demanding stream it trusts the estimate 3% more |
-| **240p / 360p / 480p** | Always the largest stream up to that size, whatever it costs, with no fall-back |
-
-**Speed test** (background lookups are paused while it runs, and it reuses the video of the previous test so results are comparable) decodes a reference stream (each speed is measured with a short and a long run, so ffmpeg's start-up time does not make the MiSTer look slower) with both cheap decoder settings (Fast and Fastest), shows each result in
-"x real time", and calibrates the estimate to *your* MiSTer. It also records which decoder setting larger pictures use.
-It then runs the best setting once more with only the decoder (no scaling, no RGB565 colour conversion) and reports *Scale+colour: N% of the time*: the share of the ARM's time that scaling and colour conversion take. That is the part a future FPGA scaler could take over.
-The playback bar shows the size in use (`240p`, `360p`...) next to the time, and `YouTube-crt-log.txt` records every
-choice with its estimated load and any step-down.
-
-**Why there is no frame-rate or audio option.** Both were measured on real clips. Lowering the frame rate saves almost
-no decoding, because the decoder has to process every frame to keep the picture correct (the scaler is a tiny part of
-the work); only the decoder's own skip modes help, by 10-15%. Audio decodes at over 1,000x real time, so mono or a lower
-sample rate changes nothing. The settings that do help are **Decoder speed** and the **Stream quality** choice above.
+**Stream quality** (Settings, or X during playback): **Auto** picks the largest H.264 stream the core can decode in real time. 240p, 360p,
+480p and 720p always pick the largest stream up to that size. YouTube's own 240p stream is only about 210-240 kbps, so it arrives
+already blocky; a bigger source looks cleaner on a CRT.
 
 YouTube sometimes refuses a stream (HTTP 403) at random. The player retries up to three times, then asks YouTube
 for fresh stream URLs once, before showing an error.
@@ -286,14 +206,13 @@ Every entry in Settings does something:
 
 | Setting | What it does |
 | --- | --- |
-| Stream quality | Auto / 240p / 360p / 480p: how big a YouTube stream to decode (see *Picture quality* above) |
+| Stream quality | Auto / 240p / 360p / 480p / 720p: how big a YouTube stream to play (see *Output modes and picture quality*) |
 | Video crop | Fill / 14:9 / Off: how widescreen video is trimmed for the 4:3 screen (default Fill) |
 | Play next video | On / Off: when a video from a playlist, channel, subscriptions or Watch Later ends, the next one in that list plays |
 | Resume playback | Ask or Always resume where you stopped |
 | Show Shorts | Include YouTube Shorts in channel lists |
 | Thumbnails | The preview picture in the detail panel |
-| Decoder speed | Normal / Fast / Fastest for small streams; larger streams use what the Speed test found |
-| Speed test | Measures your MiSTer and calibrates Auto |
+| Decoder speed, Speed test | Only for the older ARM-decoding core; not used with the H264 core |
 | Diagnostics | Player version, tool check, the latest log lines |
 | Clear Watch Later / Clear History | Empty those lists |
 
