@@ -117,26 +117,6 @@ unreliable (random errors even for good channels), so the player retries them an
 - [Build notes](docs/BUILD.md), [project checkpoint](docs/CHECKPOINT.md), [release notes](docs/RELEASE.md),
   [credits](THIRD_PARTY_NOTICES.md).
 
-## The older v0.13 player (YouTubeURL)
-
-The original script-based player and the v0.13-smooth core are still here, unchanged and separate from the above.
-`scripts/YouTubeURL` plays **one video at a time** from a URL or ID you type into a script prompt: no menus, no
-playlists or channels, and a manual start-up sequence. It needs the v0.13 core (`YouTubeCRT_v0.13-smooth.rbf`), not the
-v0.14-auto core.
-
-**Validation of v0.13.6:** it streamed a 14m55s talking clip to completion with user-reported good lip sync. All 179
-sampled FPGA queue readings were 7–8 frames; 26,843 records completed in 894.63 seconds. v0.13.7 adds URL selection.
-
-1. Copy `YouTubeCRT_v0.13-smooth.rbf` to `/media/fat/_Other/` and the whole `scripts/YouTubeURL` folder to
-   `/media/fat/Scripts/YouTubeURL/`.
-2. From the **main MiSTer menu**: Scripts → YouTubeURL → Start_YouTube_URL. Enter a URL or 11-character ID (blank uses
-   the known test clip, Q cancels).
-3. Load v0.13-smooth within two minutes, set **Display = Loaded frame**, then **RAM streaming On for 5 seconds, Off for
-   2 seconds, then On**. Playback stops at the end; `Stop_YouTube_URL` stops it early from the main menu.
-
-Keep your working CRT configuration, including `vga_scaler=0`; nothing here replaces `MiSTer.ini`. Reports go to
-`/media/fat/YouTubeNative/YouTube-url-13-7-XXXXXXXX.txt`; they can contain video titles and IDs, so review before sharing.
-The older scripts inside `fpga/MiSTer-Scripts` are kept for the original FPGA test suite and provenance.
 
 ## Licence
 
