@@ -18,10 +18,7 @@ This is stated up front because it is a fair thing for anyone evaluating the cod
 - **Playlists**, **My Videos** (single videos you list), **Watch Later**, **History** with **resume**.
 - **Play URL / ID**, **Add Channel via @handle** and **Add to Lists**: type a link or a handle on an on-screen keyboard or a real keyboard.
 - **Load more videos…** at the end of every channel and playlist, so you can scroll well past the first 15.
-- **Up to 480p video.** The ARM only decodes; the FPGA core scales the picture to the CRT (bilinear, with BT.601/709 colour),
-  so a 480p stream plays smoothly on a stock MiSTer. Auto picks a 480p, 360p or 240p stream per video from an estimate of how much
-  the ARM can decode in time and steps down by itself if the picture starts to stutter. A clip that is too heavy for the
-  **Fast** decoder setting is moved to **Fastest** (and remembered) before the picture is made smaller. Optional **14:9**
+- **Up to 480p video.** Optional **14:9**
   and **Fill** crops for widescreen video on a 4:3 screen.
 - **Made for a CRT.** 240p or interlaced 480i output (core menu), with optional analog dither, a 480i flicker filter and a
   composite blur for the soft look of 80s and 90s TV. Nothing is added unless you switch it on.
