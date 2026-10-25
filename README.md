@@ -1,10 +1,11 @@
 # MiSTer YouTube CRT Player
 
-Browse and watch YouTube on a MiSTer FPGA, on a CRT in 240p or 480i, at up to **480p** video quality, with a gamepad or keyboard. Load the
-**YouTubeCRT** core and a menu appears on screen: your channels, playlists and videos, with thumbnails, resume
-and a playback bar. There is no account or login, and nothing is saved to the card except small lists and a cache. The video streams to the MiSTer's RAM.
-Video is found on the MiSTer itself (yt-dlp and ffmpeg). Either the MiSTer's ARM decodes it and the FPGA core displays it and plays the
-audio (the **YouTubeCRT** core, up to 480p), or, with the optional **H264 core**, the FPGA decodes it (up to **720p**, with the ARM almost idle).
+Browse and watch YouTube on a MiSTer FPGA, on a CRT, at up to **720p** video quality, with a gamepad or keyboard. Load the
+**YouTube (H264)** core and a menu appears on screen: your channels, playlists and videos, with thumbnails, resume
+and a playback bar. There is no account or login, and nothing is saved to the card except small lists and a cache.
+The video is found on the MiSTer itself (yt-dlp and ffmpeg) and **decoded in the FPGA** by the MiSTer H264 core
+([owenb321/MiSTer_h264_decoder](https://github.com/owenb321/MiSTer_h264_decoder), GPL-3.0). The ARM does not decode anything: it only downloads
+and repackages YouTube's H.264 stream, so playback uses a few percent of one ARM core.
 
 ## How this code was written
 
@@ -19,25 +20,21 @@ This is stated up front because it is a fair thing for anyone evaluating the cod
 - **Playlists**, **My Videos** (single videos you list), **Watch Later**, **History** with **resume**.
 - **Play URL / ID**, **Add Channel via @handle** and **Add to Lists**: type a link or a handle on an on-screen keyboard or a real keyboard.
 - **Load more videos…** at the end of every channel and playlist, so you can scroll well past the first 15.
-- **Up to 480p video.** The ARM only decodes; the FPGA core scales the picture to the CRT (bilinear, with BT.601/709 colour),
-  so a 480p stream plays smoothly on a stock MiSTer. Auto picks a 480p, 360p or 240p stream per video from an estimate of how much
-  the ARM can decode in time and steps down by itself if the picture starts to stutter. A clip that is too heavy for the
-  **Fast** decoder setting is moved to **Fastest** (and remembered) before the picture is made smaller. Optional **14:9**
-  and **Fill** crops for widescreen video on a 4:3 screen.
-- **Made for a CRT.** 240p or interlaced 480i output (core menu), with optional analog dither, a 480i flicker filter and a
-  composite blur for the soft look of 80s and 90s TV. Nothing is added unless you switch it on.
+- **Up to 720p video, decoded in the FPGA.** The H264 core decodes the picture, so the slow ARM stays almost idle. Stream quality has
+  a 720p choice, and Auto means "the best H.264 stream the core can play". Optional **14:9** and **Fill** crops for widescreen video on a 4:3 screen.
+- **Made for a CRT.** The core outputs 480i/576i or 480p/576p, with its own anti-twitter and analog dither settings.
 - A pause/seek bar, a speed test, live quality change (More panel), and a diagnostics screen.
 
-Not supported: live streams and past livestreams (YouTube serves those in segments), 60 fps, and sign-in. Age restricted
+Not supported: live streams and past livestreams (YouTube serves those in segments), 60 fps (the core decodes up to 720p at 30 fps, or 480p at 60), and sign-in. Age restricted
 videos play but take longer to start.
 
 ## Quick start
 
 1. Download [`Install_YouTube_CRT.sh`](https://github.com/killer1500nw/MiSTer-YouTube/releases/latest/download/Install_YouTube_CRT.sh)
    and put that one file in `/media/fat/Scripts/` on the MiSTer's SD card.
-2. On the MiSTer, run **Scripts → Install_YouTube_CRT**. The player and the core are inside that one file: it downloads the video tools
-   (yt-dlp, QuickJS, ffmpeg and Node.js) and the H264 core by owenb321 (checksum-verified) into `_Other`, and makes the player start at boot. It needs internet
-   access and a roughly correct clock, and it takes a couple of minutes.
+2. On the MiSTer, run **Scripts → Install_YouTube_CRT**. The player is inside that one file. It downloads the video tools
+   (yt-dlp, QuickJS, ffmpeg and Node.js) and the H264 core by owenb321 (each checked against its SHA-256; the core is not part of this
+   project's release) into `_Other`, and makes the player start at boot. It needs internet access and a roughly correct clock, and it takes a couple of minutes.
 3. Load **Other → YouTube (H264)**. The menu appears. Nothing is run per session.
 
 Run the same script again at any time to update; your lists and settings are kept. YouTube needs the internet anyway,
@@ -50,20 +47,13 @@ When upgrading an older visible runtime, the installer preserves that folder und
 
 Full instructions, controls and every setting: [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md).
 
-### Better video with the H264 core (optional)
+### How playback works
 
-The ARM in a MiSTer is slow, and decoding 480p video uses all of it. A different FPGA core, the **MiSTer H264 core**
-([owenb321/MiSTer_h264_decoder](https://github.com/owenb321/MiSTer_h264_decoder), GPL-3.0, a separate project that this one
-does not ship), decodes H.264 video in the FPGA. With it this player only repackages YouTube's video (no decoding), so playback
-uses about 5% of one ARM core instead of all of them, and videos play at up to **720p** (when YouTube offers 720p at 30 fps
-or less) with full-quality decoding.
-
-1. Install the player as above, then run **Scripts → YouTubeCRT → Install_H264_Core**. It downloads the core from the author's release page and checks it (nothing of it is in this project's own release).
-2. Load **Other → YouTube (H264)** (the installer creates this entry when the core is on the card). The YouTube menu appears over the core.
-
-What changes: Stream quality has a 720p choice, Auto means "the best H.264 stream the core can play", the crop options still work
-(Fill, 14:9, Off), and the YouTubeCRT core's own extras (240p output, composite blur, flicker filter) are replaced by the H264 core's
-(480i/576i/480p/576p, anti-twitter, analog dither). Details and limits: [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md#the-h264-core).
+A MiSTer's ARM is too slow to decode 480p video. The **MiSTer H264 core** decodes H.264 in the FPGA instead. This player repackages
+YouTube's H.264 video for it (no decoding on the ARM), so playback uses about 5% of one ARM core, and videos play at up to **720p**
+(when YouTube offers 720p at 30 fps or less) with full-quality decoding. The core is owenb321's separate GPL-3.0 project: the installer
+downloads it from the author's release page and checks it, and it is credited in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Details and limits: [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md#the-h264-core).
 
 ## What you can play: links, IDs, playlists and channels
 
@@ -128,11 +118,11 @@ unreliable (random errors even for good channels), so the player retries them an
 - [docs/PROTOCOL-v0.14-draft.md](docs/PROTOCOL-v0.14-draft.md): what changed in the FPGA core (auto-start, 480i, input) and why
   60 fps is not possible; [fpga/PROTOCOL.md](fpga/PROTOCOL.md): the DDR mailbox protocol.
 - [docs/RUNTIME.md](docs/RUNTIME.md): the external tools the player uses and where they live.
-- `release/`: the ready-built core and the packaged installer (see [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md)).
+- `release/`: the packaged installer (the YouTubeCRT core here is no longer installed; playback uses the H264 core) (see [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md)).
 
 ## Source and development
 
-- `fpga/`: the core: Quartus 17.0 project, RTL, framework and simulation tests (`fpga/tests/run_modelsim.sh` or `run.sh`).
+- `fpga/`: the earlier YouTubeCRT core (ARM decoding, no longer installed): Quartus 17.0 project, RTL, framework and simulation tests (`fpga/tests/run_modelsim.sh` or `run.sh`).
 - `scripts/YouTubeCRT/`: the player that runs on the MiSTer (Python 3, standard library only) and its installer scripts.
 - `tests/`, `tools/`: player tests, a PC simulator that renders every screen to PNG (`tools/ytcrt_sim.py`), and helpers.
 - [Build notes](docs/BUILD.md), [project checkpoint](docs/CHECKPOINT.md), [release notes](docs/RELEASE.md),
