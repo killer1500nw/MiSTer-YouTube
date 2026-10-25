@@ -33,12 +33,12 @@ videos play but take longer to start.
 
 ## Quick start
 
-1. Download [`Install_YouTube_CRT.sh`](https://raw.githubusercontent.com/pxpxpxp/MiSTer-YouTube/fix/v3.23-installer/release/Install_YouTube_CRT.sh)
+1. Download [`Install_YouTube_CRT.sh`](https://github.com/killer1500nw/MiSTer-YouTube/releases/latest/download/Install_YouTube_CRT.sh)
    and put that one file in `/media/fat/Scripts/` on the MiSTer's SD card.
-2. On the MiSTer, run **Scripts → Install_YouTube_CRT**. The player and the core are inside that one file: it installs the core into
-   `_Other`, downloads the video tools (yt-dlp, QuickJS, ffmpeg and Node.js) and makes the player start at boot. It needs internet
+2. On the MiSTer, run **Scripts → Install_YouTube_CRT**. The player and the core are inside that one file: it downloads the video tools
+   (yt-dlp, QuickJS, ffmpeg and Node.js) and the H264 core by owenb321 (checksum-verified) into `_Other`, and makes the player start at boot. It needs internet
    access and a roughly correct clock, and it takes a couple of minutes.
-3. Load **YouTubeCRT_v0.16-fb** from `_Other`. The menu appears. Nothing is run per session.
+3. Load **Other → YouTube (H264)**. The menu appears. Nothing is run per session.
 
 Run the same script again at any time to update; your lists and settings are kept. YouTube needs the internet anyway,
 so there is no separate offline package.

@@ -27,8 +27,8 @@ class InstallerPackage(unittest.TestCase):
     def test_fresh_install_paths_and_payload(self):
         self.extract()
         runtime = self.card / 'Scripts/.config/YouTubeCRT'
-        self.assertEqual((runtime / 'VERSION.txt').read_text(), '3.23\n')
-        self.assertIn("__version__ = '3.23'", (runtime / 'ytcrt/__init__.py').read_text())
+        self.assertEqual((runtime / 'VERSION.txt').read_text(), '3.25\n')
+        self.assertIn("__version__ = '3.25'", (runtime / 'ytcrt/__init__.py').read_text())
         self.assertTrue((runtime / 'YouTubeCRT_v0.16-fb.rbf').is_file())
         menu = list((self.card / 'Scripts/YouTubeCRT').iterdir())
         self.assertEqual(len(menu), 7)
