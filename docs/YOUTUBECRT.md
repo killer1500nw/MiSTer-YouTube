@@ -38,12 +38,12 @@ Not included: live streams, account login, 60 fps.
 ## Install (once)
 
 **One script.** Download `Install_YouTube_CRT.sh` from the
-[fork installer](https://raw.githubusercontent.com/pxpxpxp/MiSTer-YouTube/fix/v3.23-installer/release/Install_YouTube_CRT.sh), put that single file in
+[latest release](https://github.com/killer1500nw/MiSTer-YouTube/releases/latest/download/Install_YouTube_CRT.sh), put that single file in
 `/media/fat/Scripts/`, and run **Scripts → Install_YouTube_CRT** on the MiSTer. The player and the core are inside that
-file (about 3 MB). It installs the core into `_Other`, downloads the ARM builds of yt-dlp, QuickJS, ffmpeg and Node.js
+file (about 3 MB). It downloads the H264 core by owenb321 (GPL-3.0, checksum-verified, not bundled) into `_Other`, downloads the ARM builds of yt-dlp, QuickJS, ffmpeg and Node.js
 (checksum-verified), adds the boot entry, starts the player and shows its log
 (*Waiting for the YouTubeCRT core to be loaded...*). It needs internet access and a roughly correct clock. Run it
-again to update. Then load **YouTubeCRT_v0.16-fb** from `_Other`. Only this core is installed, and the installer removes the older v0.14 and v0.15 cores from `_Other`.
+again to update. Then load **Other → YouTube (H264)**. The installer removes the older YouTubeCRT cores (v0.14, v0.15, v0.16) from `_Other`.
 
 That is the last script you run. From then on: **load the YouTubeCRT core from the MiSTer menu
 and the GUI appears.** The player starts the streaming session itself. There is no RAM-streaming
