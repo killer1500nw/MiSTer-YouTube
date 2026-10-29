@@ -2762,6 +2762,46 @@ class H264Feeder(unittest.TestCase):
             at += 16 + ((length + 15) & ~15)
         return out
 
+    def _early_end_feeder(self, streams, duration_s):
+        from ytcrt import h264feed
+        started = []
+        logs = []
+
+        def spawn(cmd, **kw):
+            started.append(cmd)
+            return self.Proc(streams.pop(0) if streams else b'')
+        feeder = h264feed.Feeder(None, lambda s: ['V', s], None, log=logs.append, spawn=spawn, duration_s=duration_s)
+        proc = feeder._spawn('video', feeder.video_cmd(0.0))
+        feeder._read_video(proc)
+        out = []
+        while not feeder.vq.empty():
+            out.append(feeder.vq.get())
+        return out, started, logs
+
+    def test_a_video_that_ends_early_is_reopened_and_continues_at_the_next_keyframe(self):
+        key = bytes([0, 0, 0, 1, 0x67, 0x42, 0, 0x1E]) + bytes(20)
+        plain = bytes([0, 0, 0, 1, 9, 0xF0]) + bytes(50)
+        sec = 90000
+        first = [(i * sec // 2, i * sec // 2, key if i % 4 == 0 else plain) for i in range(6)]       # 0 .. 2.5 s, then the connection drops
+        # the reopened stream starts at the keyframe before the wanted time (2.0 s), then carries on
+        second = [(i * sec // 2, i * sec // 2, key if i % 4 == 0 else plain) for i in range(4, 14)]  # 2.0 .. 6.5 s
+        out, started, logs = self._early_end_feeder([self.ts.stream(first), self.ts.stream(second)], duration_s=7)
+        self.assertEqual(len(started), 2)
+        self.assertAlmostEqual(started[1][1], 2.5, places=3)
+        pts = [x[0] for x in out if x is not None]
+        self.assertEqual(pts, sorted(set(pts)))                       # no picture twice, none out of order
+        self.assertEqual(pts[:6], [i * sec // 2 for i in range(6)])
+        self.assertEqual(pts[6], 8 * sec // 2)                       # the first keyframe after 2.5 s is the one at 4.0 s
+        self.assertIsNone(out[-1])
+        self.assertTrue(any('ended early' in m for m in logs))
+
+    def test_a_video_that_ends_near_its_length_is_not_reopened(self):
+        key = bytes([0, 0, 0, 1, 0x67, 0x42, 0, 0x1E]) + bytes(20)
+        units = [(i * 45000, i * 45000, key) for i in range(4)]
+        out, started, logs = self._early_end_feeder([self.ts.stream(units)], duration_s=3)
+        self.assertEqual(len(started), 1)
+        self.assertEqual(len([x for x in out if x is not None]), 4)
+
     def test_video_and_audio_are_interleaved_in_time_order_and_the_last_unit_ends_the_stream(self):
         au = bytes([0, 0, 0, 1, 9, 0xF0]) + bytes(100)
         # ten access units half a second apart, starting 58.9 s into the source (a seek lands on the keyframe before the wanted time)
