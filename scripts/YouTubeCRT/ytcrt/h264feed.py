@@ -22,6 +22,7 @@ AUDIO_RUNWAY = int(0.6 * CLOCK)               # the sound is written at least th
                                            # the core reads the ring in order, and sound that sits right behind its picture reaches it too late
 AUDIO_LEAD = CLOCK                         # write audio only up to one second ahead of the newest video written
 AHEAD = 8 * CLOCK                          # nothing is written more than 8 s ahead of what the core is playing (YouTube resets a connection that sits idle)
+VIDEO_NUDGES = (1.2, 3.0, 6.0)                 # where to try the video again when ffmpeg produced nothing at a position (seconds from there)
 AUDIO_NUDGES = (1.2, 3.0, -2.0, 6.0)         # where to try again (seconds from the start that crashed): this ffmpeg build segfaults when it seeks to
                                            # certain positions of a stream, and a second further on works
 AUDIO_START_WAIT = 10.0                    # seconds to wait for the first sound before starting the picture without it
@@ -67,10 +68,13 @@ class Feeder:
     """One playback. `video_cmd` / `audio_cmd` are functions of the start time returning an ffmpeg command line (audio may be None)."""
 
     AUDIO_RESTARTS = 30
+    VIDEO_RESTARTS = 30
 
     def __init__(self, ring, video_cmd, audio_cmd=None, log=print, spawn=subprocess.Popen, clock=time.monotonic, duration_s=0):
         self.duration_s = duration_s              # the video's length: audio that ends before it is reopened where it stopped
         self.audio_restarts = 0
+        self.video_restarts = 0
+        self._video_at = 0.0                      # where the video process now running was started (seconds)
         self.crop = None                          # (num, den): crop the picture to this shape by rewriting the stream's sequence header
         self.crop_gen = 0                         # bumped by set_crop; the first keyframe after it carries the new crop
         self.crop_switch_pts = None               # the time stamp of that keyframe: the picture changes shape when the core's clock gets there
@@ -121,24 +125,72 @@ class Feeder:
     def _read_video(self, proc):
         demux = TsVideo()
         seen = self.crop_gen
+        last_pts = None                              # the newest access unit queued
+        skip_to = None                               # after a reopen: drop pictures until a keyframe later than this time
+        got = False                                  # has the process now running produced anything?
+        failures, fail_base = 0, None
         try:
             while not self.stopping.is_set():
                 data = proc.stdout.read(188 * 128)
-                if not data:
-                    break
-                for pts, dts, au in demux.feed(data):
+                if data:
+                    units = demux.feed(data)
+                else:
+                    units = demux.flush()
+                for pts, dts, au in units:
                     if pts is None:
                         continue
-                    if seen != self.crop_gen and h264sps.SPS_START.search(au) is not None:
-                        seen = self.crop_gen                  # a keyframe: the new crop starts here
+                    got = True
+                    failures, fail_base = 0, None
+                    is_key = h264sps.SPS_START.search(au) is not None
+                    if skip_to is not None:
+                        if not (is_key and pts > skip_to):
+                            continue                  # the pictures the core already has (the reopened stream starts at an earlier keyframe)
+                        skip_to = None
+                    if seen != self.crop_gen and is_key:
+                        seen = self.crop_gen          # a keyframe: the new crop starts here
                         self.crop_switch_pts = pts
                     if self.crop is not None:
                         au = h264sps.crop_access_unit(au, self.crop)
                     if not self._put(self.vq, (pts, au)):
                         return
-            for pts, dts, au in demux.flush():
-                if pts is not None:
-                    self._put(self.vq, (pts, au))
+                    last_pts = pts if last_pts is None else max(last_pts, pts)
+                if data:
+                    continue
+                # The stream ended. Is that the end of the video, or did YouTube cut the connection early (or ffmpeg crash at a seek)?
+                if self.stopping.is_set():
+                    break
+                try:
+                    code = proc.wait(timeout=1)
+                except Exception:
+                    code = '?'
+                here_s = (last_pts / float(CLOCK)) if last_pts is not None else None
+                if not got:
+                    # Nothing at all from this start: ffmpeg crashes at some seek positions. Try a little later.
+                    failures += 1
+                    fail_base = self._video_at if fail_base is None else fail_base
+                    if failures > len(VIDEO_NUDGES) or self.video_restarts >= self.VIDEO_RESTARTS:
+                        self.log('The video cannot be restarted near %.1f s (ffmpeg exit %s)' % (fail_base, code))
+                        break
+                    target = fail_base + VIDEO_NUDGES[failures - 1]
+                    self.log('The video cannot start at %.1f s (ffmpeg exit %s); trying %.1f s (%d of %d)' % (
+                        self._video_at, code, target, failures, len(VIDEO_NUDGES)))
+                    time.sleep(0.3)
+                elif (self.duration_s and here_s is not None and here_s < self.duration_s - 3.0
+                        and self.video_restarts < self.VIDEO_RESTARTS):
+                    self.video_restarts += 1
+                    target = here_s
+                    self.log('The video ended early at %.1f s of %d; reopening it there (%d)' % (here_s, self.duration_s, self.video_restarts))
+                    skip_to = last_pts
+                else:
+                    break
+                try:
+                    proc.kill()
+                except (OSError, AttributeError):
+                    pass
+                self._video_at = target
+                proc = self._spawn('video', self.video_cmd(target))
+                demux = TsVideo()
+                got = False
         except (OSError, ValueError):
             pass
         finally:
@@ -203,6 +255,7 @@ class Feeder:
             self._put(self.aq, None)
 
     def start(self, start_s=0.0):
+        self._video_at = start_s
         proc = self._spawn('video', self.video_cmd(start_s))
         t = threading.Thread(target=self._read_video, args=(proc,), daemon=True)
         t.start()
