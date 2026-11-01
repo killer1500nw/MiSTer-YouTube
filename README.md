@@ -18,10 +18,9 @@ This is stated up front because it is a fair thing for anyone evaluating the cod
 - **Playlists**, **My Videos** (single videos you list), **Watch Later**, **History** with **resume**.
 - **Play URL / ID**, **Add Channel via @handle** and **Add to Lists**: type a link or a handle on an on-screen keyboard or a real keyboard.
 - **Load more videos…** at the end of every channel and playlist, so you can scroll well past the first 15.
-- **Up to 480p video.** Optional **14:9**
+- **Up to 780p video.** Optional **14:9 Crop and Zoom options** 
   and **Fill** crops for widescreen video on a 4:3 screen.
-- **Made for a CRT.** 240p or interlaced 480i output (core menu), with optional analog dither, a 480i flicker filter and a
-  composite blur for the soft look of 80s and 90s TV. Nothing is added unless you switch it on.
+- **Made for a CRT.** 240p or interlaced 480i
 - A pause/seek bar, a speed test, live quality change (More panel), and a diagnostics screen.
 
 Not supported: live streams and past livestreams (YouTube serves those in segments), 60 fps, and sign-in. Age restricted
