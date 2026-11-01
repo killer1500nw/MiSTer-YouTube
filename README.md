@@ -3,8 +3,7 @@
 Browse and watch YouTube on a MiSTer FPGA, on a CRT in 240p or 480i, at up to **480p** video quality, with a gamepad or keyboard. Load the
 **YouTubeCRT** core and a menu appears on screen: your channels, playlists and videos, with thumbnails, resume
 and a playback bar. There is no account or login, and nothing is saved to the card except small lists and a cache. The video streams to the MiSTer's RAM.
-Video is found on the MiSTer itself (yt-dlp and ffmpeg). Either the MiSTer's ARM decodes it and the FPGA core displays it and plays the
-audio (the **YouTubeCRT** core, up to 480p), or, with the optional **H264 core**, the FPGA decodes it (up to **720p**, with the ARM almost idle).
+Video is found on the MiSTer itself (yt-dlp and ffmpeg). It now uses owenb321's MiSTer_h264_decoder to decode video on the FPGA instead of the ARM.
 
 ## How this code was written
 
@@ -19,10 +18,7 @@ This is stated up front because it is a fair thing for anyone evaluating the cod
 - **Playlists**, **My Videos** (single videos you list), **Watch Later**, **History** with **resume**.
 - **Play URL / ID**, **Add Channel via @handle** and **Add to Lists**: type a link or a handle on an on-screen keyboard or a real keyboard.
 - **Load more videos…** at the end of every channel and playlist, so you can scroll well past the first 15.
-- **Up to 480p video.** The ARM only decodes; the FPGA core scales the picture to the CRT (bilinear, with BT.601/709 colour),
-  so a 480p stream plays smoothly on a stock MiSTer. Auto picks a 480p, 360p or 240p stream per video from an estimate of how much
-  the ARM can decode in time and steps down by itself if the picture starts to stutter. A clip that is too heavy for the
-  **Fast** decoder setting is moved to **Fastest** (and remembered) before the picture is made smaller. Optional **14:9**
+- **Up to 480p video.** Optional **14:9**
   and **Fill** crops for widescreen video on a 4:3 screen.
 - **Made for a CRT.** 240p or interlaced 480i output (core menu), with optional analog dither, a 480i flicker filter and a
   composite blur for the soft look of 80s and 90s TV. Nothing is added unless you switch it on.
@@ -47,23 +43,6 @@ The player and helper files live in `/media/fat/Scripts/.config/YouTubeCRT/`.
 Only small menu launchers remain in `Scripts/YouTubeCRT/`; settings, lists, tools and logs stay in `YouTubeNative/`.
 When upgrading an older visible runtime, the installer preserves that folder under
 `Scripts/.config/YouTubeCRT-legacy-*/YouTubeCRT/` before creating the menu launchers.
-
-Full instructions, controls and every setting: [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md).
-
-### Better video with the H264 core (optional)
-
-The ARM in a MiSTer is slow, and decoding 480p video uses all of it. A different FPGA core, the **MiSTer H264 core**
-([owenb321/MiSTer_h264_decoder](https://github.com/owenb321/MiSTer_h264_decoder), GPL-3.0, a separate project that this one
-does not ship), decodes H.264 video in the FPGA. With it this player only repackages YouTube's video (no decoding), so playback
-uses about 5% of one ARM core instead of all of them, and videos play at up to **720p** (when YouTube offers 720p at 30 fps
-or less) with full-quality decoding.
-
-1. Install the player as above, then run **Scripts → YouTubeCRT → Install_H264_Core**. It downloads the core from the author's release page and checks it (nothing of it is in this project's own release).
-2. Load **Other → YouTube (H264)** (the installer creates this entry when the core is on the card). The YouTube menu appears over the core.
-
-What changes: Stream quality has a 720p choice, Auto means "the best H.264 stream the core can play", the crop options still work
-(Fill, 14:9, Off), and the YouTubeCRT core's own extras (240p output, composite blur, flicker filter) are replaced by the H264 core's
-(480i/576i/480p/576p, anti-twitter, analog dither). Details and limits: [docs/YOUTUBECRT.md](docs/YOUTUBECRT.md#the-h264-core).
 
 ## What you can play: links, IDs, playlists and channels
 
@@ -138,26 +117,6 @@ unreliable (random errors even for good channels), so the player retries them an
 - [Build notes](docs/BUILD.md), [project checkpoint](docs/CHECKPOINT.md), [release notes](docs/RELEASE.md),
   [credits](THIRD_PARTY_NOTICES.md).
 
-## The older v0.13 player (YouTubeURL)
-
-The original script-based player and the v0.13-smooth core are still here, unchanged and separate from the above.
-`scripts/YouTubeURL` plays **one video at a time** from a URL or ID you type into a script prompt: no menus, no
-playlists or channels, and a manual start-up sequence. It needs the v0.13 core (`YouTubeCRT_v0.13-smooth.rbf`), not the
-v0.14-auto core.
-
-**Validation of v0.13.6:** it streamed a 14m55s talking clip to completion with user-reported good lip sync. All 179
-sampled FPGA queue readings were 7–8 frames; 26,843 records completed in 894.63 seconds. v0.13.7 adds URL selection.
-
-1. Copy `YouTubeCRT_v0.13-smooth.rbf` to `/media/fat/_Other/` and the whole `scripts/YouTubeURL` folder to
-   `/media/fat/Scripts/YouTubeURL/`.
-2. From the **main MiSTer menu**: Scripts → YouTubeURL → Start_YouTube_URL. Enter a URL or 11-character ID (blank uses
-   the known test clip, Q cancels).
-3. Load v0.13-smooth within two minutes, set **Display = Loaded frame**, then **RAM streaming On for 5 seconds, Off for
-   2 seconds, then On**. Playback stops at the end; `Stop_YouTube_URL` stops it early from the main menu.
-
-Keep your working CRT configuration, including `vga_scaler=0`; nothing here replaces `MiSTer.ini`. Reports go to
-`/media/fat/YouTubeNative/YouTube-url-13-7-XXXXXXXX.txt`; they can contain video titles and IDs, so review before sharing.
-The older scripts inside `fpga/MiSTer-Scripts` are kept for the original FPGA test suite and provenance.
 
 ## Licence
 
