@@ -1,6 +1,6 @@
 # MiSTer YouTube CRT Player
 
-Browse and watch YouTube on a MiSTer FPGA, on a CRT in 240p or 480i, at up to **480p** video quality, with a gamepad or keyboard. Load the
+Browse and watch YouTube on a MiSTer FPGA on a CRT in 240p or 480i, with up to **720p** video playback quality (which helps when cropping and zooming), using a gamepad or keyboard. Load the
 **YouTubeCRT** core and a menu appears on screen: your channels, playlists and videos, with thumbnails, resume
 and a playback bar. There is no account or login, and nothing is saved to the card except small lists and a cache. The video streams to the MiSTer's RAM.
 Video is found on the MiSTer itself (yt-dlp and ffmpeg). It now uses owenb321's MiSTer_h264_decoder to decode video on the FPGA instead of the ARM.
