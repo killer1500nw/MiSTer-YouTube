@@ -1,6 +1,6 @@
 #!/bin/bash
 # One-time setup: install the H264 core, make the YouTube CRT player start at boot, start it now,
-# and report what it sees. After this you never run a script again: load Other > YouTube (H264)
+# and report what it sees. After this you never run a script again: load Other > YouTube H264
 # from the MiSTer menu and the GUI appears.
 set -Eeuo pipefail
 BASE="$(cd -- "$(dirname -- "$0")" && pwd)"
@@ -16,7 +16,7 @@ for OLD in YouTubeCRT_v0.14-auto.rbf YouTubeCRT_v0.15-yuv.rbf YouTubeCRT_v0.16-f
     if [ -f "$DIR/$OLD" ]; then rm -f "$DIR/$OLD" && echo "Removed the old core: $DIR/$OLD"; fi
   done
 done
-# The menu entry for the H264 core (Other > YouTube (H264), with the core's date) is written by the H264 step below.
+# The H264 core (Other > YouTube H264, with the core's date) is installed by the H264 step below.
 command -v python3 >/dev/null || echo "WARNING: python3 not found; the player cannot run."
 echo "Checking the video tools (downloads them if missing; needs internet)..."
 if python3 "$BASE/ytcrt_setup.py" --root "$RT"; then
@@ -61,5 +61,5 @@ sync
 echo "--- player log ($LOG) ---"
 tail -n 8 "$LOG" 2>/dev/null || echo "(no log yet)"
 echo "-------------------------"
-echo "Expected: 'Waiting for the YouTubeCRT core or the H264 core to be loaded...'. Now load Other > YouTube (H264)."
+echo "Expected: 'Waiting for the YouTubeCRT core or the H264 core to be loaded...'. Now load Other > YouTube H264."
 if [ -t 0 ]; then read -r -p "Press Enter to return to MiSTer." _ || true; fi

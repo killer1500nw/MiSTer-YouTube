@@ -43,7 +43,7 @@ Not included: live streams, account login, 60 fps.
 file (about 3 MB). It downloads the H264 core by owenb321 (GPL-3.0, checksum-verified, not bundled) into `_Other`, downloads the ARM builds of yt-dlp, QuickJS, ffmpeg and Node.js
 (checksum-verified), adds the boot entry, starts the player and shows its log
 (*Waiting for the YouTubeCRT core to be loaded...*). It needs internet access and a roughly correct clock. Run it
-again to update. Then load **Other → YouTube (H264)**. The installer removes the older YouTubeCRT cores (v0.14, v0.15, v0.16) from `_Other`.
+again to update. Then load **Other → YouTube H264**. The installer removes the older YouTubeCRT cores (v0.14, v0.15, v0.16) from `_Other`.
 
 That is the last script you run. From then on: **load the YouTubeCRT core from the MiSTer menu
 and the GUI appears.** The player starts the streaming session itself. There is no RAM-streaming
@@ -72,7 +72,7 @@ a separate project that is not part of this repository). It decodes H.264 in the
 the sound. That frees the ARM completely (about 5% of one core during playback) and allows sharper pictures than the ARM can decode.
 
 **Install.** Run **Scripts → YouTubeCRT → Install_H264_Core**. It downloads the one file the player needs (`H264_20261014.rbf`, 4.4 MB) from
-the author's release page, checks it against the checksum published there, puts it in `_Other` and adds **Other → YouTube (H264)** (a `.mgl`
+the author's release page, checks it against the checksum published there, puts it in `_Other` and adds **Other → YouTube H264** (a `.mgl`
 file). Nothing of the core is part of this player's own release. (You can also install the author's whole zip by hand, then run
 `Install_YouTube_CRT.sh` again to add the menu entry.) If the entry does not show up, `Scripts → YouTubeCRT → YouTube_H264` loads the
 core. Load it, and the YouTube menu appears over the core's picture.

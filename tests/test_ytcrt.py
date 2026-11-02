@@ -3317,15 +3317,12 @@ class H264CoreInstaller(unittest.TestCase):
     def test_the_core_is_fetched_from_the_authors_release_checked_and_given_a_menu_entry(self):
         self.setup.setup_h264_core(self.fat)
         other = Path(self.fat) / '_Other'
-        self.assertEqual((other / self.setup.H264_NAME).read_bytes(), self.payload)
+        self.assertEqual((other / self.setup.H264_INSTALLED).read_bytes(), self.payload)
         self.assertEqual(self.fetched, [self.setup.H264_URL])
         self.assertTrue(self.setup.H264_URL.startswith('https://github.com/owenb321/MiSTer_h264_decoder/releases/download/'))
-        entry = 'YouTube (H264)_%s.mgl' % self.setup.H264_NAME[5:13]                  # the core's date is in the entry's name
-        (other / 'YouTube (H264).mgl').write_text('old')                           # an entry from an earlier install is replaced
-        self.setup.setup_h264_core(self.fat)
-        self.assertIn('<rbf>_Other/H264</rbf>', (other / entry).read_text())
+        self.assertEqual(self.setup.H264_INSTALLED, 'YouTube H264_%s.rbf' % self.setup.H264_NAME[5:13])   # MiSTer shows this date in the menu
         self.assertIn('owenb321', (other / 'H264_core_README.txt').read_text())       # the credit travels with the file
-        self.assertEqual(sorted(p.name for p in other.iterdir()), sorted([self.setup.H264_NAME, entry, 'H264_core_README.txt']))
+        self.assertEqual(sorted(p.name for p in other.iterdir()), sorted([self.setup.H264_INSTALLED, 'H264_core_README.txt']))
         self.setup.setup_h264_core(self.fat)                                        # again: already there, nothing is downloaded
         self.assertEqual(len(self.fetched), 1)
 

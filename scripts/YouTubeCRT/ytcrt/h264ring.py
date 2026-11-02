@@ -410,4 +410,4 @@ def launch_core(rbf='_Other/H264', timeout=15.0):
         time.sleep(0.1)
         if core_name() == 'H264':
             return
-    raise RingError('The H264 core did not load (is _Other/H264_*.rbf on the card?).')
+    raise RingError('The H264 core did not load (is _Other/YouTube H264_*.rbf on the card?).')
