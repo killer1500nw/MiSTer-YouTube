@@ -12,6 +12,7 @@ anything already installed is left alone.
                                                               seconds instead of minutes; QuickJS stays as the fallback)
 """
 import argparse
+import re
 import hashlib
 import gzip
 import io
@@ -218,6 +219,12 @@ def setup_ffmpeg(root, dl):
     print('ffmpeg installed (%s).' % final.name)
 
 
+def menu_entry_name(core_name):
+    """The Other-menu entry for the core: its release date (from the core's file name) is in the name, so the menu shows how old the core is."""
+    m = re.search(r'_(\d{8})\.rbf$', core_name)
+    return 'YouTube (H264)%s.mgl' % (('_' + m.group(1)) if m else '')
+
+
 def setup_h264_core(fat):
     """Put the H264 core in /media/fat/_Other (checked against its published SHA-256), plus the menu entry that loads it."""
     other = Path(fat) / '_Other'
@@ -238,9 +245,13 @@ def setup_h264_core(fat):
             if part.exists():
                 part.unlink()
         print('The H264 core is installed: %s' % dest)
-    (other / 'YouTube (H264).mgl').write_text(H264_MGL)
+    entry = menu_entry_name(H264_NAME)
+    for old in other.glob('YouTube (H264)*.mgl'):          # an entry from an earlier install (without the date, or an older core's date)
+        if old.name != entry:
+            old.unlink()
+    (other / entry).write_text(H264_MGL)
     (other / 'H264_core_README.txt').write_text(H264_README)
-    print('Menu entry written: Other > YouTube (H264)')
+    print('Menu entry written: Other > %s' % entry[:-4])
 
 
 def main():
