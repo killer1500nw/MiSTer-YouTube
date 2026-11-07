@@ -3293,6 +3293,39 @@ class SpsCropping(unittest.TestCase):
         self.assertIs(h264sps.crop_access_unit(au, None), au)
 
 
+class H264OverlayAck(unittest.TestCase):
+    """A core that is still starting up can ignore the first menu page; the session is then started again instead of showing nothing."""
+
+    def make(self, seen):
+        from ytcrt import h264link, h264ring as hr
+
+        class Ring:
+            def lo(self, w):
+                return 5
+            def word(self, w):
+                return hr.MAGIC if w == 0 else 0
+            def overlay_seen(self):
+                return seen, 1, 0
+        link = h264link.H264Link()
+        link.ring = Ring()
+        link.heart, link.heart_time, link.last_check = 5, time.monotonic(), time.monotonic()
+        return link, h264link
+
+    def test_an_overlay_the_core_never_reads_ends_the_session(self):
+        link, mod = self.make(seen=0)
+        link.pending_gen, link.pending_at = 7, time.monotonic()
+        link.health()                                                 # not yet overdue
+        link.pending_at = time.monotonic() - mod.OVERLAY_ACK_S - 1
+        with self.assertRaises(mod.CoreGone):
+            link.health()
+
+    def test_an_overlay_the_core_has_read_is_fine(self):
+        link, mod = self.make(seen=7)
+        link.pending_gen, link.pending_at = 7, time.monotonic() - 60
+        link.health()
+        self.assertIsNone(link.pending_gen)
+
+
 class H264CoreInstaller(unittest.TestCase):
     """The opt-in download of the H264 core (fetched from its author's release page and checked, never bundled)."""
 

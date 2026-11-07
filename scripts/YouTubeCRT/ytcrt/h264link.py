@@ -17,6 +17,8 @@ OV_W, OV_H = 640, 480                         # the 320x240 menu doubled in both
 PAGE_BYTES = OV_W * OV_H * 4
 PAGES = yuv.OVERLAYS
 HEART_TIMEOUT = 3.0
+SETTLE_S = 3.0                                 # a core loaded less than this long ago is still starting up: wait before beginning a session
+OVERLAY_ACK_S = 4.0                            # the core must have read a menu page descriptor within this long, or the session is started again
 
 
 class CoreGone(RuntimeError):
@@ -149,6 +151,7 @@ class H264Link:
         self.last_check = 0.0
         self.busy_pages = set()
         self.console_detached = False
+        self.pending_at = 0.0
 
     # attaching ---------------------------------------------------------------------------------------------------------------
     def open(self):
@@ -194,7 +197,18 @@ class H264Link:
                 raise RuntimeError('No live H264 core detected.')
             time.sleep(poll)
 
+    def _settle(self):
+        """A core that has only just been loaded is still starting up and ignores a session begun in its first moments (the menu then
+        never appears). MiSTer writes /tmp/CORENAME when the core starts: give the core a few seconds from then."""
+        try:
+            age = time.time() - os.path.getmtime('/tmp/CORENAME')
+        except OSError:
+            return
+        if 0 <= age < SETTLE_S:
+            time.sleep(SETTLE_S - age)
+
     def start_session(self):
+        self._settle()
         ring = self.ring
         ring.new_session()
         self.fb = t.Framebuffer.open(overlay_only=True)
@@ -251,6 +265,8 @@ class H264Link:
             raise CoreGone('The H264 core stopped (no heartbeat).')
         if ring.word(0) != hr.MAGIC:
             raise CoreGone('The H264 core was reloaded.')
+        if self.pending_gen is not None and not self._acked() and now - self.pending_at > OVERLAY_ACK_S:
+            raise CoreGone('The H264 core did not take the menu overlay within %d s; starting the session again.' % OVERLAY_ACK_S)
 
     # the menu overlay --------------------------------------------------------------------------------------------------------
     def _page_phys(self, idx):
@@ -285,10 +301,12 @@ class H264Link:
         page, _ = self.argb.render(y, u, v)
         ctypes.memmove(self._page_virt(index), (ctypes.c_char * PAGE_BYTES).from_buffer(page), PAGE_BYTES)
         self.pending_gen = self.ring.overlay_show(self._page_phys(index), OV_W, OV_H, OV_W * 4, '8888')
+        self.pending_at = time.monotonic()
         self.shown = index
 
     def hide_overlay(self):
         self.pending_gen = self.ring.overlay_hide()
+        self.pending_at = time.monotonic()
         self.shown = None
 
     def push_picture(self, frame, audio, w, h, crop='Off', flags=0, overlay=None):
