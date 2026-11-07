@@ -1,6 +1,6 @@
 # MiSTer YouTube CRT Player
 
-Browse and watch YouTube on a MiSTer FPGA, on a CRT in 240p or 480i, at up to **480p** video quality, with a gamepad or keyboard. Load the
+Browse and watch YouTube on a MiSTer FPGA on a CRT in 240p or 480i, with up to **720p** video playback quality (which helps when cropping and zooming), using a gamepad or keyboard. Load the
 **YouTubeCRT** core and a menu appears on screen: your channels, playlists and videos, with thumbnails, resume
 and a playback bar. There is no account or login, and nothing is saved to the card except small lists and a cache. The video streams to the MiSTer's RAM.
 Video is found on the MiSTer itself (yt-dlp and ffmpeg). It now uses owenb321's MiSTer_h264_decoder to decode video on the FPGA instead of the ARM.
@@ -18,10 +18,9 @@ This is stated up front because it is a fair thing for anyone evaluating the cod
 - **Playlists**, **My Videos** (single videos you list), **Watch Later**, **History** with **resume**.
 - **Play URL / ID**, **Add Channel via @handle** and **Add to Lists**: type a link or a handle on an on-screen keyboard or a real keyboard.
 - **Load more videos…** at the end of every channel and playlist, so you can scroll well past the first 15.
-- **Up to 480p video.** Optional **14:9**
+- **Up to 780p video.** Optional **14:9 Crop and Zoom options** 
   and **Fill** crops for widescreen video on a 4:3 screen.
-- **Made for a CRT.** 240p or interlaced 480i output (core menu), with optional analog dither, a 480i flicker filter and a
-  composite blur for the soft look of 80s and 90s TV. Nothing is added unless you switch it on.
+- **Made for a CRT.** 240p or interlaced 480i
 - A pause/seek bar, a speed test, live quality change (More panel), and a diagnostics screen.
 
 Not supported: live streams and past livestreams (YouTube serves those in segments), 60 fps, and sign-in. Age restricted
