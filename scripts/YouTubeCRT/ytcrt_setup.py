@@ -12,6 +12,7 @@ anything already installed is left alone.
                                                               seconds instead of minutes; QuickJS stays as the fallback)
 """
 import argparse
+import re
 import hashlib
 import gzip
 import io
@@ -51,11 +52,11 @@ H264_TAG = 'v1.1.0'
 H264_NAME = 'H264_20261014.rbf'
 H264_URL = 'https://github.com/owenb321/MiSTer_h264_decoder/releases/download/%s/%s' % (H264_TAG, H264_NAME)
 H264_SHA256 = '0790a8893789092c542aabc2e1135169b57a1f29bb7663a415fe8a5a33e1bdfb'
-H264_MGL = '<mistergamedescription>\n  <rbf>_Other/H264</rbf>\n</mistergamedescription>\n'
+H264_INSTALLED = 'YouTube H264_%s.rbf' % H264_NAME[5:13]       # MiSTer shows a trailing _YYYYMMDD of a core's file name as its date
 H264_README = (
     'The H264 core in this folder (%s) is the work of owenb321: https://github.com/owenb321/MiSTer_h264_decoder\n'
     'GPL-3.0-or-later; its client library is MIT. Source code and licence: that page (release %s).\n'
-    'It was downloaded from there by the YouTube CRT player\'s Install_H264_Core script. It is not part of the player.\n' % (H264_NAME, H264_TAG))
+    'It was downloaded from there by the YouTube CRT player\'s Install_H264_Core script. It is not part of the player.\n' % (H264_INSTALLED, H264_TAG))
 
 
 def ctx():
@@ -219,12 +220,17 @@ def setup_ffmpeg(root, dl):
 
 
 def setup_h264_core(fat):
-    """Put the H264 core in /media/fat/_Other (checked against its published SHA-256), plus the menu entry that loads it."""
+    """Put the H264 core in /media/fat/_Other (checked against its published SHA-256) as "YouTube H264_<date>.rbf": the date after the
+    underscore is what MiSTer shows beside the entry, so the menu says how old the core is. The core's own name (H264) is unchanged."""
     other = Path(fat) / '_Other'
     other.mkdir(parents=True, exist_ok=True)
-    dest = other / H264_NAME
+    dest = other / H264_INSTALLED
+    legacy = other / H264_NAME                                # the file name the author uses (earlier installs of this player kept it)
     if dest.is_file() and digest(dest, 'sha256') == H264_SHA256:
-        print('The H264 core %s is already installed.' % H264_NAME)
+        print('The H264 core %s is already installed.' % H264_INSTALLED)
+    elif legacy.is_file() and digest(legacy, 'sha256') == H264_SHA256:
+        os.replace(legacy, dest)
+        print('The H264 core is renamed to %s.' % H264_INSTALLED)
     else:
         print('Downloading the H264 core %s (about 4.4 MB) from github.com/owenb321/MiSTer_h264_decoder ...' % H264_NAME, flush=True)
         part = other / (H264_NAME + '.part')
@@ -238,9 +244,10 @@ def setup_h264_core(fat):
             if part.exists():
                 part.unlink()
         print('The H264 core is installed: %s' % dest)
-    (other / 'YouTube (H264).mgl').write_text(H264_MGL)
+    for old in other.glob('YouTube (H264)*.mgl'):             # the menu entry earlier versions wrote (MiSTer shows no date for those)
+        old.unlink()
     (other / 'H264_core_README.txt').write_text(H264_README)
-    print('Menu entry written: Other > YouTube (H264)')
+    print('Menu entry: Other > %s' % H264_INSTALLED[:-4])
 
 
 def main():

@@ -3,7 +3,7 @@
 #
 # The core is the work of owenb321 (https://github.com/owenb321/MiSTer_h264_decoder, GPL-3.0-or-later). It is not part of the YouTube CRT
 # player and is not in its release: this script downloads that one file (about 4.4 MB) from the author's release page and checks it
-# against the checksum published for it, then adds "Other > YouTube (H264)". Run it once; run it again to repair.
+# against the checksum published for it, then adds "Other > YouTube H264". Run it once; run it again to repair.
 set -u
 BASE="$(cd -- "$(dirname -- "$0")" && pwd)"
 echo "Install the H264 core (by owenb321, GPL-3.0)"
@@ -15,7 +15,7 @@ if [ "${1:-}" != "-y" ] && [ -t 0 ]; then
 fi
 if python3 "$BASE/ytcrt_setup.py" --h264-core; then
   echo
-  echo "Done. Open the Other menu and load YouTube (H264)."
+  echo "Done. Open the Other menu and load YouTube H264."
 else
   echo
   echo "The H264 core could not be installed. Check the MiSTer's internet connection and run this script again."
